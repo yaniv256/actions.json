@@ -15,11 +15,26 @@ The skill is the authoring guide.
 1. A coding agent uses the authoring skill to explore a website.
 2. The agent writes `actions.json` as durable memory of the site's operations.
 3. The browser runtime is injected into the page.
-4. The runtime loads `actions.json` and exposes a Messages-style bridge API.
+4. The runtime loads `actions.json` and exposes the Actions Bridge Protocol.
 5. The MCP adapter exposes the actions as tools to the coding agent.
 6. The coding agent calls a tool.
-7. The MCP adapter translates that call into a Messages-style action request.
+7. The MCP adapter translates that call into an Actions Bridge Protocol action request.
 8. The runtime receives the request, performs the DOM operation, and returns a structured result.
+
+## Bridge Protocol
+
+The Actions Bridge Protocol is the runtime-facing protocol for action execution.
+
+It is modeled primarily on OpenAI Responses-style item semantics:
+
+- typed input/output items
+- explicit action/tool calls
+- explicit action/tool outputs
+- stable correlation IDs
+- structured errors and timeouts
+- transport-independent delivery
+
+Adapters can map this protocol to OpenAI Responses, OpenAI Realtime, Anthropic Messages, MCP tools, and other agent runtimes.
 
 ## Deployment Topologies
 

@@ -4,6 +4,13 @@
 
 The goal is to turn websites from visual surfaces into agent-operable software.
 
+This project defines two related standards:
+
+1. the `actions.json` schema for describing website actions
+2. the Actions Bridge Protocol for carrying those actions between an agent adapter and a browser runtime
+
+The Actions Bridge Protocol is modeled primarily on OpenAI Responses-style item semantics: typed input/output items, explicit tool/action requests, structured action results, stable correlation IDs, and transport-independent delivery.
+
 This repository contains three public components:
 
 - an agent skill for authoring `actions.json`
@@ -31,7 +38,7 @@ The core rule is: keep the shared implementation portable first, then add thin w
 
 `actions.json` is the map.
 
-The injected runtime is the interpreter. It loads `actions.json`, attaches to the DOM, and exposes a Messages-style API.
+The injected runtime is the interpreter. It loads `actions.json`, attaches to the DOM, and exposes the Actions Bridge Protocol.
 
 The MCP adapter is the translator. It exposes actions as coding-agent tools and talks to the runtime over the bridge protocol.
 

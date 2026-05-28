@@ -20,6 +20,7 @@ actions.json/
     repo-structure.md
     bridge-architecture.md
     actions-json-format.md
+    actions-bridge-protocol.md
   skills/
     core/
       SKILL.md
@@ -87,6 +88,6 @@ Wrappers adapt the core skill to each environment:
 
 ### Browser Runtime
 
-`runtime/actions-json-runtime/` loads and validates `actions.json`, attaches to the DOM, and exposes the bridge protocol. It is the interpreter.
+`runtime/actions-json-runtime/` loads and validates `actions.json`, attaches to the DOM, and exposes the Actions Bridge Protocol. It is the interpreter.
 
 The runtime and MCP adapter may be co-located, or connected over WebSocket, a tunnel, a hosted relay, browser extension ports, Playwright/CDP, or another transport.
