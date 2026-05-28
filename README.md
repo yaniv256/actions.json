@@ -11,3 +11,7 @@ This repository will contain the public implementation:
 - an injectable JavaScript runtime that loads `actions.json` in the browser and exposes a Messages-style bridge API
 
 Status: name claimed; implementation coming next.
+
+## License
+
+MIT
