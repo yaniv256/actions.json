@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>actions.json simple form example</title>
+  </head>
+  <body>
+    <main>
+      <h1>Simple Form</h1>
+      <form id="contact-form">
+        <label>
+          Name
+          <input id="name" name="name" autocomplete="name">
+        </label>
+        <button id="submit" type="submit">Submit</button>
+      </form>
+      <output id="result"></output>
+    </main>
+    <script>
+      document.getElementById("contact-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const name = document.getElementById("name").value || "anonymous";
+        document.getElementById("result").textContent = `Submitted ${name}`;
+      });
+    </script>
+  </body>
+</html>

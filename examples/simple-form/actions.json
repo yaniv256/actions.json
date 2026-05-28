@@ -1,0 +1,37 @@
+{
+  "protocol": "actions.json",
+  "version": 1,
+  "actions": [
+    {
+      "name": "submit_contact_name",
+      "description": "Fill the contact form name field and submit the form.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": ["name"],
+        "additionalProperties": false
+      },
+      "handler": {
+        "type": "dom",
+        "steps": [
+          {
+            "op": "setValue",
+            "selector": "#name",
+            "valueFrom": "name"
+          },
+          {
+            "op": "click",
+            "selector": "#submit"
+          }
+        ]
+      },
+      "result": {
+        "selector": "#result"
+      }
+    }
+  ]
+}

@@ -4,13 +4,38 @@
 
 The goal is to turn websites from visual surfaces into agent-operable software.
 
-This repository will contain the public implementation:
+This repository contains three public components:
 
 - an agent skill for authoring `actions.json`
-- an MCP adapter that exposes actions as coding-agent tools
+- an MCP adapter that exposes website actions as coding-agent tools
 - an injectable JavaScript runtime that loads `actions.json` in the browser and exposes a Messages-style bridge API
 
-Status: name claimed; implementation coming next.
+## Repository Shape
+
+```text
+docs/                         Human-facing specs and architecture notes
+skills/core/                  Portable SKILL.md for any SKILL.md-compatible agent
+skills/codex/                 Codex wrapper and Codex-specific metadata
+skills/claude-code/           Claude Code wrapper/plugin-facing skill
+skills/openclaw/              OpenClaw wrapper skill
+skills/pi/                    Pi-compatible wrapper skill
+mcp/actions-json-mcp/         MCP adapter for coding agents
+runtime/actions-json-runtime/ Injectable browser runtime and bridge interpreter
+examples/                     Small websites and action maps for tests/docs
+adapters/                     Runtime/agent-specific packaging glue
+```
+
+The core rule is: keep the shared implementation portable first, then add thin wrappers for each agent runtime.
+
+## Architecture
+
+`actions.json` is the map.
+
+The injected runtime is the interpreter. It loads `actions.json`, attaches to the DOM, and exposes a Messages-style API.
+
+The MCP adapter is the translator. It exposes actions as coding-agent tools and talks to the runtime over the bridge protocol.
+
+The skill is the authoring guide. It teaches an agent how to explore a website and write `actions.json` as durable operating memory.
 
 ## License
 
