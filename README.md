@@ -4,6 +4,12 @@
 
 The goal is to turn websites from visual surfaces into agent-operable software.
 
+<p align="center">
+  <a href="https://yaniv256.github.io/actions.json/decks/schema-v1-proposal-deck.html">
+    <img src="docs/assets/schema-v1-teaching-deck-preview.gif" alt="Animated preview of the actions.json schema v1 teaching deck" width="960">
+  </a>
+</p>
+
 This project defines two related standards:
 
 1. the `actions.json` schema for describing website actions
