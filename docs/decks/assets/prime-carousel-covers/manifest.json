@@ -1,0 +1,74 @@
+[
+  {
+    "title": "Planet Earth: Mammals",
+    "category": "Nature & Wildlife Documentaries",
+    "asset": "assets/prime-carousel-covers/01-planet-earth-mammals.jpg",
+    "url": "https://www.amazon.com/gp/video/detail/B0FLX24KFS"
+  },
+  {
+    "title": "Oklahoma!",
+    "category": "Arts, Music & Stage",
+    "asset": "assets/prime-carousel-covers/02-oklahoma.png",
+    "url": "https://www.amazon.com/gp/video/detail/B0GTCNSVJZ"
+  },
+  {
+    "title": "A Complete Unknown",
+    "category": "Film & Filmmaking",
+    "asset": "assets/prime-carousel-covers/03-a-complete-unknown.jpg",
+    "url": "https://www.amazon.com/gp/video/detail/B0DTSMPZ5L"
+  },
+  {
+    "title": "8\u00bd",
+    "category": "Film & Filmmaking",
+    "asset": "assets/prime-carousel-covers/04-8.png",
+    "url": "https://www.amazon.com/gp/video/detail/B0B84ZFXM2"
+  },
+  {
+    "title": "Great Performances: Now Hear This",
+    "category": "Arts, Music & Stage",
+    "asset": "assets/prime-carousel-covers/05-great-performances-now-hear-this.jpg",
+    "url": "https://www.amazon.com/gp/video/detail/B0CZB73TQ5"
+  },
+  {
+    "title": "Westworld",
+    "category": "Sci-Fi & Speculative Drama",
+    "asset": "assets/prime-carousel-covers/06-westworld.jpg",
+    "url": "https://www.amazon.com/gp/video/detail/B0B8QV2SJG"
+  },
+  {
+    "title": "Nick DiGiovanni",
+    "category": "Food & Creator Shows",
+    "asset": "assets/prime-carousel-covers/07-nick-digiovanni.jpg",
+    "url": "https://www.amazon.com/gp/video/detail/B0DYBKN6JM"
+  },
+  {
+    "title": "Frozen Planet II",
+    "category": "Nature & Wildlife Documentaries",
+    "asset": "assets/prime-carousel-covers/08-frozen-planet-ii.jpg",
+    "url": "https://www.amazon.com/gp/video/detail/B0DNTQ3H4Y"
+  },
+  {
+    "title": "American Girl: School Rules!",
+    "category": "Kids & Family Animation",
+    "asset": "assets/prime-carousel-covers/09-american-girl-school-rules.jpg",
+    "url": "https://www.amazon.com/gp/video/detail/B0FWHKSYYW"
+  },
+  {
+    "title": "Art's Wildest Movement: Mannerism",
+    "category": "Arts, Music & Stage",
+    "asset": "assets/prime-carousel-covers/10-art-s-wildest-movement-mannerism.jpg",
+    "url": "https://www.amazon.com/gp/video/detail/B0G2ZYGLXH"
+  },
+  {
+    "title": "Planet Earth III",
+    "category": "Nature & Wildlife Documentaries",
+    "asset": "assets/prime-carousel-covers/11-planet-earth-iii.jpg",
+    "url": "https://www.amazon.com/gp/video/detail/B0FPRMVXLK"
+  },
+  {
+    "title": "Fallout",
+    "category": "Sci-Fi & Speculative Drama",
+    "asset": "assets/prime-carousel-covers/12-fallout.png",
+    "url": "https://www.amazon.com/gp/video/detail/B0CN4J59BF"
+  }
+]
