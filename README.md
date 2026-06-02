@@ -38,6 +38,17 @@ The core rule is: keep the shared implementation portable first, then add thin w
 
 The first schema proposal is [docs/schema-v1-proposal.md](docs/schema-v1-proposal.md). It is derived from working `actions.json` manifests for a Kanban board, a chess port, and a slide deck, then revised with target descriptors, state machines, DOM attachments, inspectable execution steps, live checks, imports, signals, and Responses-style bridge bindings.
 
+## Documentation
+
+- [Schema v1 proposal](docs/schema-v1-proposal.md)
+- [Schema v1 teaching deck](https://yaniv256.github.io/actions.json/decks/schema-v1-proposal-deck.html)
+- [actions.json format](docs/actions-json-format.md)
+- [Actions Bridge Protocol](docs/actions-bridge-protocol.md)
+- [Bridge architecture](docs/bridge-architecture.md)
+- [actions.json.storage proposal](docs/actions-json-storage.md)
+- [Storage visibility scopes](docs/storage-visibility-scopes.md)
+- [Repository structure](docs/repo-structure.md)
+
 ## Architecture
 
 `actions.json` is the map.
