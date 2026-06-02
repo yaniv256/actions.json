@@ -17,10 +17,25 @@
       <output id="result"></output>
     </main>
     <script>
+      window.contactForm = {
+        submitName({ name }) {
+          document.getElementById("name").value = name;
+          document.getElementById("submit").click();
+          return {
+            ok: true,
+            result: document.getElementById("result").textContent
+          };
+        }
+      };
+
       document.getElementById("contact-form").addEventListener("submit", (event) => {
         event.preventDefault();
         const name = document.getElementById("name").value || "anonymous";
-        document.getElementById("result").textContent = `Submitted ${name}`;
+        const result = `Submitted ${name}`;
+        document.getElementById("result").textContent = result;
+        document.dispatchEvent(new CustomEvent("contact:submitted", {
+          detail: { name, result }
+        }));
       });
     </script>
   </body>

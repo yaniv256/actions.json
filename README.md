@@ -15,7 +15,7 @@ This repository contains three public components:
 
 - an agent skill for authoring `actions.json`
 - an MCP adapter that exposes website actions as coding-agent tools
-- an injectable JavaScript runtime that loads `actions.json` in the browser and exposes a Messages-style bridge API
+- an injectable JavaScript runtime that loads `actions.json` in the browser and exposes an item-based bridge API
 
 ## Repository Shape
 
@@ -33,6 +33,10 @@ adapters/                     Runtime/agent-specific packaging glue
 ```
 
 The core rule is: keep the shared implementation portable first, then add thin wrappers for each agent runtime.
+
+## Draft Schema
+
+The first schema proposal is [docs/schema-v1-proposal.md](docs/schema-v1-proposal.md). It is derived from working `actions.json` manifests for a Kanban board, a chess port, and a slide deck, then revised with target descriptors, state machines, DOM attachments, inspectable execution steps, live checks, imports, signals, and Responses-style bridge bindings.
 
 ## Architecture
 
