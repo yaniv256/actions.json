@@ -1,0 +1,5 @@
+mcp/actions-json-mcp/target/
+node_modules/
+
+test-results/
+playwright-report/

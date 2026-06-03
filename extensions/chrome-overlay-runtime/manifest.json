@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "actions.json Overlay Runtime",
+  "version": "0.1.11",
+  "description": "Experimental actions.json runtime that can render agent-provided HTML overlays on authorized tabs.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "actions.json Overlay Runtime"
+  },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "web_accessible_resources": [
+    {
+      "resources": ["actions/overlay.actions.json"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "scripts": {
+    "test:overlay-runtime": "playwright test extensions/chrome-overlay-runtime/tests/overlay-runtime-characterization.spec.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.60.0"
+  }
+}

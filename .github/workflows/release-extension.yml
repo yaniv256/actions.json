@@ -1,0 +1,26 @@
+name: Release Chrome extension
+
+on:
+  push:
+    tags:
+      - "extension-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package-extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Package extension
+        run: bash scripts/package-extension.sh --version "${GITHUB_REF_NAME#extension-v}" --out-dir dist
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          files: |
+            dist/actions-json-overlay-runtime-*.zip
+            dist/SHA256SUMS.txt
