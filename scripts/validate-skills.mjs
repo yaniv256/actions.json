@@ -54,6 +54,9 @@ const core = await readFile("skills/core/SKILL.md", "utf8");
 for (const phrase of [
   "Chrome Extension",
   "Bookmarklet / Embed",
+  "Getting Started",
+  "Start the MCP bridge",
+  "Verify the system is connected",
   "Stable MCP Tool Pattern",
   "Use the debugger to learn. Use `actions.json` to operate.",
   "Syncing Private/Dev Work To Public",

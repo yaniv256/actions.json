@@ -29,6 +29,112 @@ The project has three cooperating pieces:
 The extension and bookmarklet should share the same primitive dictionary and
 runtime contract. They differ only in host capability.
 
+## Getting Started
+
+Use the repo-local paths in the checkout you are working from. The examples
+below assume the repo root is the current directory.
+
+### 1. Install dependencies and build the bookmarklet
+
+```bash
+npm install
+npm run build:storage-bookmarklet
+```
+
+The build produces:
+
+```text
+runtime/actions-json-runtime/bookmarklet/install.html
+runtime/actions-json-runtime/bookmarklet/storage-bookmarklet.url
+```
+
+Open `runtime/actions-json-runtime/bookmarklet/install.html` in Chrome and drag
+the `actions.json` link into the bookmarks bar. If drag install is unavailable,
+copy the single `javascript:` URL from `storage-bookmarklet.url` into a browser
+bookmark.
+
+### 2. Install the Chrome extension runtime
+
+In Chrome:
+
+1. Open `chrome://extensions`.
+2. Enable Developer Mode.
+3. Choose **Load unpacked**.
+4. Select `extensions/chrome-overlay-runtime` from this checkout.
+
+On each page the agent should control, click the extension and authorize the
+current tab. Authorized tabs should appear in the `actions.json` browser tab
+group when controlled-tab grouping is available.
+
+### 3. Start the MCP bridge
+
+Run the bridge from the repo checkout. Use `--storage-root` when you have an
+`actions.json.storage` checkout available.
+
+```bash
+cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- serve \
+  --actions extensions/chrome-overlay-runtime/actions/overlay.actions.json \
+  --storage-root ../actions.json.storage
+```
+
+The bridge listens on `127.0.0.1:17345` by default. If the browser is on another
+machine, connect it through SSH, Tailscale, or another tunnel so the browser can
+dial the bridge endpoint. From the browser's point of view it is still dialing
+the configured local endpoint.
+
+### 4. Connect runtimes
+
+Extension runtime:
+
+1. Start the bridge.
+2. Open the target page.
+3. Authorize the page through the extension popup.
+4. The extension connects to the bridge WebSocket.
+
+Bookmarklet/embed runtime:
+
+1. Start the bridge.
+2. Open the target page.
+3. Click the `actions.json` bookmarklet.
+4. If direct bridge transport is blocked by page CSP, authorize the extension on
+   the same tab and let the bookmarklet use extension-assisted relay for parity
+   testing.
+
+### 5. Verify the system is connected
+
+Check the bridge directly:
+
+```bash
+curl -s http://127.0.0.1:17345/runtimes
+curl -s http://127.0.0.1:17345/mcp/tools/list
+```
+
+Expected result:
+
+- `/runtimes` shows the extension and/or bookmarklet runtimes for the target
+  pages, including URL and runtime id.
+- `/mcp/tools/list` shows a stable generic tool surface such as `actions.site`,
+  `storage.sync`, `storage.list`, `browser.screenshot`, and runtime primitives.
+
+If the runtime does not appear:
+
+- confirm the bridge is running;
+- refresh or reauthorize the extension tab;
+- rerun the bookmarklet on the target page;
+- check whether page CSP blocks direct bookmarklet transport;
+- avoid restarting the bridge for ordinary `actions.json` edits; use reload/sync
+  paths instead.
+
+### 6. Load page-relevant storage
+
+Use the bookmarklet UI or the MCP storage sync tool to load the relevant site
+folder from `actions.json.storage`. Prefer loading only the current site's
+folder, not the entire storage tree, unless you are testing root-folder
+discovery.
+
+After syncing storage, ask the stable site action tool which actions are
+available for the current page before reaching for debugger tools.
+
 ## Runtime Hosts
 
 ### Chrome Extension
