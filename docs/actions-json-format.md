@@ -1,55 +1,200 @@
 # actions.json Format
 
-## Purpose
+An `actions.json` file describes how an agent can operate one website, web app,
+or page surface.
 
-`actions.json` is a readable website action map.
+It is meant to be readable by three audiences:
 
-It describes the actions a website exposes so agents can operate the site through declared affordances instead of rediscovering the DOM on every run.
+- an agent choosing what action to call;
+- a browser runtime validating and executing that action;
+- a human reviewer checking what authority the file grants.
 
-## Standard Scope
+Use this guide when writing or reviewing a site action map. For field-level
+details, see the [Schema V1 Reference](schema-v1-proposal.md).
 
-The project defines:
+## What Belongs In actions.json
 
-1. the `actions.json` schema
-2. the Actions Bridge Protocol used to execute those actions through a browser runtime
+An action map should answer four questions:
 
-## Schema Direction
+1. **Where does this map apply?** Describe the site or surface.
+2. **What can the agent do?** Declare named actions with input and output
+   schemas.
+3. **How does the runtime perform each action?** Reference primitive steps,
+   handlers, targets, or attachments that the runtime can validate.
+4. **How does the agent know whether the page still matches the map?** Include
+   targets, states, checks, and observations where they are useful.
 
-The schema should describe:
+An `actions.json` file should not be a hidden automation script. Avoid opaque
+JavaScript blobs. Prefer declared actions built from documented runtime
+primitives, selectors, target descriptions, and result schemas.
 
-- protocol name and version
-- website/surface metadata
-- map imports, namespaces, source trust, and override policy
-- action names
-- human-readable action descriptions
-- input schemas
-- output/result shapes
-- live-DOM target descriptors
-- JavaScript handler mappings
-- inspectable execution steps
-- DOM event mappings
-- source hints
-- scoped agent context loaded during website traversal
-- page/component/runtime states
-- state diagnostics and transition edges that identify the tool to call
-- DOM attachment points and reattachment policy
-- live-site checks, drift severity, and contingency paths
-- signal-to-protocol conversion
-- prompt/context guidance for agents
-- provenance and revision metadata
+## Minimal Shape
 
-## Current Draft
+```json
+{
+  "protocol": "actions.json",
+  "version": 1,
+  "surface": {
+    "origin": "https://example.com",
+    "name": "Example task page"
+  },
+  "tools": []
+}
+```
 
-The current first-pass schema is in [schema-v1-proposal.md](schema-v1-proposal.md).
+`tools` may be empty when the file only provides metadata or context, but most
+useful maps declare one or more actions.
 
-That schema is derived from working browser-action prototypes where `actions.json` powered a Kanban board, a chess surface, and an animated slide deck. The portable draft generalizes prototype-specific bridge metadata into `x_actions`.
+## A Small Action Example
 
-The ACT-5 revision keeps that catalog layer and adds the runtime geography needed for living websites: target descriptors, scoped agent context, states, transition edges, attachments, checks, imports, signal conversion, and Responses-style protocol bindings.
+```json
+{
+  "protocol": "actions.json",
+  "version": 1,
+  "surface": {
+    "origin": "https://example.com",
+    "name": "Example search page"
+  },
+  "tools": [
+    {
+      "name": "search.submit",
+      "description": "Search for a query from the site search form.",
+      "input_schema": {
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+          "query": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "target": {
+        "selector": "form[role='search']",
+        "role": "search",
+        "name": "Site search"
+      },
+      "x_actions": {
+        "execution": {
+          "mode": "steps_first",
+          "steps": [
+            {
+              "id": "focus_search",
+              "type": "click",
+              "target": { "selector": "input[name='q']" }
+            },
+            {
+              "id": "type_query",
+              "type": "type",
+              "target": { "selector": "input[name='q']" },
+              "value_from": "query"
+            },
+            {
+              "id": "submit",
+              "type": "click",
+              "target": { "selector": "button[type='submit']" }
+            }
+          ]
+        },
+        "result_schema": {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean" },
+            "url": { "type": "string" }
+          },
+          "required": ["ok"]
+        }
+      }
+    }
+  ]
+}
+```
 
-## Non-Goals
+This example is intentionally small. Real maps can also declare context blocks,
+states, transitions, attachments, imports, signals, and checks.
 
-`actions.json` should not be a hidden automation binary.
+Implementation pending: the `steps_first` execution shape shown here is schema
+direction, not a complete current runtime feature. Today, use implemented
+primitive handlers or the supported site-action patterns when you need an action
+to execute through the bridge.
 
-It should remain readable, auditable, and comparable against the live website.
+## Actions And Primitives
 
-It should not require one specific model provider, one browser automation library, or one agent runtime.
+Agents should call site actions when they exist. A site action is a named,
+reviewable operation such as `search.submit`, `inbox.open_message`, or
+`catalog.collect_visible_items`.
+
+Under the action, the runtime executes primitives such as:
+
+- pointer movement and clicks;
+- typing or key presses;
+- viewport scrolling;
+- locator inspection;
+- DOM text extraction;
+- overlay rendering;
+- storage sync.
+
+Some primitives are portable across extension and bookmarklet/embed hosts.
+Others require privileged browser capabilities, such as screenshots or tab
+management. A portable action should only use primitives available in the
+portable runtime. If an action requires privileged capability, mark that
+requirement clearly so bookmarklet/embed runtimes can reject it with a useful
+error.
+
+## Authoring Workflow
+
+Use debugger tools to learn how a page works. Do not leave the learning trapped
+in a one-off debugger call.
+
+Recommended loop:
+
+1. Load the relevant site storage.
+2. Ask which actions already exist for the current site.
+3. Use existing actions first.
+4. If an action is missing or broken, use screenshots, DOM inspection, or
+   debugger-only probes to understand the page.
+5. Convert the discovery into an `actions.json` action using documented
+   primitives, targets, inputs, outputs, and checks.
+6. Reload or sync the updated storage.
+7. Retest the workflow using the stored action, not the debugger.
+
+The proof of a good action map is that the next agent can operate the page
+through declared actions without rediscovering the implementation.
+
+## Naming Actions
+
+Use stable dotted names:
+
+```text
+surface.operation
+surface.collection.operation
+```
+
+Examples:
+
+- `search.submit`
+- `carousel.collect_visible`
+- `carousel.scroll_right`
+- `overlay.open_categories`
+- `profile.read_visible_posts`
+
+Names should describe the user-visible operation, not the implementation detail.
+Prefer `carousel.scroll_right` over `click_button_3`.
+
+## What To Avoid
+
+Avoid:
+
+- absolute local file paths;
+- private account identifiers in public maps;
+- raw tokens, cookies, local storage, or secrets;
+- site-specific debug scripts masquerading as portable actions;
+- action names tied to a transient DOM layout;
+- duplicated copies of actions already provided by an imported map;
+- actions that click or type without describing the visible target.
+
+## Next References
+
+- Read [Schema V1 Reference](schema-v1-proposal.md) for field definitions.
+- Read [Primitive Dictionary Architecture](primitive-dictionary-architecture.md)
+  to understand portable and privileged primitive capability boundaries.
+- Read [actions.json.storage](actions-json-storage.md) to understand where site
+  maps, observations, runs, and overlays are stored.
