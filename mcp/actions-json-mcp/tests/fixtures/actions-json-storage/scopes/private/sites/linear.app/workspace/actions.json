@@ -1,0 +1,175 @@
+{
+  "protocol": "actions.json",
+  "version": "0.1.0-draft",
+  "surface": {
+    "origin": "https://linear.app",
+    "name": "Linear web app",
+    "observed_url": "https://linear.app/actionsjson/team/ACT/views/issues"
+  },
+  "observed_at": "2026-06-02T07:00:00-05:00",
+  "tools": [
+    {
+      "name": "create_top_level_work_view",
+      "description": "Create a Linear issue view for the current user's assigned work with sub-issues hidden by default, so parent issues appear as one row and child issues are revealed by opening the parent.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "view_name"
+        ],
+        "properties": {
+          "view_name": {
+            "type": "string",
+            "default": "My top-level work"
+          },
+          "description": {
+            "type": "string",
+            "default": "Assigned work with sub-issues hidden by default; open a parent issue to inspect its child tasks."
+          },
+          "assignee": {
+            "type": "string",
+            "default": "Current user"
+          },
+          "team_scope": {
+            "type": "string",
+            "default": "Actions.json"
+          }
+        }
+      },
+      "result_schema": {
+        "type": "object",
+        "properties": {
+          "view_url": {
+            "type": "string"
+          },
+          "visible_todo_count": {
+            "type": "integer"
+          },
+          "hidden_sub_issue_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "x_actions": {
+        "navigation": [
+          {
+            "step": "open_team_views",
+            "method": "navigate",
+            "url_template": "https://linear.app/{workspace_slug}/team/{team_key}/views/issues"
+          },
+          {
+            "step": "open_new_view_editor",
+            "method": "click",
+            "selector_hints": [
+              "button[aria-label='Create new view']",
+              "button:has-text('Create new view')"
+            ]
+          },
+          {
+            "step": "name_view",
+            "method": "fill",
+            "selector_hints": [
+              "input[name='name']"
+            ],
+            "value_from": "view_name"
+          },
+          {
+            "step": "describe_view",
+            "method": "fill",
+            "selector_hints": [
+              "input[name='description']"
+            ],
+            "value_from": "description"
+          },
+          {
+            "step": "open_filter_menu",
+            "method": "click",
+            "selector_hints": [
+              "button[aria-label='Add filter']"
+            ]
+          },
+          {
+            "step": "select_assignee_filter",
+            "method": "menu_select",
+            "selector_hints": [
+              "[role='option']:has-text('Assignee')",
+              "[role='option']:has-text('Current user')"
+            ]
+          },
+          {
+            "step": "open_display_options",
+            "method": "click",
+            "selector_hints": [
+              "button[aria-label='Display options']"
+            ]
+          },
+          {
+            "step": "hide_sub_issues",
+            "method": "toggle",
+            "label": "Show sub-issues",
+            "target_state": false,
+            "observed_effect": "The Todo group dropped from 7 visible rows to 3, and Linear showed '4 issues hidden by display options'."
+          },
+          {
+            "step": "save_view",
+            "method": "click",
+            "selector_hints": [
+              "button[type='submit']:has-text('Save')",
+              "button:has-text('Save')"
+            ]
+          }
+        ],
+        "learned_dom": {
+          "issue_rows": {
+            "selector_hints": [
+              "a[href*='/issue/ACT-']"
+            ],
+            "child_indicator": "Child issues render a parent breadcrumb in the row text, for example 'ACT-14 ... \u203a Prototype actions.json browser extension and MCP bridge'.",
+            "parent_indicator": "Parent issues render an expandable child-count affordance, for example '0/4'."
+          },
+          "filter_menu": {
+            "entry": "button[aria-label='Add filter']",
+            "relations_path": [
+              "Relations",
+              "Parent issues",
+              "Sub-issues"
+            ],
+            "assignee_path": [
+              "Assignee",
+              "Current user"
+            ]
+          },
+          "display_options": {
+            "entry": "button[aria-label='Display options']",
+            "sub_issue_toggle_label": "Show sub-issues",
+            "note": "For overload reduction, the display option is better than filtering for 'Parent issues' because it preserves ordinary top-level issues such as ACT-5 and ACT-9 while hiding only child rows."
+          }
+        },
+        "successful_run": {
+          "created_view_name": "My top-level work",
+          "created_view_url": "https://linear.app/actionsjson/view/my-top-level-work-b9b7c1a67fc5",
+          "visible_groups": [
+            {
+              "name": "Todo",
+              "visible_count": 3,
+              "visible_issue_ids": [
+                "ACT-10",
+                "ACT-9",
+                "ACT-5"
+              ]
+            },
+            {
+              "name": "Backlog",
+              "visible_count": 3,
+              "visible_issue_ids": [
+                "ACT-6",
+                "ACT-8",
+                "ACT-7"
+              ]
+            }
+          ],
+          "hidden_by_display_options": 4
+        }
+      }
+    }
+  ]
+}

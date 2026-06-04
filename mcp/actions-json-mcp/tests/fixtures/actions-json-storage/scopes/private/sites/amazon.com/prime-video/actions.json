@@ -1,0 +1,286 @@
+{
+  "protocol": "actions.json",
+  "version": "0.1.0-draft",
+  "surface": {
+    "origin": "https://www.amazon.com",
+    "name": "Amazon Prime Video storefront",
+    "surface_id": "prime-video.continue-watching"
+  },
+  "prompt": {
+    "title": "Prime Video Continue Watching",
+    "instructions": "Operate only the user-authorized Prime Video page surface. Do not inspect account settings, payments, orders, cookies, tokens, local storage, or unrelated private data.",
+    "state_summary": "The Continue Watching carousel is stateful. Inspect visible cards, scroll horizontally at most once per second when more cards may be hidden, then collect newly revealed cards until no new stable detail URLs are observed.",
+    "source": {
+      "selectors": [
+        "a[href*='/gp/video/detail/']",
+        "img[src*='pv-target-images']"
+      ],
+      "component": "Prime Video carousel"
+    }
+  },
+  "states": [
+    {
+      "name": "storefront_loaded",
+      "description": "Prime Video storefront is open and authenticated enough to show rows of content.",
+      "diagnostics": [
+        {
+          "name": "find_continue_watching_heading",
+          "description": "Look for the Continue Watching row in the visible document text."
+        }
+      ],
+      "observables": [
+        "page_url",
+        "row_headings"
+      ]
+    },
+    {
+      "name": "continue_watching_visible",
+      "description": "The Continue Watching carousel is visible and at least one card can be extracted.",
+      "diagnostics": [
+        {
+          "name": "collect_visible_cards",
+          "description": "Extract visible card title, Prime detail URL, and cover image URL."
+        },
+        {
+          "name": "detect_carousel_position",
+          "description": "Compare newly visible stable detail URLs against the collection set."
+        }
+      ],
+      "observables": [
+        "visible_card_count",
+        "visible_detail_urls",
+        "visible_cover_urls",
+        "new_detail_url_count"
+      ]
+    },
+    {
+      "name": "carousel_scrolled",
+      "description": "The carousel has been horizontally scrolled and may reveal a different slice of cards.",
+      "diagnostics": [
+        {
+          "name": "collect_visible_cards_after_scroll",
+          "description": "Wait for the carousel to settle, then extract cards again."
+        }
+      ],
+      "observables": [
+        "scroll_direction",
+        "new_detail_url_count"
+      ]
+    },
+    {
+      "name": "collection_complete",
+      "description": "Repeated inspection and allowed scroll transitions no longer reveal new stable detail URLs.",
+      "observables": [
+        "total_unique_items",
+        "last_transition_result"
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "name": "locate_continue_watching",
+      "from": "storefront_loaded",
+      "to": "continue_watching_visible",
+      "preconditions": [
+        "user_is_on_prime_video_storefront"
+      ],
+      "reveals": [
+        "visible_continue_watching_cards"
+      ]
+    },
+    {
+      "name": "scroll_carousel_left_or_right",
+      "from": "continue_watching_visible",
+      "to": "carousel_scrolled",
+      "preconditions": [
+        "carousel_has_more_content_or_user_requests_full_collection"
+      ],
+      "method": "horizontal_scroll_gesture",
+      "rate_limit_ms": 1000,
+      "parameters": {
+        "scrollX": {
+          "type": "integer",
+          "description": "Horizontal scroll delta. Use sign according to current browser direction and observed carousel movement."
+        },
+        "scrollY": {
+          "const": 0
+        }
+      },
+      "reveals": [
+        "additional_cards"
+      ],
+      "do_not_use": [
+        "left-side click for carousel movement"
+      ]
+    },
+    {
+      "name": "merge_new_cards",
+      "from": "carousel_scrolled",
+      "to": "continue_watching_visible",
+      "preconditions": [
+        "carousel_settled_after_scroll"
+      ],
+      "reveals": [
+        "updated_unique_item_set"
+      ]
+    },
+    {
+      "name": "finish_when_no_new_cards",
+      "from": "continue_watching_visible",
+      "to": "collection_complete",
+      "preconditions": [
+        "no_new_detail_urls_after_allowed_scrolls"
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "prime_video.continue_watching.collect",
+      "description": "Collect all reachable Continue Watching carousel cards by repeatedly inspecting visible cards and using rate-limited horizontal scroll transitions.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "max_scrolls": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 8
+          },
+          "min_scroll_interval_ms": {
+            "type": "integer",
+            "minimum": 1000,
+            "default": 1000
+          },
+          "include_cover_urls": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "scope": "active_surface",
+        "state_machine": {
+          "initial_state": "storefront_loaded",
+          "terminal_state": "collection_complete",
+          "diagnostics": [
+            "find_continue_watching_heading",
+            "collect_visible_cards",
+            "detect_carousel_position"
+          ],
+          "transitions": [
+            "locate_continue_watching",
+            "scroll_carousel_left_or_right",
+            "merge_new_cards",
+            "finish_when_no_new_cards"
+          ]
+        },
+        "source": {
+          "scope": {
+            "selectors": [
+              "h1",
+              "h2",
+              "h3",
+              "h4",
+              "[role='heading']"
+            ],
+            "text_equals": "Continue Watching",
+            "root_strategy": "nearest_ancestor_containing_items",
+            "max_ancestor_depth": 4
+          },
+          "item_selector": "article:has(a[href*='/gp/video/detail/']), li:has(a[href*='/gp/video/detail/']), div:has(> a[href*='/gp/video/detail/']):has(img)",
+          "fields": [
+            {
+              "name": "title",
+              "selector": "a[href*='/gp/video/detail/'], img",
+              "attributes": [
+                "aria-label",
+                "title",
+                "alt",
+                "text"
+              ]
+            },
+            {
+              "name": "url",
+              "selector": "a[href*='/gp/video/detail/']",
+              "attributes": [
+                "href"
+              ]
+            },
+            {
+              "name": "latest_cover_url",
+              "selector": "img",
+              "attributes": [
+                "currentSrc",
+                "src"
+              ]
+            }
+          ],
+          "selectors": [
+            "a[href*='/gp/video/detail/']",
+            "img[src*='pv-target-images']"
+          ],
+          "component": "Continue Watching carousel"
+        },
+        "result_schema": {
+          "type": "object",
+          "properties": {
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "title",
+                  "url"
+                ]
+              }
+            },
+            "scrolls_performed": {
+              "type": "integer"
+            },
+            "completion_reason": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "overlay.open_continue_watching",
+      "description": "Open a categorized overlay from stored Continue Watching items.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "items_source": {
+            "type": "string",
+            "default": "sites/amazon.com/prime-video/items/continue-watching.items.json"
+          },
+          "title": {
+            "type": "string",
+            "default": "Prime Video Continue Watching"
+          }
+        }
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "overlay.open",
+        "scope": "active_surface",
+        "source": {
+          "selectors": [
+            "#actions-json-overlay-root"
+          ],
+          "component": "actions.json Chrome overlay runtime"
+        }
+      }
+    }
+  ],
+  "signals": [],
+  "provenance": {
+    "created_from": [
+      "Prime Video Continue Watching carousel exploration",
+      "ACT-5 state-machine schema discussion",
+      "PR #1 RoomJinni-derived schema proposal"
+    ],
+    "created_by": "codex",
+    "created_at": "2026-06-02T07:30:00-05:00"
+  }
+}
