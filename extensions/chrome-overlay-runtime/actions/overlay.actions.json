@@ -1,0 +1,875 @@
+{
+  "protocol": "actions.json",
+  "version": 1,
+  "surface": {
+    "kind": "browser_overlay_runtime",
+    "description": "Authorized Chrome extension runtime for rendering agent-created HTML overlays on the active website."
+  },
+  "primitive_dictionary": {
+    "version": 1,
+    "stage": 1,
+    "host": "extension",
+    "primitives": [
+      { "name": "browser.screenshot", "support": "supported", "reason": null, "capability_class": "privileged", "portable": false },
+      { "name": "pointer.move", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
+      { "name": "pointer.click", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
+      { "name": "pointer.double_click", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
+      { "name": "pointer.drag", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
+      { "name": "viewport.scroll", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
+      { "name": "text.insert", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
+      { "name": "keyboard.press", "support": "supported", "reason": null, "capability_class": "mixed", "portable": false },
+      { "name": "runtime.session.name", "support": "supported", "reason": null, "capability_class": "privileged", "portable": false },
+      { "name": "runtime.session.finalize_tabs", "support": "supported", "reason": null, "capability_class": "privileged", "portable": false },
+      { "name": "page.info", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
+      { "name": "dom.observe.visible", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
+      { "name": "dom.snapshot_text", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
+      { "name": "dom.list_sections", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
+      { "name": "locator.element_info", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
+      { "name": "locator.text_content", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
+      { "name": "locator.wait_for", "support": "supported", "reason": null, "capability_class": "portable", "portable": true }
+    ]
+  },
+  "prompt": {
+    "title": "Browser overlay runtime",
+    "instructions": "Use overlay.open to present an agent-created HTML document as a temporary draggable, resizable, minimizable overlay on the current page. Prefer supplying launchers that integrate visible reopen buttons into the relevant original DOM context. Launchers are conditional registrations: they may be declared before their target DOM is visible, then installed when URL and DOM predicates match. Do not use this action for credential capture, deceptive UI, or persistent page modification.",
+    "source": {
+      "files": ["src/content.js"],
+      "symbols": ["actionsJsonOverlay.openHtml"],
+      "selectors": ["#__actions_json_overlay_runtime_host"]
+    }
+  },
+  "tools": [
+    {
+      "name": "overlay.open",
+      "description": "Render an HTML document in a draggable, resizable, and minimizable popup overlay on the authorized browser tab, optionally registering visible reopen buttons anchored to the original page DOM. Registered launchers can coexist and reattach independently when SPA navigation brings their matching context into view.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "html": {
+            "type": "string",
+            "description": "HTML body or document markup to render inside the overlay."
+          },
+          "title": {
+            "type": "string",
+            "description": "Overlay title shown in the drag handle."
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 420,
+            "maximum": 1400
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 320,
+            "maximum": 1000
+          },
+          "launchers": {
+            "type": "array",
+            "description": "Optional visible-page buttons that reopen this overlay from a relevant DOM anchor.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "Stable launcher id used to replace older buttons for the same overlay affordance."
+                },
+                "label": {
+                  "type": "string",
+                  "description": "Button text shown in the original page DOM."
+                },
+                "title": {
+                  "type": "string",
+                  "description": "Tooltip/title for the launcher button."
+                },
+                "selector": {
+                  "type": "string",
+                  "description": "Single CSS selector hint for the element to place the button near."
+                },
+                "selectors": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Ordered CSS selector hints for the element to place the button near."
+                },
+                "text_contains": {
+                  "type": "string",
+                  "description": "Optional visible text filter for selected anchor candidates, such as ACT-5 or Continue Watching."
+                },
+                "text_equals": {
+                  "type": "string",
+                  "description": "Optional exact visible text filter for selected anchor candidates."
+                },
+                "url_contains": {
+                  "type": "string",
+                  "description": "Only install this launcher when the current page URL contains this string."
+                },
+                "url_matches": {
+                  "type": "string",
+                  "description": "Only install this launcher when the current page URL matches this regular expression."
+                },
+                "placement": {
+                  "type": "string",
+                  "enum": ["beforebegin", "afterbegin", "beforeend", "afterend"],
+                  "default": "afterend"
+                },
+                "max_instances": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 10,
+                  "default": 3
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["html"],
+        "additionalProperties": false
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "actionsJsonOverlay.openHtml",
+        "scope": "active_surface",
+        "source": {
+          "files": ["src/content.js"],
+          "symbols": ["actionsJsonOverlay.openHtml"],
+          "selectors": ["#__actions_json_overlay_runtime_host"],
+          "component": "ActionsJsonOverlay"
+        },
+        "result_schema": {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean" },
+            "overlay_id": { "type": "string" },
+            "launchers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "launcher_id": { "type": "string" },
+                  "placement": { "type": "string" },
+                  "target_text": { "type": "string" }
+                }
+              }
+            }
+          },
+          "required": ["ok"]
+        }
+      }
+    },
+    {
+      "name": "overlay.register_launcher",
+      "description": "Register visible-page launcher buttons that can reopen an overlay later without opening the overlay immediately. Use this when the page should gain a contextual affordance, such as a Categories button beside a carousel heading, while leaving the overlay closed until the user clicks it.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "html": {
+            "type": "string",
+            "description": "HTML body or document markup to render later when a registered launcher is clicked."
+          },
+          "title": {
+            "type": "string",
+            "description": "Overlay title shown when the launcher opens the overlay."
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 420,
+            "maximum": 1400
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 320,
+            "maximum": 1000
+          },
+          "launchers": {
+            "type": "array",
+            "description": "Visible-page buttons that reopen this overlay from a relevant DOM anchor.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "Stable launcher id used to replace older buttons for the same overlay affordance."
+                },
+                "label": {
+                  "type": "string",
+                  "description": "Button text shown in the original page DOM."
+                },
+                "title": {
+                  "type": "string",
+                  "description": "Tooltip/title for the launcher button."
+                },
+                "selector": {
+                  "type": "string",
+                  "description": "Single CSS selector hint for the element to place the button near."
+                },
+                "selectors": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Ordered CSS selector hints for the element to place the button near."
+                },
+                "text_contains": {
+                  "type": "string",
+                  "description": "Optional visible text filter for selected anchor candidates, such as ACT-5 or Continue Watching."
+                },
+                "text_equals": {
+                  "type": "string",
+                  "description": "Optional exact visible text filter for selected anchor candidates."
+                },
+                "url_contains": {
+                  "type": "string",
+                  "description": "Only install this launcher when the current page URL contains this string."
+                },
+                "url_matches": {
+                  "type": "string",
+                  "description": "Only install this launcher when the current page URL matches this regular expression."
+                },
+                "placement": {
+                  "type": "string",
+                  "enum": ["beforebegin", "afterbegin", "beforeend", "afterend"],
+                  "default": "afterend"
+                },
+                "max_instances": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 10,
+                  "default": 3
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["html", "launchers"],
+        "additionalProperties": false
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "actionsJsonOverlay.registerLauncher",
+        "scope": "active_surface",
+        "source": {
+          "files": ["src/content.js"],
+          "symbols": ["actionsJsonOverlay.registerLauncher"],
+          "selectors": ["[data-actions-json-overlay-launcher]"],
+          "component": "ActionsJsonOverlay"
+        },
+        "result_schema": {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean" },
+            "overlay_id": { "type": "string" },
+            "launchers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "launcher_id": { "type": "string" },
+                  "placement": { "type": "string" },
+                  "target_text": { "type": "string" }
+                }
+              }
+            }
+          },
+          "required": ["ok"]
+        }
+      }
+    },
+    {
+      "name": "overlay.close",
+      "description": "Close the current actions.json overlay if one exists.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "actionsJsonOverlay.close",
+        "scope": "active_surface",
+        "source": {
+          "files": ["src/content.js"],
+          "symbols": ["actionsJsonOverlay.close"],
+          "selectors": ["#__actions_json_overlay_runtime_host"],
+          "component": "ActionsJsonOverlay"
+        }
+      }
+    },
+    {
+      "name": "runtime.configure_pacing",
+      "description": "Configure the minimum start-to-start interval between human-observable interaction actions for this runtime session. Defaults to 500ms so fast request bursts are accepted but clicks, pointer moves, typing, and scrolls execute at a human-paced rhythm. DOM reads and storage/overlay operations are not delayed.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "min_interval_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10000,
+            "default": 500
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "browser.screenshot",
+      "description": "Capture the currently visible browser tab as an image so the agent can inspect the page state after authorization.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "format": {
+            "type": "string",
+            "enum": ["png", "jpeg"],
+            "default": "png"
+          },
+          "quality": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "description": "JPEG quality. Ignored for PNG captures."
+          },
+          "delay_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 30000,
+            "description": "Wait this many milliseconds in the browser before capturing, useful for pages that are still painting after navigation."
+          },
+          "capture_timeout_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 60000,
+            "description": "Maximum time to wait for the extension background capture request to answer before returning a structured screenshot error."
+          },
+          "max_kb": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20480,
+            "description": "Deprecated alias for max_kilobytes."
+          },
+          "max_kilobytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20480,
+            "description": "Target maximum encoded image size in kilobytes. The browser may downscale and switch to JPEG to fit this budget before sending the screenshot."
+          },
+          "max_width": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096,
+            "description": "Optional maximum encoded image width after browser-side resizing."
+          },
+          "max_height": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096,
+            "description": "Optional maximum encoded image height after browser-side resizing."
+          }
+        },
+        "additionalProperties": false
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "actionsJsonOverlay.screenshot",
+        "scope": "active_surface",
+        "source": {
+          "files": ["src/content.js", "src/background.js"],
+          "symbols": ["actionsJsonOverlay.screenshot", "chrome.tabs.captureVisibleTab"],
+          "component": "ActionsJsonOverlay"
+        },
+        "result_schema": {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean" },
+            "data_url": { "type": "string" },
+            "mime_type": { "type": "string" },
+            "image_bytes": { "type": "integer" },
+            "encoded": { "type": "object" },
+            "viewport": { "type": "object" },
+            "url": { "type": "string" },
+            "captured_at": { "type": "string" }
+          },
+          "required": ["ok", "data_url", "mime_type", "viewport"]
+        }
+      }
+    },
+    {
+      "name": "storage.import_bundle",
+      "description": "Import an agent-provided actions.json.storage bundle into extension local storage for offline local lookup.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bundle": {
+            "type": "object",
+            "description": "A versioned actions.json.storage.bundle object built by the agent-side bridge."
+          }
+        },
+        "required": ["bundle"],
+        "additionalProperties": false
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "actionsJsonOverlay.importStorageBundle",
+        "scope": "persistent",
+        "source": {
+          "files": ["src/content.js"],
+          "symbols": ["actionsJsonOverlay.importStorageBundle", "chrome.storage.local.set"],
+          "component": "ActionsJsonOverlay"
+        },
+        "result_schema": {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean" },
+            "entry_count": { "type": "integer" },
+            "synced_at_ms": { "type": ["integer", "null"] },
+            "imported_at": { "type": "string" }
+          },
+          "required": ["ok", "entry_count"]
+        }
+      }
+    },
+    {
+      "name": "browser.extract_elements",
+      "description": "Extract structured data from DOM elements using schema-declared scope, item selector, and field extraction rules. Page-specific meanings belong in actions.json, not in the runtime.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "object",
+            "description": "How to find the page region that bounds extraction.",
+            "properties": {
+              "selector": {
+                "type": "string",
+                "description": "Single CSS selector hint for locating the scope element."
+              },
+              "selectors": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Ordered CSS selector hints for locating the scope element."
+              },
+              "text_equals": {
+                "type": "string",
+                "description": "Optional exact visible text filter for the scope element."
+              },
+              "text_contains": {
+                "type": "string",
+                "description": "Optional visible text substring filter for the scope element."
+              },
+              "root_selector": {
+                "type": "string",
+                "description": "Optional ancestor selector to use as the extraction root."
+              },
+              "root_strategy": {
+                "type": "string",
+                "enum": ["scope", "parent", "nearest_ancestor_containing_items"],
+                "default": "scope",
+                "description": "Generic strategy for deriving the extraction root from the scope element."
+              },
+              "max_ancestor_depth": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 20,
+                "default": 4
+              }
+            },
+            "additionalProperties": false
+          },
+          "item_selector": {
+            "type": "string",
+            "description": "CSS selector for each item to extract within the resolved root."
+          },
+          "fields": {
+            "type": "array",
+            "description": "Field rules applied to each matched item.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Output field name."
+                },
+                "selector": {
+                  "type": "string",
+                  "description": "CSS selector relative to the item. Use :scope for the item itself."
+                },
+                "attribute": {
+                  "type": "string",
+                  "description": "Single attribute or text pseudo-attribute to read."
+                },
+                "attributes": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Ordered attributes or text pseudo-attribute to try."
+                }
+              },
+              "required": ["name"],
+              "additionalProperties": false
+            },
+            "minItems": 1
+          }
+        },
+        "required": ["item_selector", "fields"],
+        "additionalProperties": false
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "actionsJsonOverlay.extractElements",
+        "scope": "active_surface",
+        "source": {
+          "files": ["src/content.js"],
+          "symbols": ["actionsJsonOverlay.extractElements"],
+          "component": "ActionsJsonOverlay"
+        },
+        "result_schema": {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean" },
+            "scope": { "type": "object" },
+            "items": {
+              "type": "array",
+              "items": { "type": "object" }
+            },
+            "item_count": { "type": "integer" },
+            "extracted_at": { "type": "string" },
+            "url": { "type": "string" }
+          },
+          "required": ["ok", "items", "item_count"]
+        }
+      }
+    },
+    {
+      "name": "browser.run_javascript",
+      "description": "Run schema-declared JavaScript in the authorized page with structured arguments and return the script result. Page-specific actions belong in actions.json, not in the runtime.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "description": "JavaScript function body to execute. It receives `args` and `helpers` bindings and may return a structured value."
+          },
+          "javascript": {
+            "type": "string",
+            "description": "Alias for source."
+          },
+          "args": {
+            "type": "object",
+            "description": "Structured arguments passed to the JavaScript body."
+          }
+        },
+        "required": ["source"],
+        "additionalProperties": false
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "actionsJsonOverlay.runJavascript",
+        "scope": "active_surface",
+        "source": {
+          "files": ["src/content.js"],
+          "symbols": ["actionsJsonOverlay.runJavascript"],
+          "component": "ActionsJsonOverlay"
+        },
+        "result_schema": {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean" },
+            "result": {},
+            "url": { "type": "string" }
+          },
+          "required": ["ok", "result"]
+        }
+      }
+    },
+    {
+      "name": "dom.list_sections",
+      "description": "List rendered page sections with inferred headings, document offsets, viewport visibility, and optional item counts. Use this before scrolling to rows whose vertical position varies between page loads.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "selector": {
+            "type": "string",
+            "description": "CSS selector for section-like containers. Defaults to section and role=region containers."
+          },
+          "heading_selector": {
+            "type": "string",
+            "description": "Optional CSS selector used inside each section to identify the section heading."
+          },
+          "item_selector": {
+            "type": "string",
+            "description": "Optional CSS selector counted inside each section, useful for carousel rows."
+          },
+          "text_contains": {
+            "type": "string",
+            "description": "Optional case-insensitive filter applied to heading and section text."
+          },
+          "max_sections": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          },
+          "max_heading_length": {
+            "type": "integer",
+            "minimum": 12,
+            "maximum": 500
+          }
+        },
+        "additionalProperties": false
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "actionsJsonOverlay.domListSections",
+        "scope": "active_surface",
+        "source": {
+          "files": ["src/content.js"],
+          "symbols": ["actionsJsonOverlay.domListSections"],
+          "component": "ActionsJsonOverlay"
+        }
+      }
+    },
+    {
+      "name": "debug.run_javascript",
+      "description": "Authoring-only fallback that evaluates arbitrary JavaScript through the extension background debugger transport. Use this to prove a page operation before encoding it as portable actions.json behavior; do not treat it as a portable primitive.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "description": "JavaScript function body to evaluate in the inspected page. It receives `args` and `helpers` bindings."
+          },
+          "javascript": {
+            "type": "string",
+            "description": "Alias for source."
+          },
+          "args": {
+            "type": "object",
+            "description": "Structured arguments passed to the JavaScript body."
+          }
+        },
+        "required": ["source"],
+        "additionalProperties": false
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "actionsJsonOverlay.debugRunJavascript",
+        "scope": "active_surface",
+        "capability_class": "debug",
+        "portable": false,
+        "source": {
+          "files": ["src/content.js", "src/background.js"],
+          "symbols": ["actionsJsonOverlay.debugRunJavascript", "chrome.debugger.sendCommand"],
+          "component": "ActionsJsonOverlay"
+        },
+        "result_schema": {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean" },
+            "result": {},
+            "url": { "type": ["string", "null"] },
+            "execution": { "type": "object" }
+          },
+          "required": ["ok"]
+        }
+      }
+    },
+    {
+      "name": "locator.element_info",
+      "description": "Resolve a visible locator to viewport geometry and a recommended clickable center.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "locator": { "type": "object" }
+        },
+        "required": ["locator"],
+        "additionalProperties": false
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "actionsJsonOverlay.locatorElementInfo",
+        "scope": "active_surface",
+        "source": {
+          "files": ["src/content.js"],
+          "symbols": ["actionsJsonOverlay.locatorElementInfo"],
+          "component": "ActionsJsonOverlay"
+        }
+      }
+    },
+    {
+      "name": "viewport.scroll",
+      "description": "Scroll the current viewport, or a scoped scrollable page region such as a horizontal carousel, by a visible delta.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "delta_x": { "type": "number" },
+          "delta_y": { "type": "number" },
+          "scope": {
+            "type": "object",
+            "description": "Optional page region used to find a scrollable element instead of scrolling the global viewport.",
+            "properties": {
+              "selector": { "type": "string" },
+              "selectors": { "type": "array", "items": { "type": "string" } },
+              "text_equals": { "type": "string" },
+              "text_contains": { "type": "string" },
+              "root_selector": { "type": "string" },
+              "root_strategy": {
+                "type": "string",
+                "enum": ["scope", "parent", "nearest_ancestor_containing_items"],
+                "default": "scope"
+              },
+              "max_ancestor_depth": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 20,
+                "default": 4
+              }
+            },
+            "additionalProperties": false
+          },
+          "item_selector": {
+            "type": "string",
+            "description": "Optional item selector used with nearest_ancestor_containing_items to locate the carousel root."
+          }
+        },
+        "additionalProperties": false
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "actionsJsonOverlay.viewportScroll",
+        "scope": "active_surface",
+        "source": {
+          "files": ["src/content.js"],
+          "symbols": ["actionsJsonOverlay.viewportScroll"],
+          "component": "ActionsJsonOverlay"
+        }
+      }
+    },
+    {
+      "name": "pointer.click",
+      "description": "Move the visible pointer affordance to viewport coordinates and perform a click.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "x": { "type": "number" },
+          "y": { "type": "number" },
+          "button": { "type": "string", "enum": ["left", "middle", "right"] }
+        },
+        "required": ["x", "y"],
+        "additionalProperties": false
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "actionsJsonOverlay.pointerClick",
+        "scope": "active_surface",
+        "source": {
+          "files": ["src/content.js"],
+          "symbols": ["actionsJsonOverlay.pointerClick"],
+          "component": "ActionsJsonOverlay"
+        }
+      }
+    },
+    {
+      "name": "storage.list",
+      "description": "List the currently cached actions.json.storage bundle paths from extension local storage.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "actionsJsonOverlay.listStorageBundle",
+        "scope": "persistent",
+        "source": {
+          "files": ["src/content.js"],
+          "symbols": ["actionsJsonOverlay.listStorageBundle", "chrome.storage.local.get"],
+          "component": "ActionsJsonOverlay"
+        },
+        "result_schema": {
+          "type": "object",
+          "properties": {
+            "ok": { "type": "boolean" },
+            "protocol": { "type": ["string", "null"] },
+            "version": { "type": ["integer", "null"] },
+            "synced_at_ms": { "type": ["integer", "null"] },
+            "imported_at": { "type": ["string", "null"] },
+            "entry_count": { "type": "integer" },
+            "paths": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "required": ["ok", "entry_count", "paths"]
+        }
+      }
+    }
+  ],
+  "signals": [
+    {
+      "name": "overlay.closed",
+      "description": "Emitted when the overlay is closed by the user.",
+      "direction": "html_to_agent",
+      "event": "actions-json:overlay-closed",
+      "ingestion": "enabled",
+      "payload": {
+        "type": "object",
+        "properties": {
+          "overlay_id": { "type": "string" }
+        }
+      },
+      "source": {
+        "files": ["src/content.js"],
+        "symbols": ["actions-json:overlay-closed"],
+        "selectors": ["#__actions_json_overlay_runtime_host"]
+      }
+    },
+    {
+      "name": "overlay.minimized",
+      "description": "Emitted when the overlay is collapsed to its title bar.",
+      "direction": "html_to_agent",
+      "event": "actions-json:overlay-minimized",
+      "ingestion": "enabled",
+      "payload": {
+        "type": "object",
+        "properties": {
+          "overlay_id": { "type": "string" }
+        }
+      },
+      "source": {
+        "files": ["src/content.js"],
+        "symbols": ["actions-json:overlay-minimized"],
+        "selectors": ["#__actions_json_overlay_runtime_host"]
+      }
+    },
+    {
+      "name": "overlay.expanded",
+      "description": "Emitted when the overlay is expanded from its minimized title-bar state.",
+      "direction": "html_to_agent",
+      "event": "actions-json:overlay-expanded",
+      "ingestion": "enabled",
+      "payload": {
+        "type": "object",
+        "properties": {
+          "overlay_id": { "type": "string" }
+        }
+      },
+      "source": {
+        "files": ["src/content.js"],
+        "symbols": ["actions-json:overlay-expanded"],
+        "selectors": ["#__actions_json_overlay_runtime_host"]
+      }
+    },
+    {
+      "name": "overlay.launcher_opened",
+      "description": "Emitted when the user opens a registered overlay from a visible-page launcher button.",
+      "direction": "html_to_agent",
+      "event": "actions-json:overlay-launcher-opened",
+      "ingestion": "enabled",
+      "payload": {
+        "type": "object",
+        "properties": {
+          "launcher_id": { "type": "string" }
+        }
+      },
+      "source": {
+        "files": ["src/content.js"],
+        "symbols": ["actions-json:overlay-launcher-opened"],
+        "selectors": ["[data-actions-json-overlay-launcher]"]
+      }
+    }
+  ]
+}
