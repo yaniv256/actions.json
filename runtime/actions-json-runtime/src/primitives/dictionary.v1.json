@@ -1,0 +1,451 @@
+{
+  "version": 1,
+  "stage": 1,
+  "primitives": [
+    {
+      "name": "browser.screenshot",
+      "version": 1,
+      "stage": 1,
+      "summary": "Capture a true rendered screenshot where the host has browser-level authority.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["browser.screenshot"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "format": { "type": "string", "enum": ["png", "jpeg"] },
+          "quality": { "type": "integer", "minimum": 1, "maximum": 100 },
+          "max_width": { "type": "integer", "minimum": 1 },
+          "max_height": { "type": "integer", "minimum": 1 },
+          "max_kilobytes": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["image"],
+        "properties": {
+          "image": { "type": "string" },
+          "mime_type": { "type": "string" },
+          "width": { "type": "integer" },
+          "height": { "type": "integer" }
+        }
+      },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "unsupported", "reason": "capability_unavailable" }
+      },
+      "errors": ["capability_unavailable", "capture_failed"],
+      "conformance": { "fixture": null, "assertions": ["structured_result_or_capability_error"] }
+    },
+    {
+      "name": "pointer.move",
+      "version": 1,
+      "stage": 1,
+      "summary": "Move a visible pointer affordance to viewport coordinates.",
+      "capability_class": "portable",
+      "portable": true,
+      "capabilities": ["pointer.visible", "pointer.move"],
+      "input_schema": {
+        "type": "object",
+        "required": ["x", "y"],
+        "properties": {
+          "x": { "type": "number" },
+          "y": { "type": "number" },
+          "duration_ms": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["x", "y"],
+        "properties": {
+          "x": { "type": "number" },
+          "y": { "type": "number" }
+        }
+      },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["point_out_of_viewport"],
+      "conformance": { "fixture": "pointer-fixture", "assertions": ["visible_pointer_position"] }
+    },
+    {
+      "name": "pointer.click",
+      "version": 1,
+      "stage": 1,
+      "summary": "Move visibly to viewport coordinates and perform a click.",
+      "capability_class": "portable",
+      "portable": true,
+      "capabilities": ["pointer.visible", "pointer.click"],
+      "input_schema": {
+        "type": "object",
+        "required": ["x", "y"],
+        "properties": {
+          "x": { "type": "number" },
+          "y": { "type": "number" },
+          "button": { "type": "string", "enum": ["left", "middle", "right"] }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": { "type": "object", "required": ["clicked"], "properties": { "clicked": { "type": "boolean" } } },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["point_out_of_viewport", "target_not_found"],
+      "conformance": { "fixture": "pointer-fixture", "assertions": ["click_event_observed"] }
+    },
+    {
+      "name": "pointer.double_click",
+      "version": 1,
+      "stage": 1,
+      "summary": "Move visibly to viewport coordinates and perform a double click.",
+      "capability_class": "portable",
+      "portable": true,
+      "capabilities": ["pointer.visible", "pointer.double_click"],
+      "input_schema": {
+        "type": "object",
+        "required": ["x", "y"],
+        "properties": {
+          "x": { "type": "number" },
+          "y": { "type": "number" }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": { "type": "object", "required": ["double_clicked"], "properties": { "double_clicked": { "type": "boolean" } } },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["point_out_of_viewport", "target_not_found"],
+      "conformance": { "fixture": "pointer-fixture", "assertions": ["double_click_event_observed"] }
+    },
+    {
+      "name": "pointer.drag",
+      "version": 1,
+      "stage": 1,
+      "summary": "Move visibly from one viewport point to another while dragging.",
+      "capability_class": "portable",
+      "portable": true,
+      "capabilities": ["pointer.visible", "pointer.drag"],
+      "input_schema": {
+        "type": "object",
+        "required": ["from", "to"],
+        "properties": {
+          "from": { "type": "object", "required": ["x", "y"] },
+          "to": { "type": "object", "required": ["x", "y"] },
+          "duration_ms": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": { "type": "object", "required": ["dragged"], "properties": { "dragged": { "type": "boolean" } } },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["point_out_of_viewport", "drag_failed"],
+      "conformance": { "fixture": "pointer-fixture", "assertions": ["drag_event_observed"] }
+    },
+    {
+      "name": "viewport.scroll",
+      "version": 1,
+      "stage": 1,
+      "summary": "Scroll the current viewport by a visible delta.",
+      "capability_class": "portable",
+      "portable": true,
+      "capabilities": ["viewport.scroll"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "delta_x": { "type": "number" },
+          "delta_y": { "type": "number" }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "scroll_x": { "type": "number" },
+          "scroll_y": { "type": "number" }
+        }
+      },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["scroll_failed"],
+      "conformance": { "fixture": "scroll-fixture", "assertions": ["scroll_position_changed"] }
+    },
+    {
+      "name": "text.insert",
+      "version": 1,
+      "stage": 1,
+      "summary": "Insert text into the focused editable target.",
+      "capability_class": "portable",
+      "portable": true,
+      "capabilities": ["text.insert"],
+      "input_schema": {
+        "type": "object",
+        "required": ["text"],
+        "properties": { "text": { "type": "string" } },
+        "additionalProperties": false
+      },
+      "output_schema": { "type": "object", "required": ["inserted"], "properties": { "inserted": { "type": "boolean" } } },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["target_not_editable", "insert_failed"],
+      "conformance": { "fixture": "input-fixture", "assertions": ["input_value_changed"] }
+    },
+    {
+      "name": "keyboard.press",
+      "version": 1,
+      "stage": 1,
+      "summary": "Press a keyboard key where the host can provide the requested fidelity.",
+      "capability_class": "mixed",
+      "portable": false,
+      "capabilities": ["keyboard.press"],
+      "input_schema": {
+        "type": "object",
+        "required": ["key"],
+        "properties": {
+          "key": { "type": "string" },
+          "modifiers": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": { "type": "object", "required": ["pressed"], "properties": { "pressed": { "type": "boolean" } } },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "partial", "reason": "trusted_key_events_unavailable" }
+      },
+      "errors": ["capability_unavailable", "key_not_supported"],
+      "conformance": { "fixture": "input-fixture", "assertions": ["supported_key_effect_or_capability_error"] }
+    },
+    {
+      "name": "runtime.session.name",
+      "version": 1,
+      "stage": 1,
+      "summary": "Name the current browser-control session for user-visible transparency.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["runtime.session"],
+      "input_schema": {
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string" } },
+        "additionalProperties": false
+      },
+      "output_schema": { "type": "object", "required": ["named"], "properties": { "named": { "type": "boolean" } } },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "unsupported", "reason": "capability_unavailable" }
+      },
+      "errors": ["capability_unavailable"],
+      "conformance": { "fixture": null, "assertions": ["structured_result_or_capability_error"] }
+    },
+    {
+      "name": "runtime.session.finalize_tabs",
+      "version": 1,
+      "stage": 1,
+      "summary": "Finalize browser tabs controlled during an authoring session.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["runtime.session"],
+      "input_schema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "output_schema": { "type": "object", "required": ["finalized"], "properties": { "finalized": { "type": "boolean" } } },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "unsupported", "reason": "capability_unavailable" }
+      },
+      "errors": ["capability_unavailable"],
+      "conformance": { "fixture": null, "assertions": ["structured_result_or_capability_error"] }
+    },
+    {
+      "name": "page.info",
+      "version": 1,
+      "stage": 1,
+      "summary": "Return basic information about the current page.",
+      "capability_class": "portable",
+      "portable": true,
+      "capabilities": ["page.info"],
+      "input_schema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "url": { "type": "string" },
+          "title": { "type": "string" }
+        }
+      },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": [],
+      "conformance": { "fixture": "page-fixture", "assertions": ["url_and_title_returned"] }
+    },
+    {
+      "name": "dom.observe.visible",
+      "version": 1,
+      "stage": 1,
+      "summary": "Observe visible DOM candidates that match a selector or text query.",
+      "capability_class": "portable",
+      "portable": true,
+      "capabilities": ["dom.observe"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "selector": { "type": "string" },
+          "text_contains": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": { "type": "object", "properties": { "matches": { "type": "array" } } },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["invalid_selector"],
+      "conformance": { "fixture": "locator-fixture", "assertions": ["visible_matches_returned"] }
+    },
+    {
+      "name": "dom.snapshot_text",
+      "version": 1,
+      "stage": 1,
+      "summary": "Return a text snapshot of visible page content.",
+      "capability_class": "portable",
+      "portable": true,
+      "capabilities": ["dom.snapshot_text"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "selector": { "type": "string" },
+          "max_chars": { "type": "integer", "minimum": 1 }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": { "type": "object", "properties": { "text": { "type": "string" } } },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["invalid_selector"],
+      "conformance": { "fixture": "text-fixture", "assertions": ["visible_text_returned"] }
+    },
+    {
+      "name": "dom.list_sections",
+      "version": 1,
+      "stage": 1,
+      "summary": "List rendered page sections with inferred headings, document offsets, viewport visibility, and optional item counts.",
+      "capability_class": "portable",
+      "portable": true,
+      "capabilities": ["dom.query", "geometry.document", "section.heading"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "selector": { "type": "string" },
+          "heading_selector": { "type": "string" },
+          "item_selector": { "type": "string" },
+          "text_contains": { "type": "string" },
+          "max_sections": { "type": "integer", "minimum": 1 },
+          "max_heading_length": { "type": "integer", "minimum": 12 }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "sections": { "type": "array" },
+          "section_count": { "type": "integer" },
+          "scroll_y": { "type": "number" },
+          "viewport_height": { "type": "number" }
+        }
+      },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["invalid_selector"],
+      "conformance": { "fixture": "section-fixture", "assertions": ["headings_offsets_and_visibility_returned"] }
+    },
+    {
+      "name": "locator.element_info",
+      "version": 1,
+      "stage": 1,
+      "summary": "Resolve a locator to visible element geometry and a recommended clickable center.",
+      "capability_class": "portable",
+      "portable": true,
+      "capabilities": ["locator.resolve", "geometry.viewport"],
+      "input_schema": {
+        "type": "object",
+        "required": ["locator"],
+        "properties": { "locator": { "type": "object" } },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "bounding_box": { "type": "object" },
+          "clickable_center": { "type": "object" }
+        }
+      },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["target_not_found", "multiple_targets", "target_not_visible"],
+      "conformance": { "fixture": "locator-fixture", "assertions": ["bounding_box_and_center_returned"] }
+    },
+    {
+      "name": "locator.text_content",
+      "version": 1,
+      "stage": 1,
+      "summary": "Resolve a locator and return its visible text content.",
+      "capability_class": "portable",
+      "portable": true,
+      "capabilities": ["locator.resolve", "text.read"],
+      "input_schema": {
+        "type": "object",
+        "required": ["locator"],
+        "properties": { "locator": { "type": "object" } },
+        "additionalProperties": false
+      },
+      "output_schema": { "type": "object", "properties": { "text": { "type": "string" } } },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["target_not_found", "multiple_targets"],
+      "conformance": { "fixture": "locator-fixture", "assertions": ["text_content_returned"] }
+    },
+    {
+      "name": "locator.wait_for",
+      "version": 1,
+      "stage": 1,
+      "summary": "Wait for a locator to satisfy a visible or attached state.",
+      "capability_class": "portable",
+      "portable": true,
+      "capabilities": ["locator.resolve", "wait"],
+      "input_schema": {
+        "type": "object",
+        "required": ["locator"],
+        "properties": {
+          "locator": { "type": "object" },
+          "state": { "type": "string", "enum": ["attached", "visible"] },
+          "timeout_ms": { "type": "integer", "minimum": 0 }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": { "type": "object", "properties": { "matched": { "type": "boolean" } } },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["timeout", "target_not_found"],
+      "conformance": { "fixture": "locator-fixture", "assertions": ["wait_condition_satisfied"] }
+    }
+  ]
+}
