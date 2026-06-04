@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Linear Step Fixture</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 24px;
+      color: #1f2937;
+      background: #f8fafc;
+    }
+
+    main {
+      max-width: 860px;
+    }
+
+    section {
+      margin: 20px 0;
+      padding: 16px;
+      border: 1px solid #d0d7de;
+      background: #fff;
+    }
+
+    label,
+    button,
+    input {
+      display: block;
+      margin: 8px 0;
+      font: inherit;
+    }
+
+    input {
+      width: min(100%, 520px);
+      padding: 7px 9px;
+    }
+
+    [role="option"] {
+      margin: 4px 0;
+      padding: 6px 8px;
+      border: 1px solid #d0d7de;
+      width: max-content;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Actions.json Views</h1>
+
+    <section aria-label="Views">
+      <button aria-label="Create new view">Create new view</button>
+      <a href="/actionsjson/issue/ACT-10">ACT-10 Browser extension runtime</a>
+      <a href="/actionsjson/issue/ACT-9">ACT-9 Storage map execution</a>
+      <a href="/actionsjson/issue/ACT-5">ACT-5 Schema contract</a>
+    </section>
+
+    <form aria-label="New view">
+      <label>
+        Name
+        <input name="name" value="">
+      </label>
+      <label>
+        Description
+        <input name="description" value="">
+      </label>
+
+      <button type="button" aria-label="Add filter">Add filter</button>
+      <div role="listbox" aria-label="Filter options">
+        <div role="option">Assignee</div>
+        <div role="option">Current user</div>
+        <div role="option">Relations</div>
+        <div role="option">Parent issues</div>
+        <div role="option">Sub-issues</div>
+      </div>
+
+      <button type="button" aria-label="Display options">Display options</button>
+      <label>
+        <input type="checkbox" aria-label="Show sub-issues" checked>
+        Show sub-issues
+      </label>
+
+      <button type="submit">Save</button>
+    </form>
+  </main>
+</body>
+</html>
