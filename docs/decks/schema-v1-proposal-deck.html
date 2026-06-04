@@ -2054,7 +2054,7 @@
       <div class="brand">
         <div class="brand-mark">aj</div>
         <h1>Schema V1 teaching deck</h1>
-        <p>Plain-English walkthrough of the actions.json map proposal.</p>
+        <p>Plain-English walkthrough of actions.json schema concepts.</p>
       </div>
       <button class="menu-toggle" id="menuToggle" type="button" aria-expanded="false" aria-controls="slideMenu"><span>Slides</span><span id="menuCurrent">1 / 12</span></button>
       <nav class="nav" id="slideMenu" aria-label="Slides">
@@ -2112,7 +2112,7 @@
             <header class="slide-header">
               <div class="eyebrow">Metaphor</div>
               <h2>A map is more than a list of roads.</h2>
-              <p class="lead">The earlier draft described tools. This version expands that into a live map: places, conditions, routes, warnings, and repair checks.</p>
+              <p class="lead">The schema describes more than tools. It maps places, conditions, routes, warnings, and repair checks for a living website.</p>
             </header>
             <div class="content-grid three">
               <div class="tile term-tile" tabindex="0"><h3>Tools</h3><p>Things the agent may ask the website to do, like submit a form or open an overlay.</p><div class="info-bar"><span>Think of these as approved verbs. A transition may name the tool to call.</span></div></div>
@@ -2365,11 +2365,11 @@
             <header class="slide-header">
               <div class="eyebrow">Execution</div>
               <h2>A handler is convenient, but steps make behavior inspectable.</h2>
-              <p class="lead">A handler is page code that does the job. Execution steps are a readable fallback or test trace: inspect, type, click, wait, extract.</p>
+              <p class="lead">A handler is page code that does the job. Execution steps are the intended readable fallback or test trace: inspect, type, click, wait, extract.</p>
             </header>
             <div class="content-grid">
               <div class="tile"><h3>Handler first</h3><p>Call the existing page function. Use steps only for validation, tracing, or fallback.</p></div>
-              <div class="tile"><h3>Steps first</h3><p>Follow the declared DOM steps directly. Useful when no handler exists.</p></div>
+              <div class="tile"><h3>Steps first</h3><p>Implementation pending. The schema can describe this path before the runtime can execute it generically.</p></div>
               <div class="tile"><h3>Documentary</h3><p>Steps explain what should happen but are not runtime authority.</p></div>
               <div class="tile"><h3>Test only</h3><p>Steps are used by checks to verify that the map still works.</p></div>
             </div>
@@ -2410,7 +2410,7 @@
             <header class="slide-header">
               <div class="eyebrow">Signals and protocol</div>
               <h2>Tools are agent requests. Signals are page events.</h2>
-              <p class="lead">The proposal keeps these separate, then explains how both travel through a bridge using Responses-style item shapes.</p>
+              <p class="lead">The schema keeps these separate, then explains how both travel through a bridge using Responses-style item shapes.</p>
             </header>
             <div class="term-grid">
               <div class="term"><code>action_call</code><p>The agent asks the runtime to run a declared tool.</p></div>
@@ -2425,7 +2425,7 @@
           <article class="slide" data-slide="11">
             <header class="slide-header">
               <div class="eyebrow">Review checklist</div>
-              <h2>How to review the proposal without getting lost.</h2>
+              <h2>How to review the schema without getting lost.</h2>
               <p class="lead">Read from the general idea to the concrete example. If the simple form still feels readable, the schema is probably reviewable.</p>
             </header>
             <div class="review-list">
@@ -2581,7 +2581,7 @@
       transition: {
         kicker: "transition edge",
         title: "Scroll carefully",
-        body: "The transition names the scroll tool, its target, and the one-per-second rate limit.",
+        body: "The transition names the scroll tool, its target, and the one-per-second rate limit. Generic transition execution is implementation pending.",
         code: "tool: continue_watching.scroll_right",
         status: "scrolling right"
       },

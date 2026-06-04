@@ -1,93 +1,195 @@
 # Repository Structure
 
-## Design Goal
+This repository is the public source tree for `actions.json` documentation,
+agent skill guidance, browser runtimes, bridge code, and examples.
 
-The repo must be easy for multiple coding-agent ecosystems to consume.
+The layout is designed so different agent ecosystems can consume the same
+source without making one platform's packaging format the canonical project
+shape.
 
-Do not make the canonical source layout depend on Claude Code plugins, Codex skill metadata, OpenClaw installs, or Pi package conventions. Those are adapters. The shared repo should expose the three real artifacts directly:
-
-1. authoring skill
-2. MCP adapter
-3. injected browser runtime
-
-## Canonical Layout
+## Source Layout
 
 ```text
 actions.json/
   README.md
   LICENSE
   docs/
-    repo-structure.md
-    bridge-architecture.md
-    actions-json-format.md
-    actions-bridge-protocol.md
   skills/
-    core/
-      SKILL.md
-    codex/
-      SKILL.md
-      agents/openai.yaml
-    claude-code/
-      SKILL.md
-    openclaw/
-      SKILL.md
-    pi/
-      SKILL.md
-  mcp/
-    actions-json-mcp/
-      README.md
-      package.json
-      src/
   runtime/
-    actions-json-runtime/
-      README.md
-      package.json
-      src/
+  extensions/
+  mcp/
   adapters/
-    claude-code-plugin/
-    codex/
-    openclaw/
-    pi-package/
   examples/
-    simple-form/
-      index.html
-      actions.json
+  scripts/
+  tests/
+  specs/
 ```
 
-## Why Not Make The Whole Repo A Claude Code Plugin?
+Generated directories such as `dist/`, `node_modules/`, `test-results/`, and
+`playwright-report/` are not source documentation.
 
-Claude Code plugins can carry skills, MCP configs, bins, settings, hooks, and arbitrary files. That is useful for a Claude Code adapter, but it is not the right canonical shape for the whole project.
+## `docs/`
 
-The injected JavaScript runtime is a first-class artifact, not a Claude-only plugin component. It should live at `runtime/actions-json-runtime/` and be referenced by the MCP adapter, browser extension adapter, Claude Code plugin adapter, Pi package adapter, and future hosted/embedded adapters.
+Public documentation for users, implementers, and contributors.
 
-## Compatibility Strategy
+Start with:
 
-### Core Skill
+- `docs/index.md`
+- `docs/getting-started.md`
+- `docs/actions-json-format.md`
 
-`skills/core/SKILL.md` uses the strict portable subset:
+Reference docs include:
 
-- YAML frontmatter with only `name` and `description`
-- plain Markdown instructions
-- no Claude-only `allowed-tools`
-- no Claude-only `context`
-- no Claude-only dynamic command injection
-- no Codex-only assumptions in the body
+- schema reference;
+- bridge architecture;
+- bridge protocol;
+- primitive dictionary architecture;
+- storage model;
+- repository structure.
 
-### Runtime Wrappers
+Internal planning notes and private PR packaging notes do not belong in
+`docs/`.
 
-Wrappers adapt the core skill to each environment:
+## `skills/`
 
-- `skills/codex/` can add Codex-facing `agents/openai.yaml`
-- `skills/claude-code/` can be referenced from a Claude Code plugin
-- `skills/openclaw/` can be installed as an OpenClaw skill
-- `skills/pi/` can be loaded through Pi's skill/package system
+Canonical installable authoring skill.
 
-### MCP Adapter
+```text
+skills/
+  SKILL.md
+  agents/
+    openai.yaml
+  references/
+    getting-started.md
+    docs/
+```
 
-`mcp/actions-json-mcp/` exposes coding-agent tools and talks to the browser runtime. It should not be the interpreter of `actions.json`; it is the agent-side adapter.
+`skills/SKILL.md` is the primary skill file. It should stay telescoped: short
+operational guidance in the skill, longer references linked from
+`skills/references/`.
 
-### Browser Runtime
+`skills/references/getting-started.md` is a symlink to
+`docs/getting-started.md`. The public docs and the skill share one source for
+setup guidance.
 
-`runtime/actions-json-runtime/` loads and validates `actions.json`, attaches to the DOM, and exposes the Actions Bridge Protocol. It is the interpreter.
+`skills/references/docs/` exposes public docs as skill references. Agents should
+read those references only when the current task needs them.
 
-The runtime and MCP adapter may be co-located, or connected over WebSocket, a tunnel, a hosted relay, browser extension ports, Playwright/CDP, or another transport.
+## `runtime/`
+
+Shared JavaScript runtime code.
+
+```text
+runtime/
+  actions-json-runtime/
+```
+
+The runtime is responsible for shared host behavior such as primitive dispatch,
+storage sync, action/result envelopes, and bookmarklet/embed behavior where
+implemented.
+
+Host-specific code should stay below adapter boundaries instead of forking the
+action model.
+
+## `extensions/`
+
+Browser extension runtime packages.
+
+```text
+extensions/
+  chrome-overlay-runtime/
+```
+
+The Chrome extension is the privileged development host. It supports browser
+capabilities that a bookmarklet/embed cannot provide, such as true screenshots
+after user authorization and stable tab identity.
+
+## `mcp/`
+
+Agent-side bridge code.
+
+```text
+mcp/
+  actions-json-mcp/
+```
+
+The current bridge is MCP-shaped: it exposes stable tool-list/tool-call style
+endpoints and routes calls to connected browser runtimes. It should not be the
+interpreter of site-specific `actions.json` maps; the browser runtime
+interprets those maps.
+
+## `adapters/`
+
+Packaging and integration adapters for agent ecosystems.
+
+```text
+adapters/
+  claude-code-plugin/
+  codex/
+  openclaw/
+  pi-package/
+```
+
+Adapters should point to or package the canonical skill and runtime artifacts.
+Do not maintain hollow platform-specific skills that replace
+`skills/SKILL.md`.
+
+If a platform eventually requires a platform-specific `SKILL.md`, generate a
+self-contained copy from the canonical skill during packaging.
+
+## `examples/`
+
+Small public examples.
+
+```text
+examples/
+  simple-form/
+```
+
+Examples should be neutral, public-safe, and runnable without private accounts.
+
+## `scripts/`
+
+Repository maintenance and packaging scripts.
+
+Examples:
+
+- extension packaging;
+- skill validation;
+- release artifact checks.
+
+Scripts should avoid private absolute paths and should work from the repository
+root unless documented otherwise.
+
+## `tests/`
+
+Repository-level tests that do not belong inside one package.
+
+Package-specific tests may live beside their package, such as runtime tests
+under `runtime/actions-json-runtime/` or extension tests under
+`extensions/chrome-overlay-runtime/`.
+
+## `specs/`
+
+Spec Kit feature work and implementation task records.
+
+These documents are useful for contributors working on active implementation,
+but they are not the first place a user should learn the product. Public docs
+should summarize stable outcomes rather than require readers to reconstruct the
+spec history.
+
+## Packaging Rule
+
+The canonical project shape is not a Claude Code plugin, a Codex skill package,
+or any other single platform package.
+
+The source tree exposes real artifacts directly:
+
+- public docs;
+- canonical skill;
+- browser runtime;
+- browser extension;
+- MCP-shaped bridge;
+- examples.
+
+Platform packages are adapters over those artifacts.

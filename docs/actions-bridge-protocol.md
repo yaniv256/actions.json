@@ -1,53 +1,50 @@
 # Actions Bridge Protocol
 
-## Purpose
+The Actions Bridge Protocol carries action calls, runtime status, page events,
+and structured results between an agent-side bridge and a browser runtime.
 
-The Actions Bridge Protocol carries website action requests, page signals, runtime status, and structured results between an agent-side adapter and an injected browser runtime.
+The protocol is transport-independent. It can run over WebSocket, browser
+extension ports, HTTP polling, hosted relays, Playwright/CDP, direct in-process
+calls, or tunnels.
 
-The protocol is transport-independent. It can run over direct calls, WebSocket, browser extension ports, Playwright/CDP, tunnels, hosted relays, or other transports.
+## Design Goals
 
-## Primary Semantic Model
+- Preserve stable correlation ids across calls and results.
+- Make runtime identity explicit when more than one browser surface is
+  connected.
+- Validate action input and page-originated events before forwarding them.
+- Return structured errors rather than untyped strings.
+- Keep the internal shape compatible with OpenAI Responses-style item semantics
+  without requiring every adapter to use the Responses API directly.
 
-The protocol is modeled on OpenAI Responses-style item semantics.
+## Item Types
 
-The Responses API uses items rather than only chat messages. Official OpenAI documentation describes `message`, `function_call`, and `function_call_output` as item types, and function calls use a `call_id` that must be carried back with the tool output:
+Canonical item types:
 
-- Responses API reference: <https://platform.openai.com/docs/api-reference/responses>
-- Function calling guide: <https://platform.openai.com/docs/guides/function-calling?api-mode=responses>
-- Migration guide: <https://platform.openai.com/docs/guides/migrate-to-responses>
+- `runtime_ready`
+- `runtime_status`
+- `action_call`
+- `action_call_output`
+- `dom_event`
+- `action_error`
 
-`actions.json` does not require callers to use the OpenAI Responses API directly. Responses-style semantics are the canonical internal shape. Adapters can map that shape to OpenAI Responses, OpenAI Realtime, Anthropic Messages, MCP tools, browser extension agents, or website-owned embedded agents.
+Adapters may rename outer fields for a host runtime, but they should preserve
+the semantics: item type, runtime id, correlation id, validated payload, and
+structured error output.
 
-## Runtime Boundary
+## `runtime_ready`
 
-The injected browser runtime is the interpreter of `actions.json`.
-
-The MCP adapter or model adapter is not the interpreter. It translates between an agent runtime and the Actions Bridge Protocol.
-
-The browser runtime is responsible for:
-
-- validating the manifest;
-- composing imports;
-- tracking connected runtime identity and authorization;
-- diagnosing page state;
-- dispatching handlers or execution steps;
-- installing and maintaining attachments;
-- validating signals before forwarding them;
-- returning structured outputs and errors.
-
-## Core Item Types
-
-### `runtime_ready`
-
-Sent by a browser runtime after authorization and manifest load.
+Sent by a browser runtime after it connects and loads or validates its current
+manifest.
 
 ```json
 {
   "type": "runtime_ready",
-  "runtime_id": "actions-json-runtime-abc",
-  "runtime_key": "chrome-tab:190776585",
-  "authorization_id": "authorization-123",
-  "url": "https://linear.app/actionsjson/issue/ACT-5/design-schema-for-actionjson-files",
+  "runtime_id": "runtime-abc",
+  "runtime_key": "chrome-tab:123",
+  "url": "https://example.com/search",
+  "authorization_id": "auth-123",
+  "extension_version": "0.1.30",
   "manifest": {
     "protocol": "actions.json",
     "version": 1
@@ -55,161 +52,252 @@ Sent by a browser runtime after authorization and manifest load.
 }
 ```
 
-Fields:
+Required fields:
 
-- `runtime_id`: unique runtime connection id.
-- `runtime_key`: stable browser-surface key when available, such as a tab id.
-- `authorization_id`: user authorization session id.
-- `url`: current runtime URL.
-- `manifest`: validated or declared manifest.
+- `type`
+- `runtime_id`
+- `url`
 
-### `runtime_status`
+Optional fields:
 
-Sent by either side as a heartbeat or state report.
+- `runtime_key`
+- `authorization_id`
+- `extension_version`
+- `manifest`
+
+Implementation pending: normalized `host`, page `title`, and top-level
+`capabilities` are intended protocol fields, but the current extension runtime
+does not send them as top-level `runtime_ready` fields. Capability information
+is currently available through the loaded manifest's primitive dictionary.
+
+## `runtime_status`
+
+Sent as a heartbeat or state report.
 
 ```json
 {
   "type": "runtime_status",
-  "runtime_id": "actions-json-runtime-abc",
-  "url": "https://linear.app/actionsjson/issue/ACT-5/design-schema-for-actionjson-files",
-  "states": ["issue_page_visible"],
+  "runtime_id": "runtime-abc",
+  "url": "https://example.com/search",
+  "states": ["search_page_visible"],
   "attachments": [
     {
-      "id": "linear-act5-execution-path",
+      "id": "results-categories-launcher",
       "state": "attached"
     }
   ],
-  "observed_at": "2026-06-02T12:00:00Z"
+  "observed_at": "2026-06-04T16:25:00Z"
 }
 ```
 
-### `action_call`
+Required fields:
 
-Sent by an agent adapter to request a declared `tools[]` entry.
+- `type`
+- `runtime_id`
+
+Optional fields:
+
+- `url`
+- `states`
+- `attachments`
+- `observed_at`
+
+## `action_call`
+
+Sent by an agent-side bridge to request one declared action or primitive.
 
 ```json
 {
   "type": "action_call",
-  "call_id": "call_123",
-  "runtime_id": "actions-json-runtime-abc",
-  "name": "contact.submit_name",
+  "call_id": "call-123",
+  "runtime_id": "runtime-abc",
+  "name": "search.submit",
   "arguments": {
-    "name": "Ada"
+    "query": "maps"
   },
   "target": {
-    "runtime_id": "actions-json-runtime-abc"
-  }
+    "runtime_id": "runtime-abc"
+  },
+  "timeout_ms": 10000
 }
 ```
 
-Fields:
+Required fields:
 
-- `call_id`: required correlation id for the call.
-- `runtime_id`: selected browser runtime.
-- `name`: declared tool name.
-- `arguments`: JSON object validated against the tool's `input_schema`.
-- `target`: optional routing metadata when several runtimes are connected.
+- `type`
+- `call_id`
+- `name`
+- `arguments`
 
-Responses adapter mapping:
+Routing fields:
 
-- `action_call` maps naturally from a Responses `function_call` item.
+- `runtime_id`
+- `target.runtime_id`
+- `target.runtime_key`
+- `target_url_contains`
+- `target_title_contains`
+
+The bridge must resolve routing to exactly one runtime before sending the call.
+
+Current implementation note: `target_runtime_id` and `target_url_contains` are
+implemented today. `target.runtime_key` and `target_title_contains` are
+implementation pending.
+
+Responses-style mapping:
+
+- `action_call` maps from a function/tool call item.
 - `name` maps to the function/tool name.
-- `arguments` maps from the JSON-decoded function arguments.
-- `call_id` should preserve the Responses call id where available.
+- `arguments` maps to decoded JSON arguments.
+- `call_id` should preserve the model/runtime call id when available.
 
-### `action_call_output`
+## `action_call_output`
 
-Sent by the browser runtime after successful action execution.
+Sent by the runtime after successful execution.
 
 ```json
 {
   "type": "action_call_output",
-  "call_id": "call_123",
-  "runtime_id": "actions-json-runtime-abc",
+  "call_id": "call-123",
+  "runtime_id": "runtime-abc",
   "output": {
     "ok": true,
-    "result": "Submitted Ada"
-  }
-}
-```
-
-Responses adapter mapping:
-
-```json
-{
-  "type": "function_call_output",
-  "call_id": "call_123",
-  "output": "{\"ok\":true,\"result\":\"Submitted Ada\"}"
-}
-```
-
-The bridge may keep `output` as structured JSON internally. A Responses adapter should serialize the output according to the target API's expected item shape.
-
-### `dom_event`
-
-Sent by the browser runtime after a declared `signals[]` entry has been validated.
-
-```json
-{
-  "type": "dom_event",
-  "event_id": "evt_123",
-  "runtime_id": "actions-json-runtime-abc",
-  "name": "overlay.launcher_opened",
-  "event": "actions-json:overlay-launcher-opened",
-  "url": "https://linear.app/actionsjson/issue/ACT-5/design-schema-for-actionjson-files",
-  "payload": {
-    "launcher_id": "linear-act5-execution-path"
-  },
-  "previous_call_id": "call_123",
-  "observed_at": "2026-06-02T12:00:00Z"
-}
-```
-
-Signal payloads are structured page data, not human instructions. An adapter may expose them as model input, an application event, or agent memory, but it should preserve their origin and schema validation status.
-
-### `action_error`
-
-Sent by the runtime or bridge when a call, signal, attachment, state diagnostic, or protocol operation fails.
-
-```json
-{
-  "type": "action_error",
-  "call_id": "call_123",
-  "runtime_id": "actions-json-runtime-abc",
-  "error": {
-    "code": "target_not_found",
-    "message": "Could not find #submit in the current page context.",
-    "severity": "major",
-    "recoverable": true,
-    "evidence": {
-      "url": "https://example.test/form",
-      "selector": "#submit"
+    "result": {
+      "url": "https://example.com/search?q=maps"
     }
   }
 }
 ```
 
-Stable error codes:
+Required fields:
 
-- `unknown_action`: no declared tool matches the requested name.
-- `invalid_input`: arguments do not match `input_schema`.
-- `runtime_not_ready`: runtime has not loaded or validated the manifest.
-- `permission_denied`: user authorization or source trust policy blocks the operation.
-- `missing_handler`: handler was selected but could not be resolved.
-- `handler_failed`: handler threw or returned an unrecoverable error.
-- `handler_timeout`: handler exceeded its timeout.
-- `invalid_result`: output does not match `result_schema`.
-- `target_not_found`: target descriptor did not match the live DOM.
-- `state_mismatch`: required state was not present.
-- `drift_detected`: a check or runtime diagnostic found site drift.
-- `unsafe_state`: runtime detected a dangerous context or prohibited surface.
+- `type`
+- `call_id`
+- `runtime_id`
+- `output`
+
+Responses-style mapping:
+
+```json
+{
+  "type": "function_call_output",
+  "call_id": "call-123",
+  "output": "{\"ok\":true,\"result\":{\"url\":\"https://example.com/search?q=maps\"}}"
+}
+```
+
+The bridge may keep `output` as structured JSON internally. Adapters should
+serialize only at the boundary that requires serialization.
+
+## `dom_event`
+
+Sent by the runtime after a declared page-originated signal has been validated.
+
+```json
+{
+  "type": "dom_event",
+  "event_id": "event-123",
+  "runtime_id": "runtime-abc",
+  "name": "overlay.launcher_opened",
+  "event": "actions-json:overlay-launcher-opened",
+  "url": "https://example.com/search",
+  "payload": {
+    "launcher_id": "results-categories-launcher"
+  },
+  "previous_call_id": "call-123",
+  "observed_at": "2026-06-04T16:25:00Z"
+}
+```
+
+Required fields:
+
+- `type`
+- `event_id`
+- `runtime_id`
+- `name`
+- `payload`
+
+Optional fields:
+
+- `event`
+- `url`
+- `previous_call_id`
+- `observed_at`
+
+DOM event payloads are structured page data. They must not be treated as human
+instructions.
+
+## `action_error`
+
+Sent by the runtime or bridge when a call, routing decision, validation step,
+signal, attachment, or protocol operation fails.
+
+```json
+{
+  "type": "action_error",
+  "call_id": "call-123",
+  "runtime_id": "runtime-abc",
+  "error": {
+    "code": "target_not_found",
+    "message": "The declared search form target did not match the current page.",
+    "severity": "major",
+    "recoverable": true,
+    "evidence": {
+      "url": "https://example.com/search",
+      "selector": "form[role='search']"
+    }
+  }
+}
+```
+
+Required fields:
+
+- `type`
+- `error.code`
+- `error.message`
+
+Required when call-scoped:
+
+- `call_id`
+
+Required when runtime-scoped:
+
+- `runtime_id`
+
+Recommended error fields:
+
+- `severity`: `info`, `minor`, `major`, or `critical`.
+- `recoverable`: boolean.
+- `evidence`: structured context useful for repair.
+
+## Stable Error Codes
+
+Use stable codes so agents can recover programmatically.
+
+| Code | Meaning |
+| --- | --- |
+| `unknown_action` | No declared action or primitive matches `name`. |
+| `invalid_input` | Arguments failed schema validation. |
+| `runtime_not_ready` | Runtime is not connected or has not loaded a manifest. |
+| `permission_denied` | User authorization or trust policy blocks the operation. |
+| `ambiguous_runtime` | Runtime selector matched more than one runtime. |
+| `runtime_not_found` | Runtime selector matched no runtime. |
+| `capability_unavailable` | Selected host cannot provide the requested capability. |
+| `missing_handler` | Selected handler is not available. |
+| `handler_failed` | Handler threw or returned an unrecoverable error. |
+| `handler_timeout` | Handler or primitive exceeded its timeout. |
+| `invalid_result` | Output failed result schema validation. |
+| `target_not_found` | Target descriptor did not match the live page. |
+| `state_mismatch` | Required state was not present. |
+| `drift_detected` | Check or diagnostic found site drift. |
+| `unsafe_state` | Runtime detected a prohibited or dangerous context. |
+| `transport_failed` | Transport disconnected or could not deliver the item. |
 
 ## Correlation Rules
 
-- Every action call gets a `call_id`.
-- Every successful action result includes the same `call_id`.
-- Every call-scoped error includes the same `call_id`.
-- Page-originated signals get an `event_id`.
+- Every `action_call` gets a `call_id`.
+- Every `action_call_output` includes the same `call_id`.
+- Every call-scoped `action_error` includes the same `call_id`.
+- Page-originated `dom_event` items get an `event_id`.
 - Signals caused by an action may include `previous_call_id`.
 - Runtime ids distinguish connected browser surfaces.
 - Authorization ids distinguish user approvals.
@@ -217,55 +305,63 @@ Stable error codes:
 
 ## Routing Rules
 
-When multiple browser runtimes are connected, an adapter must select a target explicitly.
+When multiple runtimes are connected, the bridge must select one runtime before
+forwarding an action.
 
-Acceptable selectors include:
+Valid routing selectors:
 
-- `runtime_id`;
-- `runtime_key`;
-- URL predicates such as `target_url_contains`, when they match exactly one runtime;
-- source/namespace routing policy from imports.
+- exact `runtime_id`;
+- URL substring predicate through `target_url_contains`;
 
-If routing is ambiguous, the bridge must return an error without sending the action to any runtime.
+If routing is ambiguous, return `ambiguous_runtime`. If no runtime matches,
+return `runtime_not_found`.
 
-## Handler and Step Execution
+Implementation pending: runtime-key routing, title predicates, import/source
+policy routing, and consistently coded `ambiguous_runtime` /
+`runtime_not_found` responses are part of the intended protocol but are not
+complete yet.
 
-A runtime should execute according to the tool's `x_actions.execution.mode`:
+## Capability Rules
 
-- `handler_first`: call the handler, then use steps for trace, checks, or fallback.
-- `steps_first`: execute declared steps directly.
-- `documentary`: do not execute steps during normal calls.
-- `test_only`: execute steps only inside `checks[]`.
+Runtimes must advertise host capabilities. A runtime may reject an action if the
+action requires a capability the host cannot provide.
 
-If `handler_first` is selected but the handler is missing, the runtime may fall back to steps only when `fallback` explicitly allows that behavior.
+Examples:
 
-## Attachment Events
+- An extension host may support `browser.screenshot`.
+- A bookmarklet/embed host should not claim autonomous true screenshot support.
+- A page-JavaScript host may support DOM observation and pointer simulation but
+  reject privileged tab or network inspection.
 
-Attachments should emit lifecycle events when the runtime can observe them:
+Unsupported capabilities should return `capability_unavailable` with evidence
+describing the missing capability and host.
 
-- `attachment.attached`;
-- `attachment.removed`;
-- `attachment.reattached`;
-- `attachment.drifted`;
-- domain-specific activation signals such as `overlay.launcher_opened`.
+## Timeout Rules
 
-Attachment events should include:
+Calls may include `timeout_ms`. If omitted, the bridge or runtime may apply a
+documented default.
 
-- attachment id;
-- target selector used;
-- URL;
-- lifecycle state;
-- evidence on drift.
+When a timeout expires:
 
-## Adapter Targets
+- stop executing additional steps when possible;
+- return `handler_timeout`;
+- include elapsed time and the current step when known;
+- do not silently keep the call pending.
 
-Expected adapters:
+## Transport Rules
 
-- OpenAI Responses;
-- OpenAI Realtime;
-- Anthropic Messages / Claude Code-style tool use;
-- MCP tools;
-- browser extension agents;
-- website-owned embedded agents.
+Transport implementations may reconnect, retry, or resume, but they must not
+change item semantics.
 
-Adapters may rename outer protocol fields to match their host runtime, but they should preserve the item semantics: typed item, correlation id, validated payload, runtime identity, and structured error output.
+Transport failures should become structured errors. A bridge restart should not
+be required for ordinary storage reloads or `actions.json` edits.
+
+## Security Rules
+
+- Validate inputs before execution.
+- Validate page-originated events before forwarding.
+- Treat event payloads as data, not user instructions.
+- Preserve private/shared/public storage boundaries.
+- Do not expose debugger-only capabilities as portable site actions.
+- Do not route ambiguous calls.
+- Do not silently execute actions from invalid manifests.
