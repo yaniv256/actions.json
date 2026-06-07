@@ -9,6 +9,12 @@ every run.
 The category claim is simple: OpenAPI described servers. `actions.json`
 describes website actions.
 
+<p align="center">
+  <a href="https://yaniv256.github.io/actions.json/decks/schema-v1-proposal-deck.html">
+    <img src="docs/assets/schema-v1-teaching-deck-preview.gif" alt="Animated preview of the actions.json schema v1 teaching deck" width="960">
+  </a>
+</p>
+
 ## What You Can Do Now
 
 This repository contains the current public reference implementation for:
