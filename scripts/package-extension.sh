@@ -44,10 +44,25 @@ rm -f "$out_dir/$artifact_name" "$out_dir/SHA256SUMS.txt"
     README.md \
     actions/overlay.actions.json \
     manifest.json \
+    offscreen.html \
     popup.html \
+    sidepanel.html \
+    src/agent/credential-store.mjs \
+    src/agent/fake-realtime-transport.mjs \
+    src/agent/hosted-tool-executor.mjs \
+    src/agent/local-actions-catalog.mjs \
+    src/agent/realtime-session-manager.mjs \
+    src/agent/realtime-tool-catalog.mjs \
+    src/agent/runtime-session-client.mjs \
+    src/agent/realtime-webrtc-transport.mjs \
+    src/agent/session-memory-store.mjs \
+    src/agent/voice-settings-store.mjs \
     src/background.js \
     src/content.js \
-    src/popup.js
+    src/offscreen-agent.js \
+    src/popup.js \
+    src/sidepanel.js \
+    src/storage-bundle.mjs
 )
 
 (

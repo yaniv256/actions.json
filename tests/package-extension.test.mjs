@@ -24,14 +24,36 @@ test("package-extension creates a Chrome-loadable zip and checksum", () => {
       "README.md",
       "actions/overlay.actions.json",
       "manifest.json",
+      "offscreen.html",
       "popup.html",
+      "sidepanel.html",
+      "src/agent/credential-store.mjs",
+      "src/agent/fake-realtime-transport.mjs",
+      "src/agent/hosted-tool-executor.mjs",
+      "src/agent/local-actions-catalog.mjs",
+      "src/agent/realtime-session-manager.mjs",
+      "src/agent/realtime-tool-catalog.mjs",
+      "src/agent/realtime-webrtc-transport.mjs",
+      "src/agent/runtime-session-client.mjs",
+      "src/agent/session-memory-store.mjs",
+      "src/agent/voice-settings-store.mjs",
       "src/background.js",
       "src/content.js",
+      "src/offscreen-agent.js",
       "src/popup.js",
+      "src/sidepanel.js",
+      "src/storage-bundle.mjs",
     ]);
 
     const sums = execFileSync("cat", [sumsPath], { encoding: "utf8" });
     assert.match(sums, /actions-json-overlay-runtime-test\.zip/);
+
+    const actionsManifest = JSON.parse(
+      execFileSync("unzip", ["-p", zipPath, "actions/overlay.actions.json"], { encoding: "utf8" }),
+    );
+    const sessionLogTool = actionsManifest.tools.find((tool) => tool.name === "runtime.session.log");
+    assert.equal(sessionLogTool.input_schema.properties.limit.maximum, 2000);
+    assert.equal(sessionLogTool.input_schema.properties.limit.default, 2000);
   } finally {
     rmSync(outputDir, { recursive: true, force: true });
   }

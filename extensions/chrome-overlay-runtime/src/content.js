@@ -28,6 +28,7 @@
 
   const LAUNCHER_ATTR = "data-actions-json-overlay-launcher";
   const OVERLAY_REGISTRY_STORAGE_KEY = "actionsJsonOverlayRegistry.v1";
+  const MENU_OVERLAY_STATE_STORAGE_KEY = "actionsJsonMenuOverlayState.v1";
   const BOOKMARKLET_RELAY_SOURCE = "ajbm";
   const EXTENSION_RELAY_SOURCE = "ajex";
 
@@ -35,6 +36,13 @@
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(item));
     }
+  };
+
+  const newActionCallId = (prefix = "call") => {
+    if (globalThis.crypto?.randomUUID) {
+      return `${prefix}-${globalThis.crypto.randomUUID()}`;
+    }
+    return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   };
 
   const isHumanInteractionAction = (name) =>
@@ -139,6 +147,14 @@
       body: doc.body ? doc.body.innerHTML : html
     };
   };
+
+  const escapeHtml = (value) =>
+    String(value || "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
 
   const launcherIdFrom = (launcher, title) => {
     const raw = launcher.id || title || "overlay";
@@ -666,7 +682,375 @@
       existing.remove();
       emitDomEvent("actions-json:overlay-closed", { overlay_id: overlayId });
     }
+    const menu = document.getElementById("__actions_json_menu_overlay_host");
+    if (menu) {
+      menu.remove();
+      persistMenuOverlayState({ open: false }).catch((_error) => {});
+      emitDomEvent("actions-json:overlay-closed", { overlay_id: "actions-json-menu" });
+    }
     return { ok: true };
+  };
+
+  const menuOverlayGeometryFrom = (host) => {
+    const rect = host.getBoundingClientRect();
+    return {
+      left: `${Math.round(rect.left)}px`,
+      top: `${Math.round(rect.top)}px`,
+      width: host.style.width || `${Math.round(rect.width)}px`,
+      height: host.style.height || `${Math.round(rect.height)}px`,
+      minWidth: host.style.minWidth,
+      minHeight: host.style.minHeight,
+      resize: host.style.resize,
+      right: host.style.right,
+      bottom: host.style.bottom,
+    };
+  };
+
+  const persistMenuOverlayState = async (state) => {
+    await storageSet({
+      [MENU_OVERLAY_STATE_STORAGE_KEY]: {
+        version: 1,
+        updated_at: new Date().toISOString(),
+        ...state,
+      },
+    });
+  };
+
+  const openMenuOverlay = (options = {}) => {
+    const restoreState = options.restoreState && typeof options.restoreState === "object" ? options.restoreState : {};
+    const existing = document.getElementById("__actions_json_menu_overlay_host");
+    if (existing) {
+      existing.remove();
+    }
+
+    const host = document.createElement("div");
+    host.id = "__actions_json_menu_overlay_host";
+    const restoredGeometry = restoreState.geometry && typeof restoreState.geometry === "object"
+      ? restoreState.geometry
+      : null;
+    const initialLeft = restoredGeometry?.left || null;
+    const initialTop = restoredGeometry?.top || null;
+    const initialWidth = restoredGeometry?.width || "min(340px, calc(100vw - 48px))";
+    const initialHeight = restoredGeometry?.height || "min(420px, calc(100vh - 48px))";
+    host.style.cssText = [
+      "position:fixed",
+      initialLeft ? `left:${initialLeft}` : "right:24px",
+      `top:${initialTop || "24px"}`,
+      initialLeft ? "right:auto" : "right:24px",
+      `width:${initialWidth}`,
+      `height:${initialHeight}`,
+      "min-width:220px",
+      "min-height:42px",
+      "z-index:2147483647",
+      "resize:both",
+      "overflow:hidden",
+      "background:white",
+      "border:1px solid rgba(20,24,31,0.22)",
+      "border-radius:10px",
+      "box-shadow:0 24px 80px rgba(0,0,0,0.32)"
+    ].join(";");
+
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
+      <style>
+        :host {
+          --ink: #15171d;
+          --muted: #5d6372;
+          --line: #dce1ea;
+          --bar: #18202c;
+          --tab-active: #ffffff;
+          all: initial;
+          color: var(--ink);
+          font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        * { box-sizing: border-box; }
+        .panel {
+          width: 100%;
+          height: 100%;
+          display: grid;
+          grid-template-rows: 42px minmax(0, 1fr);
+          background: #f7f8fb;
+          color: var(--ink);
+        }
+        .panel[data-collapsed="true"] {
+          grid-template-rows: 42px;
+        }
+        .panel[data-collapsed="true"] .body {
+          display: none;
+        }
+        .panel[data-collapsed="true"] .bar {
+          grid-template-columns: 30px;
+          padding: 6px;
+        }
+        .panel[data-collapsed="true"] .tabs,
+        .panel[data-collapsed="true"] [data-close] {
+          display: none;
+        }
+        .panel[data-collapsed="true"] .actions {
+          gap: 0;
+        }
+        .bar {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
+          padding: 0 8px 0 10px;
+          background: var(--bar);
+          color: #fff;
+          cursor: move;
+          user-select: none;
+        }
+        .tabs {
+          display: flex;
+          gap: 4px;
+          align-items: end;
+          min-width: 0;
+          height: 100%;
+          padding-top: 6px;
+          overflow: hidden;
+        }
+        .tab {
+          appearance: none;
+          min-width: 0;
+          max-width: 128px;
+          height: 30px;
+          padding: 0 10px;
+          border: 1px solid rgba(255,255,255,0.18);
+          border-bottom: 0;
+          border-radius: 7px 7px 0 0;
+          background: rgba(255,255,255,0.09);
+          color: #fff;
+          font: 750 12px/1 system-ui, sans-serif;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          cursor: pointer;
+        }
+        .tab[aria-selected="true"] {
+          background: var(--tab-active);
+          color: var(--ink);
+          border-color: var(--tab-active);
+        }
+        .actions {
+          display: flex;
+          gap: 6px;
+          align-items: center;
+        }
+        .icon {
+          appearance: none;
+          width: 30px;
+          height: 30px;
+          padding: 0;
+          border: 1px solid rgba(255,255,255,0.18);
+          border-radius: 7px;
+          background: rgba(255,255,255,0.08);
+          color: #fff;
+          font: 800 15px/1 system-ui, sans-serif;
+          cursor: pointer;
+        }
+        .icon:hover { background: rgba(255,255,255,0.16); }
+        .body {
+          min-width: 0;
+          min-height: 0;
+          overflow: hidden;
+          border-top: 0;
+        }
+        .panel-view {
+          display: none;
+          width: 100%;
+          height: 100%;
+          min-height: 0;
+        }
+        .panel-view.active {
+          display: block;
+        }
+        iframe {
+          display: block;
+          width: 100%;
+          height: 100%;
+          border: 0;
+          background: #fff;
+        }
+      </style>
+      <section class="panel" role="dialog" aria-label="actions.json menu">
+        <header class="bar" data-drag-handle>
+          <div class="tabs" role="tablist" aria-label="actions.json overlay tabs">
+            <button class="tab" role="tab" aria-selected="true" data-tab="agent">Agent</button>
+            <button class="tab" role="tab" aria-selected="false" data-tab="config">Settings</button>
+          </div>
+          <div class="actions">
+            <button class="icon" type="button" title="Collapse" data-minimize>☰</button>
+            <button class="icon" type="button" title="Close" data-close>×</button>
+          </div>
+        </header>
+        <main class="body">
+          <section class="panel-view active" data-panel="agent" role="tabpanel">
+            <iframe title="actions.json agent" allow="microphone; autoplay" src="${chrome.runtime.getURL("sidepanel.html?surface=overlay&tab=agent")}"></iframe>
+          </section>
+          <section class="panel-view" data-panel="config" role="tabpanel">
+            <iframe title="actions.json settings" allow="microphone; autoplay" src="${chrome.runtime.getURL("sidepanel.html?surface=overlay&tab=config")}"></iframe>
+          </section>
+        </main>
+      </section>
+    `;
+    document.documentElement.appendChild(host);
+
+    const panel = shadow.querySelector(".panel");
+    const bar = shadow.querySelector("[data-drag-handle]");
+    const minimize = shadow.querySelector("[data-minimize]");
+    const close = shadow.querySelector("[data-close]");
+    const tabs = Array.from(shadow.querySelectorAll("[data-tab]"));
+    const panels = Array.from(shadow.querySelectorAll("[data-panel]"));
+    let drag = null;
+    let selectedTab = restoreState.selected_tab === "config" ? "config" : "agent";
+    let restoreGeometry = restoredGeometry;
+    let persistTimer = null;
+
+    const persistCurrentState = (extra = {}) => {
+      clearTimeout(persistTimer);
+      persistTimer = setTimeout(() => {
+        const collapsed = panel.dataset.collapsed === "true";
+        const geometry = collapsed && restoreGeometry
+          ? restoreGeometry
+          : menuOverlayGeometryFrom(host);
+        persistMenuOverlayState({
+          open: true,
+          selected_tab: selectedTab,
+          collapsed,
+          geometry,
+          ...extra,
+        }).catch((_error) => {});
+      }, 0);
+    };
+
+    const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+    const place = (left, top) => {
+      const rect = host.getBoundingClientRect();
+      host.style.left = `${clamp(left, 8, window.innerWidth - Math.min(rect.width, window.innerWidth) - 8)}px`;
+      host.style.top = `${clamp(top, 8, window.innerHeight - Math.min(rect.height, window.innerHeight) - 8)}px`;
+      host.style.right = "auto";
+      host.style.bottom = "auto";
+    };
+    const selectTab = (id) => {
+      selectedTab = id === "config" ? "config" : "agent";
+      for (const tab of tabs) {
+        tab.setAttribute("aria-selected", String(tab.dataset.tab === selectedTab));
+      }
+      for (const view of panels) {
+        view.classList.toggle("active", view.dataset.panel === selectedTab);
+      }
+      persistCurrentState();
+    };
+    const setCollapsed = (collapsed) => {
+      if (collapsed) {
+        const rect = host.getBoundingClientRect();
+        restoreGeometry = {
+          width: host.style.width,
+          height: host.style.height,
+          minWidth: host.style.minWidth,
+          minHeight: host.style.minHeight,
+          resize: host.style.resize,
+          left: `${rect.left}px`,
+          top: `${rect.top}px`,
+          right: host.style.right,
+          bottom: host.style.bottom,
+        };
+        panel.dataset.collapsed = "true";
+        host.style.left = `${rect.left}px`;
+        host.style.top = `${rect.top}px`;
+        host.style.right = "auto";
+        host.style.bottom = "auto";
+        host.style.width = "42px";
+        host.style.height = "42px";
+        host.style.minWidth = "42px";
+        host.style.minHeight = "42px";
+        host.style.resize = "none";
+        minimize.title = "Expand";
+        persistCurrentState({ collapsed: true, geometry: restoreGeometry });
+        return;
+      }
+      panel.dataset.collapsed = "false";
+      if (restoreGeometry) {
+        host.style.width = restoreGeometry.width;
+        host.style.height = restoreGeometry.height;
+        host.style.minWidth = restoreGeometry.minWidth;
+        host.style.minHeight = restoreGeometry.minHeight;
+        host.style.resize = restoreGeometry.resize;
+        host.style.left = restoreGeometry.left;
+        host.style.top = restoreGeometry.top;
+        host.style.right = restoreGeometry.right;
+        host.style.bottom = restoreGeometry.bottom;
+      }
+      restoreGeometry = null;
+      minimize.title = "Collapse";
+      place(host.getBoundingClientRect().left, host.getBoundingClientRect().top);
+      persistCurrentState({ collapsed: false });
+    };
+
+    selectTab(selectedTab);
+
+    for (const tab of tabs) {
+      tab.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        selectTab(tab.dataset.tab);
+      });
+    }
+
+    bar.addEventListener("pointerdown", (event) => {
+      if (event.target.closest("button")) return;
+      const rect = host.getBoundingClientRect();
+      drag = { pointerId: event.pointerId, dx: event.clientX - rect.left, dy: event.clientY - rect.top };
+      bar.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    });
+    bar.addEventListener("pointermove", (event) => {
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      place(event.clientX - drag.dx, event.clientY - drag.dy);
+    });
+    const endDrag = (event) => {
+      if (drag && drag.pointerId === event.pointerId) {
+        drag = null;
+        persistCurrentState();
+      }
+    };
+    bar.addEventListener("pointerup", endDrag);
+    bar.addEventListener("pointercancel", endDrag);
+    minimize.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setCollapsed(panel.dataset.collapsed !== "true");
+    });
+    close.addEventListener("click", () => {
+      host.remove();
+      clearTimeout(persistTimer);
+      persistMenuOverlayState({ open: false }).catch((_error) => {});
+      emitDomEvent("actions-json:overlay-closed", { overlay_id: "actions-json-menu" });
+    });
+
+    const resizeObserver = typeof ResizeObserver === "function"
+      ? new ResizeObserver(() => persistCurrentState())
+      : null;
+    resizeObserver?.observe(host);
+
+    if (restoreState.collapsed === true) {
+      setCollapsed(true);
+    } else {
+      persistCurrentState({ collapsed: false });
+    }
+
+    emitDomEvent("actions-json:overlay-opened", { overlay_id: "actions-json-menu" });
+    return { ok: true, overlay_id: "actions-json-menu" };
+  };
+
+  const restoreMenuOverlayIfNeeded = async () => {
+    if (document.getElementById("__actions_json_menu_overlay_host")) {
+      return { ok: true, restored: false, already_open: true };
+    }
+    const stored = await storageGet(MENU_OVERLAY_STATE_STORAGE_KEY);
+    if (!stored || stored.open !== true) return { ok: true, restored: false };
+    return { ...openMenuOverlay({ restoreState: stored }), restored: true };
   };
 
   const sendRuntimeMessage = (message, timeoutMs = 10_000) =>
@@ -917,10 +1301,10 @@
   const isRectInViewport = (rect) => (
     rect.width > 0
       && rect.height > 0
-      && rect.bottom >= 0
-      && rect.right >= 0
-      && rect.top <= window.innerHeight
-      && rect.left <= window.innerWidth
+      && rect.bottom > 0
+      && rect.right > 0
+      && rect.top < window.innerHeight
+      && rect.left < window.innerWidth
   );
 
   const visibleRectFor = (element) => {
@@ -1286,6 +1670,14 @@
     });
   };
 
+  const runtimeSessionLog = async (args = {}) => {
+    const response = await sendRuntimeMessage({
+      type: "actions-json:agent-session-log",
+      limit: args.limit,
+    });
+    return primitiveSuccess("runtime.session.log", response.log || response);
+  };
+
   const primitiveSuccess = (primitive, value) => ({
     ok: true,
     primitive,
@@ -1332,6 +1724,28 @@
 
   const resolveSingleVisibleLocator = (locator) => resolveLocatorCandidates(locator).find(isElementVisible) || null;
   const resolveSingleLocator = (locator) => resolveLocatorCandidates(locator)[0] || null;
+
+  const rectDiagnostic = (element) => {
+    if (!(element instanceof Element)) return null;
+    const rect = element.getBoundingClientRect();
+    return {
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height,
+      left: rect.left,
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.bottom
+    };
+  };
+
+  const viewportDiagnostic = () => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+    scroll_x: window.scrollX,
+    scroll_y: window.scrollY
+  });
 
   const locatorElementInfo = (args = {}) => {
     const locator = args.locator;
@@ -1434,6 +1848,7 @@
 
     let target = window;
     let targetKind = "viewport";
+    let diagnosticTargetElement = null;
     if (args.scope && typeof args.scope === "object") {
       const scopeElement = findScopedElement(args.scope);
       if (!scopeElement) {
@@ -1441,6 +1856,7 @@
           scope: args.scope
         });
       }
+      diagnosticTargetElement = scopeElement;
       const root = findExtractionRoot(scopeElement, args.item_selector || args.itemSelector, args.scope);
       const scrollable = findScrollableElement(root, deltaX, deltaY);
       if (!scrollable) {
@@ -1455,6 +1871,9 @@
     const before = target === window
       ? { scroll_x: window.scrollX, scroll_y: window.scrollY }
       : { scroll_x: target.scrollLeft, scroll_y: target.scrollTop };
+    const targetElementBefore = diagnosticTargetElement ? rectDiagnostic(diagnosticTargetElement) : null;
+    const scrollTargetBefore = target === window ? null : rectDiagnostic(target);
+    const viewportBefore = viewportDiagnostic();
 
     if (target === window) {
       window.scrollBy({ left: deltaX, top: deltaY, behavior: "instant" });
@@ -1466,6 +1885,9 @@
     const after = target === window
       ? { scroll_x: window.scrollX, scroll_y: window.scrollY }
       : { scroll_x: target.scrollLeft, scroll_y: target.scrollTop };
+    const targetElementAfter = diagnosticTargetElement ? rectDiagnostic(diagnosticTargetElement) : null;
+    const scrollTargetAfter = target === window ? null : rectDiagnostic(target);
+    const viewportAfter = viewportDiagnostic();
 
     return primitiveSuccess("viewport.scroll", {
       moved: after.scroll_x !== before.scroll_x || after.scroll_y !== before.scroll_y,
@@ -1473,7 +1895,24 @@
       before,
       after,
       delta_x: deltaX,
-      delta_y: deltaY
+      delta_y: deltaY,
+      diagnostics: {
+        viewport: viewportAfter,
+        viewport_before: viewportBefore,
+        target_element: diagnosticTargetElement
+          ? {
+              tag_name: diagnosticTargetElement.tagName.toLowerCase(),
+              text: normalizeText(diagnosticTargetElement.textContent),
+              before: targetElementBefore,
+              after: targetElementAfter
+            }
+          : null,
+        scroll_target: {
+          kind: targetKind,
+          before: target === window ? before : scrollTargetBefore,
+          after: target === window ? after : scrollTargetAfter
+        }
+      }
     });
   };
 
@@ -1709,72 +2148,79 @@
     return manifest;
   };
 
+  const executeAction = async (message) => {
+    const rateLimitWaitMs = await waitForHumanInteractionSlot(message.name);
+    const actions = await loadManifest();
+    const action = actions.tools?.find((tool) => tool.name === message.name);
+    if (!action) throw new Error(`Unknown action: ${message.name}`);
+
+    let output;
+    if (message.name === "overlay.open") {
+      output = openOverlay(message.arguments || {});
+    } else if (message.name === "overlay.register_launcher") {
+      output = await registerLauncher(message.arguments || {});
+    } else if (message.name === "overlay.close") {
+      output = closeOverlay();
+    } else if (message.name === "runtime.configure_pacing") {
+      output = configurePrimitivePacing(message.arguments || {});
+    } else if (message.name === "runtime.session.log") {
+      output = await runtimeSessionLog(message.arguments || {});
+    } else if (message.name === "browser.screenshot") {
+      output = await captureScreenshot(message.arguments || {});
+    } else if (message.name === "browser.extract_elements") {
+      output = await extractElements(message.arguments || {});
+    } else if (message.name === "browser.run_javascript") {
+      output = await runJavascript(message.arguments || {});
+    } else if (message.name === "debug.run_javascript") {
+      output = await debugRunJavascript(message.arguments || {});
+    } else if (message.name === "locator.element_info") {
+      output = locatorElementInfo(message.arguments || {});
+    } else if (message.name === "locator.text_content") {
+      output = locatorTextContent(message.arguments || {});
+    } else if (message.name === "locator.wait_for") {
+      output = await locatorWaitFor(message.arguments || {});
+    } else if (message.name === "viewport.scroll") {
+      output = await viewportScroll(message.arguments || {});
+    } else if (message.name === "pointer.click") {
+      output = pointerClick(message.arguments || {});
+    } else if (message.name === "pointer.move") {
+      output = pointerMove(message.arguments || {});
+    } else if (message.name === "pointer.double_click") {
+      output = pointerDoubleClick(message.arguments || {});
+    } else if (message.name === "pointer.drag") {
+      output = pointerDrag(message.arguments || {});
+    } else if (message.name === "text.insert") {
+      output = textInsert(message.arguments || {});
+    } else if (message.name === "keyboard.press") {
+      output = keyboardPress(message.arguments || {});
+    } else if (message.name === "page.info") {
+      output = pageInfo();
+    } else if (message.name === "dom.observe.visible") {
+      output = domObserveVisible(message.arguments || {});
+    } else if (message.name === "dom.list_sections") {
+      output = domListSections(message.arguments || {});
+    } else if (message.name === "dom.snapshot_text") {
+      output = domSnapshotText(message.arguments || {});
+    } else if (message.name === "storage.import_bundle") {
+      output = await importStorageBundle(message.arguments || {});
+    } else if (message.name === "storage.list") {
+      output = await listStorageBundle();
+    } else {
+      throw new Error(`No handler implemented for action: ${message.name}`);
+    }
+
+    return annotatePrimitivePacing(output, rateLimitWaitMs);
+  };
+
   const handleActionCall = async (message) => {
-    const callId = message.call_id || crypto.randomUUID();
+    const callId = message.call_id || newActionCallId();
     try {
-      const rateLimitWaitMs = await waitForHumanInteractionSlot(message.name);
-      const actions = await loadManifest();
-      const action = actions.tools?.find((tool) => tool.name === message.name);
-      if (!action) throw new Error(`Unknown action: ${message.name}`);
-
-      let output;
-      if (message.name === "overlay.open") {
-        output = openOverlay(message.arguments || {});
-      } else if (message.name === "overlay.register_launcher") {
-        output = await registerLauncher(message.arguments || {});
-      } else if (message.name === "overlay.close") {
-        output = closeOverlay();
-      } else if (message.name === "runtime.configure_pacing") {
-        output = configurePrimitivePacing(message.arguments || {});
-      } else if (message.name === "browser.screenshot") {
-        output = await captureScreenshot(message.arguments || {});
-      } else if (message.name === "browser.extract_elements") {
-        output = await extractElements(message.arguments || {});
-      } else if (message.name === "browser.run_javascript") {
-        output = await runJavascript(message.arguments || {});
-      } else if (message.name === "debug.run_javascript") {
-        output = await debugRunJavascript(message.arguments || {});
-      } else if (message.name === "locator.element_info") {
-        output = locatorElementInfo(message.arguments || {});
-      } else if (message.name === "locator.text_content") {
-        output = locatorTextContent(message.arguments || {});
-      } else if (message.name === "locator.wait_for") {
-        output = await locatorWaitFor(message.arguments || {});
-      } else if (message.name === "viewport.scroll") {
-        output = await viewportScroll(message.arguments || {});
-      } else if (message.name === "pointer.click") {
-        output = pointerClick(message.arguments || {});
-      } else if (message.name === "pointer.move") {
-        output = pointerMove(message.arguments || {});
-      } else if (message.name === "pointer.double_click") {
-        output = pointerDoubleClick(message.arguments || {});
-      } else if (message.name === "pointer.drag") {
-        output = pointerDrag(message.arguments || {});
-      } else if (message.name === "text.insert") {
-        output = textInsert(message.arguments || {});
-      } else if (message.name === "keyboard.press") {
-        output = keyboardPress(message.arguments || {});
-      } else if (message.name === "page.info") {
-        output = pageInfo();
-      } else if (message.name === "dom.observe.visible") {
-        output = domObserveVisible(message.arguments || {});
-      } else if (message.name === "dom.list_sections") {
-        output = domListSections(message.arguments || {});
-      } else if (message.name === "dom.snapshot_text") {
-        output = domSnapshotText(message.arguments || {});
-      } else if (message.name === "storage.import_bundle") {
-        output = await importStorageBundle(message.arguments || {});
-      } else if (message.name === "storage.list") {
-        output = await listStorageBundle();
-      } else {
-        throw new Error(`No handler implemented for action: ${message.name}`);
-      }
-
+      const output = await executeAction(message);
       protocolSend({
         type: "action_call_output",
         call_id: callId,
         runtime_id: RUNTIME_ID,
-        output: annotatePrimitivePacing(output, rateLimitWaitMs)
+        output
       });
     } catch (error) {
       protocolSend({
@@ -1801,6 +2247,7 @@
     shouldReconnect = true;
     const actions = await loadManifest();
     await restoreRegisteredOverlays();
+    await restoreMenuOverlayIfNeeded();
     installManifestAttachments(actions);
 
     const previousSocket = socket;
@@ -1877,6 +2324,26 @@
     }
     if (message?.type === "actions-json:close-overlay") {
       sendResponse(closeOverlay());
+    }
+    if (message?.type === "actions-json:open-menu-overlay") {
+      sendResponse(openMenuOverlay());
+    }
+    if (message?.type === "actions-json:execute-action") {
+      executeAction({
+        call_id: message.call_id,
+        name: message.name,
+        arguments: message.arguments || {}
+      }).then(
+        (output) => sendResponse({ ok: true, output }),
+        (error) => sendResponse({
+          ok: false,
+          error: {
+            code: "handler_failed",
+            message: error.message || String(error)
+          }
+        })
+      );
+      return true;
     }
     return false;
   });

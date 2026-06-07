@@ -1,23 +1,38 @@
-# actions.json Overlay Runtime Extension
+# Chrome Overlay Runtime Extension
 
-Experimental Chrome MV3 extension runtime for `actions.json`.
+This directory contains the Chrome MV3 runtime for `actions.json`.
 
-This extension is a first-pass implementation of an authorized browser-side runtime:
+The extension is both:
 
-1. The user opens a page, such as Linear.
-2. The user clicks the extension and authorizes the current tab.
-3. The content script loads `actions/overlay.actions.json`.
-4. The content script connects to a local bridge at `ws://127.0.0.1:17345/extension`.
-5. The local bridge can send Responses-style `action_call` items for declared actions such as `overlay.open`.
-6. The extension renders agent-provided HTML inside a draggable, resizable, minimizable popup overlay.
-7. The same `overlay.open` call can install visible launcher buttons into the original page DOM so the user can reopen the overlay from the relevant page context.
+- a browser runtime that can execute `actions.json` primitives on authorized
+  tabs; and
+- a hosted `gpt-realtime-2` agent surface that uses the user's OpenAI API key,
+  uploaded storage, screenshots, and runtime tools.
 
-The extension does not use an iframe for the overlay. It creates a temporary Shadow DOM surface in the page.
+For user-facing setup, start with
+[Getting Started](../../docs/getting-started.md) and
+[Chrome Extension](../../docs/chrome-extension.md).
 
-## Install for Local Testing
+## What The Extension Provides
+
+- Per-tab authorization from the extension popup.
+- The trusted `actions.json` menu overlay.
+- Top-level **Agent** and **Settings** tabs.
+- Hosted voice/text agent controls, transcript, voice selection, and VAD
+  settings.
+- Extension-owned offscreen document for the live Realtime WebRTC session.
+- Popup voice controls that can stop a hidden session even when no overlay is
+  visible.
+- Storage upload/download for `actions.json.storage` checkouts.
+- `actions.site` for storage-backed current-site actions.
+- Direct primitives such as screenshots, scrolling, pointer actions, DOM
+  inspection, locator geometry, and overlay rendering.
+- Debugger-backed authoring fallback through `debug.run_javascript`.
+
+## Install For Local Testing
 
 1. Open `chrome://extensions`.
-2. Enable Developer Mode.
+2. Enable **Developer mode**.
 3. Click **Load unpacked**.
 4. Select this directory:
 
@@ -25,37 +40,94 @@ The extension does not use an iframe for the overlay. It creates a temporary Sha
    extensions/chrome-overlay-runtime
    ```
 
-5. Start the local bridge:
+5. Open a website.
+6. Click the extension icon.
+7. Choose **Take control of this tab**.
+8. Choose **Open actions.json menu**.
 
-   ```bash
-   cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- serve
-   ```
+The hosted agent can run without the local bridge. Add an OpenAI API key in
+**Settings**, upload storage if you want site-specific actions, then start the
+voice session from **Agent**.
 
-6. Open the target page.
-7. Click the extension action and choose **Authorize current tab**.
+Run the local bridge only when an external coding agent needs to operate the
+extension runtime:
 
-## Safety Model
+```bash
+cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- serve
+```
 
-This is intentionally user-authorized per tab. The extension only connects after the user clicks the extension on the target page.
+## Source Map
 
-The overlay is temporary and disappears on page reload or navigation. It should not be used for credential capture, deceptive UI, or persistent site modification.
+- `manifest.json`: Chrome MV3 manifest and permissions.
+- `popup.html` / `src/popup.js`: extension icon popup, tab authorization, menu
+  launch, and direct voice controls.
+- `sidepanel.html` / `src/sidepanel.js`: extension-owned Agent and Settings UI
+  rendered inside the trusted overlay iframe.
+- `offscreen.html` / `src/offscreen-agent.js`: hidden extension document that
+  owns the live Realtime WebRTC session.
+- `src/agent/`: hosted-agent session manager, transcript handling, tool catalog,
+  voice settings, VAD settings, and memory helpers.
+- `src/background.js`: tab authorization, bridge connection, tool routing,
+  storage state, offscreen lifecycle, screenshot handling, and navigation
+  reinjection.
+- `src/content.js`: page overlay shell, portable primitives, launcher
+  placement, page inspection, and storage import handling.
+- `src/storage-bundle.mjs`: storage upload/download bundle handling.
+- `actions/overlay.actions.json`: extension runtime action manifest.
 
-The extension also declares Chrome's `debugger` permission for authoring-only fallback operations. The `debug.run_javascript` action uses the extension background service worker and Chrome Debugger Protocol to evaluate arbitrary JavaScript in the authorized tab when content-script evaluation is blocked by page policy such as CSP. This fallback is for proving and debugging page operations before encoding them into `actions.json`; it is not part of the portable primitive dictionary and should not be used as a product action.
+## Permissions And Boundaries
 
-## Overlay Controls
+The extension asks for permissions that match its current role:
 
-Each overlay has title-bar controls:
+- `activeTab`, `tabs`, and `scripting` for authorized tab operation;
+- `storage` for API key state, settings, uploaded storage, and session memory;
+- `offscreen` for the durable Realtime audio session;
+- `tabGroups` for transparent controlled-tab grouping;
+- `debugger` for authoring fallback tools.
 
-- **Minimize** collapses the overlay to a compact draggable title bar.
-- **Expand** restores the overlay to its previous rendered size.
-- **Reset** restores the default position and size.
-- **Close** removes the overlay from the page.
+Debugger-backed tools are privileged. Use them to learn how a page works, then
+encode durable behavior as portable `actions.json` actions.
 
-## Page Launchers
+Do not use report overlays for credential capture, deceptive UI, or persistent
+site modification. Agent-provided report overlays run in temporary Shadow DOM
+surfaces and strip scripts. The trusted `actions.json` menu is extension-owned
+UI.
 
-`overlay.open` accepts optional `launchers`. A launcher is a small button inserted near a selected element in the original page DOM. This lets the user reopen a closed overlay from the page context that motivated it, such as:
+## Runtime Tools
 
-- an ACT-5 launcher near Linear issue links or headings;
-- a Continue Watching launcher near the Prime Video carousel title.
+The extension manifest currently includes:
 
-Launcher placement is selector-based with optional URL and visible-text filters. The runtime stores registered overlay payloads in the page content script, watches for SPA navigation and DOM replacement, and reinstalls matching launchers when the relevant page context reappears. Multiple overlay launchers can coexist on one authorized tab; each launcher reopens its own registered overlay without requiring a new bridge call.
+- overlay tools: `overlay.open`, `overlay.register_launcher`, `overlay.close`;
+- session tools: `runtime.configure_pacing`, `runtime.session.log`;
+- browser tools: `browser.screenshot`, `browser.extract_elements`;
+- storage tools: `storage.import_bundle`, `storage.list`, `storage.sync`;
+- DOM and locator tools: `dom.list_sections`, `locator.element_info`;
+- visible action tools: `viewport.scroll`, `pointer.click`;
+- JavaScript tools: `browser.run_javascript`, `debug.run_javascript`;
+- current-site tool: `actions.site`.
+
+Site maps can remove unsafe or blocked portable tools for a given website. For
+example, if page JavaScript evaluation is blocked or inappropriate, remove
+`browser.run_javascript` from the site-facing action set while keeping
+`debug.run_javascript` available for extension authoring.
+
+## Verify A Local Build
+
+Run the relevant tests before packaging or release work:
+
+```bash
+node --test extensions/chrome-overlay-runtime/tests/*.test.mjs \
+  tests/background-screenshot.test.mjs \
+  tests/package-extension.test.mjs
+```
+
+Package validation checks that required files such as `popup.html`,
+`offscreen.html`, and the hosted-agent modules are present.
+
+## Related Docs
+
+- [Hosted Agent](../../docs/hosted-agent.md)
+- [Hosted Agent Tools](../../docs/hosted-agent-tools.md)
+- [Hosted Agent Chat UI](../../docs/hosted-agent-chat-ui.md)
+- [Bridge Architecture](../../docs/bridge-architecture.md)
+- [Troubleshooting](../../docs/troubleshooting.md)

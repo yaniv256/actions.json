@@ -1,8 +1,47 @@
 const { test, expect } = require("@playwright/test");
+const fs = require("fs");
 const path = require("path");
 
 const contentScriptPath = path.join(__dirname, "../src/content.js");
 const backgroundScriptPath = path.join(__dirname, "../src/background.js");
+
+function backgroundScriptForBrowserTest() {
+  return fs.readFileSync(backgroundScriptPath, "utf8")
+    .replace(
+      /^import \{\n  listSiteActionsFromBundle,\n  resolveSiteActionFromBundle,\n  siteBlockedPrimitiveNamesFromBundle,\n\} from "\.\/agent\/local-actions-catalog\.mjs";\nimport \{\n  buildRealtimeToolCatalog,\n  filterRealtimeToolsForBlockedPrimitives,\n\} from "\.\/agent\/realtime-tool-catalog\.mjs";\n\n/,
+      "",
+    );
+}
+
+async function addBackgroundScript(page) {
+  await page.evaluate(() => {
+    window.listSiteActionsFromBundle = window.listSiteActionsFromBundle || (() => []);
+    window.siteBlockedPrimitiveNamesFromBundle = window.siteBlockedPrimitiveNamesFromBundle || (() => []);
+    window.filterRealtimeToolsForBlockedPrimitives = window.filterRealtimeToolsForBlockedPrimitives || ((tools) => tools);
+    window.buildRealtimeToolCatalog = window.buildRealtimeToolCatalog || (() => [
+      {
+        type: "function",
+        name: "actions.site",
+        description: "List or call current-site actions.",
+        parameters: { type: "object", additionalProperties: false },
+      },
+      {
+        type: "function",
+        name: "pointer.click",
+        description: "Click a point.",
+        parameters: { type: "object", additionalProperties: false },
+      },
+    ]);
+    window.resolveSiteActionFromBundle = window.resolveSiteActionFromBundle || (() => ({
+      ok: false,
+      error: {
+        code: "unknown_action",
+        message: "Requested site action is not declared in browser-local actions.json storage.",
+      },
+    }));
+  });
+  await page.addScriptTag({ content: backgroundScriptForBrowserTest() });
+}
 
 async function installRuntime(page, manifestOverride) {
   await page.addInitScript(() => {
@@ -174,6 +213,126 @@ test("PR3 overlay.open creates an overlay host and returns an overlay id", async
   await expect(page.evaluate(() => window.__scriptRan === true)).resolves.toBe(false);
 });
 
+test("hosted agent action calls are not accepted as a content-script bridge bypass", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "page.info", input_schema: { type: "object" } },
+    ],
+  });
+
+  const response = await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    let answered = false;
+    const result = listener(
+      {
+        type: "actions-json:hosted-action-call",
+        name: "page.info",
+        arguments: {},
+      },
+      {},
+      () => {
+        answered = true;
+      },
+    );
+    return { result, answered };
+  });
+
+  expect(response).toEqual({ result: false, answered: false });
+  expect(await page.evaluate(() => window.__actionsJsonMessages.filter((item) => item.type === "action_call_output").length)).toBe(0);
+});
+
+test("runtime.session.log returns the extension-local hosted agent log through the bridge action path", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "runtime.session.log", input_schema: { type: "object" } },
+    ],
+  });
+  await page.evaluate(() => {
+    window.__actionsJsonRuntimeMessageHandler = async (message) => {
+      if (message.type !== "actions-json:agent-session-log") {
+        return { ok: false, error: `Unexpected message ${message.type}` };
+      }
+      return {
+        ok: true,
+        log: {
+          ok: true,
+          visitorId: "local-agent-test",
+          eventCount: 2,
+          events: [
+            { type: "transcript", role: "user", text: "Can you take a screenshot?" },
+            { type: "error", code: "tool_failed", message: "Screenshot failed" },
+          ],
+        },
+      };
+    };
+  });
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "call-session-log", "runtime.session.log", { limit: 20 });
+
+  await expect
+    .poll(() => actionOutput(page, "call-session-log"))
+    .toMatchObject({
+      type: "action_call_output",
+      call_id: "call-session-log",
+      output: {
+        ok: true,
+        primitive: "runtime.session.log",
+        adapter: "extension",
+        value: {
+          visitorId: "local-agent-test",
+          eventCount: 2,
+          events: [
+            { type: "transcript", role: "user", text: "Can you take a screenshot?" },
+            { type: "error", code: "tool_failed", message: "Screenshot failed" },
+          ],
+        },
+      },
+    });
+});
+
+test("extension menu opens top-level Agent and Settings tabs in the page overlay shell", async ({ page }) => {
+  await installRuntime(page);
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener(
+        { type: "actions-json:open-menu-overlay" },
+        {},
+        resolve
+      )
+    );
+  });
+
+  const menu = page.locator("#__actions_json_menu_overlay_host");
+  await expect(menu).toHaveCount(1);
+  await expect(menu.locator("iframe").first()).toHaveAttribute(
+    "src",
+    "https://actions-json.test/sidepanel.html?surface=overlay&tab=agent"
+  );
+  await expect(menu.locator("[data-tab='agent']")).toHaveAttribute("aria-selected", "true");
+  await expect(menu.locator("[data-tab='config']")).toHaveText("Settings");
+  await expect(menu.locator("[data-panel='agent']")).toHaveClass(/active/);
+  await expect(menu.locator("[data-tab='status']")).toHaveCount(0);
+
+  await menu.locator("[data-tab='config']").click();
+  await expect(menu.locator("[data-tab='config']")).toHaveAttribute("aria-selected", "true");
+  await expect(menu.locator("[data-panel='config']")).toHaveClass(/active/);
+  await expect(menu.locator("iframe").nth(1)).toHaveAttribute(
+    "src",
+    "https://actions-json.test/sidepanel.html?surface=overlay&tab=config"
+  );
+
+  await menu.locator("[data-minimize]").click();
+  await expect(menu.locator("[data-minimize]")).toBeVisible();
+  await expect(menu.locator("[data-tab='agent']")).toBeHidden();
+  await expect(menu.locator("[data-tab='config']")).toBeHidden();
+  await expect(menu.locator("[data-close]")).toBeHidden();
+  await expect
+    .poll(() => menu.evaluate((node) => Math.round(node.getBoundingClientRect().width)))
+    .toBeLessThanOrEqual(48);
+});
+
 test("runtime reconnects when the bridge WebSocket closes", async ({ page }) => {
   await installRuntime(page);
 
@@ -208,6 +367,54 @@ test("runtime reconnects when the bridge WebSocket closes", async ({ page }) => 
   await expect
     .poll(() => page.evaluate(() => window.__actionsJsonMessages.filter((item) => item.type === "runtime_ready").length))
     .toBe(2);
+});
+
+test("runtime reconnect preserves an already-open menu overlay without rebuilding it", async ({ page }) => {
+  await installRuntime(page);
+
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener(
+        {
+          type: "actions-json:connect",
+          bridgeUrl: "ws://127.0.0.1:17345/extension",
+          runtimeKey: "test-tab",
+          authorizationId: "test-auth",
+          extensionVersion: "test",
+        },
+        {},
+        resolve
+      )
+    );
+    await new Promise((resolve) =>
+      listener({ type: "actions-json:open-menu-overlay" }, {}, resolve)
+    );
+    const host = document.querySelector("#__actions_json_menu_overlay_host");
+    host.dataset.reconnectMarker = "same-host";
+    host.shadowRoot.querySelector("[data-tab='config']").click();
+  });
+
+  await page.evaluate(() => window.__actionsJsonWebSocket.close());
+
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonWebSockets.length), { timeout: 3000 })
+    .toBe(2);
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCount(1);
+  await expect
+    .poll(() => page.evaluate(() =>
+      document.querySelector("#__actions_json_menu_overlay_host")?.dataset.reconnectMarker
+    ))
+    .toBe("same-host");
+  await expect
+    .poll(() => page.evaluate(() =>
+      document
+        .querySelector("#__actions_json_menu_overlay_host")
+        ?.shadowRoot
+        ?.querySelector("[data-tab='config']")
+        ?.getAttribute("aria-selected")
+    ))
+    .toBe("true");
 });
 
 test("runtime relays bookmarklet protocol messages over the extension bridge", async ({ page }) => {
@@ -770,7 +977,7 @@ test("background screenshot focuses the sender window before visible-tab capture
   });
 
   await page.goto("data:text/html,<main><h1>Background test</h1></main>");
-  await page.addScriptTag({ path: backgroundScriptPath });
+  await addBackgroundScript(page);
 
   await expect(
     page.evaluate(
@@ -800,6 +1007,94 @@ test("background screenshot focuses the sender window before visible-tab capture
     { method: "tabs.update", tabId: 123, props: { active: true } },
     { method: "tabs.captureVisibleTab", windowId: 77, options: { format: "png" } },
   ]);
+});
+
+test("background session log handler returns stored agent memory without dynamic import", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__actionsJsonStorage = {
+      ACTIONS_JSON_AGENT_MEMORY_V1: {
+        visitorId: "local-agent-test",
+        events: [
+          { type: "transcript", role: "user", text: "Navigate to Generative Specification." },
+          { type: "tool", name: "actions.site", ok: false, summary: "Navigation blocked" },
+        ],
+      },
+    };
+    window.chrome = {
+      runtime: {
+        lastError: null,
+        getManifest() {
+          return { version: "test-version" };
+        },
+        onInstalled: {
+          addListener() {},
+        },
+        onMessage: {
+          addListener(listener) {
+            window.__actionsJsonBackgroundMessageListener = listener;
+          },
+        },
+      },
+      storage: {
+        local: {
+          async get(key) {
+            return { [key]: window.__actionsJsonStorage[key] };
+          },
+          async set(values) {
+            Object.assign(window.__actionsJsonStorage, values);
+          },
+        },
+      },
+      scripting: {
+        async executeScript() {},
+      },
+      tabGroups: {
+        async get(id) {
+          return { id };
+        },
+        async update() {},
+      },
+      tabs: {
+        async get(id) {
+          return { id, windowId: 77, url: "https://pragmaworks.dev/start" };
+        },
+        async group() {
+          return 42;
+        },
+        async sendMessage() {},
+      },
+    };
+  });
+
+  await page.goto("data:text/html,<main><h1>Background log test</h1></main>");
+  await addBackgroundScript(page);
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              type: "actions-json:agent-session-log",
+              limit: 10,
+            },
+            {},
+            resolve
+          );
+        })
+    )
+  ).resolves.toMatchObject({
+    ok: true,
+    log: {
+      ok: true,
+      visitorId: "local-agent-test",
+      eventCount: 2,
+      events: [
+        { type: "transcript", role: "user", text: "Navigate to Generative Specification." },
+        { type: "tool", name: "actions.site", ok: false, summary: "Navigation blocked" },
+      ],
+    },
+  });
 });
 
 test("storage import and list use Chrome local storage through the action path", async ({ page }) => {
@@ -1366,6 +1661,25 @@ test("viewport.scroll scrolls a scoped carousel horizontally through the extensi
         value: {
           moved: true,
           target: "element",
+          diagnostics: {
+            viewport: {
+              width: expect.any(Number),
+              height: expect.any(Number),
+              scroll_x: expect.any(Number),
+              scroll_y: expect.any(Number),
+            },
+            target_element: {
+              tag_name: "h2",
+              text: "Continue watching",
+              before: expect.any(Object),
+              after: expect.any(Object),
+            },
+            scroll_target: {
+              kind: "element",
+              before: expect.any(Object),
+              after: expect.any(Object),
+            },
+          },
         },
       },
     });
@@ -1630,6 +1944,50 @@ test("extension implements page, DOM, locator text, wait, and keyboard primitive
     },
   });
   await expect(page.evaluate(() => document.body.dataset.key)).resolves.toBe("Enter");
+});
+
+test("dom.list_sections treats viewport-edge sections as not visible", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "dom.list_sections", input_schema: { type: "object" } },
+    ],
+  });
+  await page.setViewportSize({ width: 1000, height: 600 });
+  await page.setContent(`
+    <main>
+      <section
+        data-testid="edge-section"
+        style="position:absolute; top:600px; left:0; width:300px; height:120px"
+      >
+        <h2>Just below viewport</h2>
+      </section>
+    </main>
+  `);
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "extension-dom-list-edge-section", "dom.list_sections", {
+    selector: "section[data-testid='edge-section']",
+    heading_selector: "h2",
+  });
+
+  await expect.poll(() => actionOutput(page, "extension-dom-list-edge-section")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "dom.list_sections",
+      adapter: "extension",
+      value: {
+        section_count: 1,
+        viewport_height: 600,
+        sections: [
+          expect.objectContaining({
+            heading: "Just below viewport",
+            top: 600,
+            visible: false,
+          }),
+        ],
+      },
+    },
+  });
 });
 
 test("debug.run_javascript delegates arbitrary evaluation to the privileged background fallback", async ({ page }) => {
@@ -1940,6 +2298,90 @@ test("registered launcher restores after content script reload and returned page
   await expect(page.locator("[data-actions-json-overlay-launcher='prime-video-continue-watching']")).toHaveText(
     "Categories"
   );
+});
+
+test("actions.json menu overlay restores after content script reload", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "overlay.open", input_schema: { type: "object" } },
+      { name: "overlay.close", input_schema: { type: "object" } },
+    ],
+  });
+
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener(
+        {
+          type: "actions-json:connect",
+          bridgeUrl: "ws://127.0.0.1:17345/extension",
+          runtimeKey: "test-tab",
+          authorizationId: "test-auth",
+          extensionVersion: "test",
+        },
+        {},
+        resolve
+      )
+    );
+    await new Promise((resolve) =>
+      listener({ type: "actions-json:open-menu-overlay" }, {}, resolve)
+    );
+  });
+
+  await page.locator("#__actions_json_menu_overlay_host").evaluate((host) => {
+    host.style.left = "118px";
+    host.style.top = "77px";
+    host.style.right = "auto";
+    host.style.bottom = "auto";
+    host.style.width = "300px";
+    host.style.height = "260px";
+  });
+  await page.locator("#__actions_json_menu_overlay_host").evaluate((host) => {
+    host.shadowRoot.querySelector("[data-tab='config']").click();
+    host.shadowRoot.querySelector("[data-minimize]").click();
+  });
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonStorage["actionsJsonMenuOverlayState.v1"]?.collapsed))
+    .toBe(true);
+
+  await page.evaluate(() => {
+    window.__actionsJsonOverlayRuntime.disconnect();
+    document.querySelector("#__actions_json_menu_overlay_host")?.remove();
+    document.querySelector("main").innerHTML = "<h1>After navigation</h1>";
+  });
+  await page.addScriptTag({ path: contentScriptPath });
+
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners.at(-1);
+    await new Promise((resolve) =>
+      listener(
+        {
+          type: "actions-json:connect",
+          bridgeUrl: "ws://127.0.0.1:17345/extension",
+          runtimeKey: "test-tab",
+          authorizationId: "test-auth",
+          extensionVersion: "test",
+        },
+        {},
+        resolve
+      )
+    );
+  });
+
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCount(1);
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("left", "118px");
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("top", "77px");
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("width", "42px");
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("height", "42px");
+
+  await page.locator("#__actions_json_menu_overlay_host").evaluate((host) => {
+    host.shadowRoot.querySelector("[data-minimize]").click();
+  });
+  await expect(
+    page.locator("#__actions_json_menu_overlay_host").evaluate((host) =>
+      host.shadowRoot.querySelector("[data-tab='config']").getAttribute("aria-selected")
+    )
+  ).resolves.toBe("true");
 });
 
 test("locator.element_info center feeds pointer.click through the extension action path", async ({ page }) => {

@@ -10,32 +10,437 @@
     "stage": 1,
     "host": "extension",
     "primitives": [
-      { "name": "browser.screenshot", "support": "supported", "reason": null, "capability_class": "privileged", "portable": false },
-      { "name": "pointer.move", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
-      { "name": "pointer.click", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
-      { "name": "pointer.double_click", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
-      { "name": "pointer.drag", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
-      { "name": "viewport.scroll", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
-      { "name": "text.insert", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
-      { "name": "keyboard.press", "support": "supported", "reason": null, "capability_class": "mixed", "portable": false },
-      { "name": "runtime.session.name", "support": "supported", "reason": null, "capability_class": "privileged", "portable": false },
-      { "name": "runtime.session.finalize_tabs", "support": "supported", "reason": null, "capability_class": "privileged", "portable": false },
-      { "name": "page.info", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
-      { "name": "dom.observe.visible", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
-      { "name": "dom.snapshot_text", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
-      { "name": "dom.list_sections", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
-      { "name": "locator.element_info", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
-      { "name": "locator.text_content", "support": "supported", "reason": null, "capability_class": "portable", "portable": true },
-      { "name": "locator.wait_for", "support": "supported", "reason": null, "capability_class": "portable", "portable": true }
+      {
+        "name": "browser.screenshot",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "privileged",
+        "portable": false,
+        "summary": "Capture a true rendered screenshot where the host has browser-level authority.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "format": {
+              "type": "string",
+              "enum": [
+                "png",
+                "jpeg"
+              ]
+            },
+            "quality": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "max_width": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_height": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_kilobytes": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pointer.move",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Move a visible pointer affordance to viewport coordinates.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "x",
+            "y"
+          ],
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            },
+            "duration_ms": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pointer.click",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Move visibly to viewport coordinates and perform a click.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "x",
+            "y"
+          ],
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            },
+            "button": {
+              "type": "string",
+              "enum": [
+                "left",
+                "middle",
+                "right"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pointer.double_click",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Move visibly to viewport coordinates and perform a double click.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "x",
+            "y"
+          ],
+          "properties": {
+            "x": {
+              "type": "number"
+            },
+            "y": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "pointer.drag",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Move visibly from one viewport point to another while dragging.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "from",
+            "to"
+          ],
+          "properties": {
+            "from": {
+              "type": "object",
+              "required": [
+                "x",
+                "y"
+              ]
+            },
+            "to": {
+              "type": "object",
+              "required": [
+                "x",
+                "y"
+              ]
+            },
+            "duration_ms": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "viewport.scroll",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Scroll the current viewport by a visible delta.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "delta_x": {
+              "type": "number"
+            },
+            "delta_y": {
+              "type": "number"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "text.insert",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Insert text into the focused editable target.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "text"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "keyboard.press",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "mixed",
+        "portable": false,
+        "summary": "Press a keyboard key where the host can provide the requested fidelity.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "key"
+          ],
+          "properties": {
+            "key": {
+              "type": "string"
+            },
+            "modifiers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "runtime.session.name",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "privileged",
+        "portable": false,
+        "summary": "Name the current browser-control session for user-visible transparency.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "name"
+          ],
+          "properties": {
+            "name": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "runtime.session.finalize_tabs",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "privileged",
+        "portable": false,
+        "summary": "Finalize browser tabs controlled during an authoring session.",
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "page.info",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Return basic information about the current page.",
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "dom.observe.visible",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Observe visible DOM candidates that match a selector or text query.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "selector": {
+              "type": "string"
+            },
+            "text_contains": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "dom.snapshot_text",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Return a text snapshot of visible page content.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "selector": {
+              "type": "string"
+            },
+            "max_chars": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "dom.list_sections",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "List rendered page sections with inferred headings, document offsets, viewport visibility, and optional item counts.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "selector": {
+              "type": "string"
+            },
+            "heading_selector": {
+              "type": "string"
+            },
+            "item_selector": {
+              "type": "string"
+            },
+            "text_contains": {
+              "type": "string"
+            },
+            "max_sections": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_heading_length": {
+              "type": "integer",
+              "minimum": 12
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "locator.element_info",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Resolve a locator to visible element geometry and a recommended clickable center.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "locator"
+          ],
+          "properties": {
+            "locator": {
+              "type": "object"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "locator.text_content",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Resolve a locator and return its visible text content.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "locator"
+          ],
+          "properties": {
+            "locator": {
+              "type": "object"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "locator.wait_for",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Wait for a locator to satisfy a visible or attached state.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "locator"
+          ],
+          "properties": {
+            "locator": {
+              "type": "object"
+            },
+            "state": {
+              "type": "string",
+              "enum": [
+                "attached",
+                "visible"
+              ]
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        }
+      }
     ]
   },
   "prompt": {
     "title": "Browser overlay runtime",
     "instructions": "Use overlay.open to present an agent-created HTML document as a temporary draggable, resizable, minimizable overlay on the current page. Prefer supplying launchers that integrate visible reopen buttons into the relevant original DOM context. Launchers are conditional registrations: they may be declared before their target DOM is visible, then installed when URL and DOM predicates match. Do not use this action for credential capture, deceptive UI, or persistent page modification.",
     "source": {
-      "files": ["src/content.js"],
-      "symbols": ["actionsJsonOverlay.openHtml"],
-      "selectors": ["#__actions_json_overlay_runtime_host"]
+      "files": [
+        "src/content.js"
+      ],
+      "symbols": [
+        "actionsJsonOverlay.openHtml"
+      ],
+      "selectors": [
+        "#__actions_json_overlay_runtime_host"
+      ]
     }
   },
   "tools": [
@@ -87,7 +492,9 @@
                 },
                 "selectors": {
                   "type": "array",
-                  "items": { "type": "string" },
+                  "items": {
+                    "type": "string"
+                  },
                   "description": "Ordered CSS selector hints for the element to place the button near."
                 },
                 "text_contains": {
@@ -108,7 +515,12 @@
                 },
                 "placement": {
                   "type": "string",
-                  "enum": ["beforebegin", "afterbegin", "beforeend", "afterend"],
+                  "enum": [
+                    "beforebegin",
+                    "afterbegin",
+                    "beforeend",
+                    "afterend"
+                  ],
                   "default": "afterend"
                 },
                 "max_instances": {
@@ -122,7 +534,9 @@
             }
           }
         },
-        "required": ["html"],
+        "required": [
+          "html"
+        ],
         "additionalProperties": false
       },
       "x_actions": {
@@ -130,29 +544,47 @@
         "handler": "actionsJsonOverlay.openHtml",
         "scope": "active_surface",
         "source": {
-          "files": ["src/content.js"],
-          "symbols": ["actionsJsonOverlay.openHtml"],
-          "selectors": ["#__actions_json_overlay_runtime_host"],
+          "files": [
+            "src/content.js"
+          ],
+          "symbols": [
+            "actionsJsonOverlay.openHtml"
+          ],
+          "selectors": [
+            "#__actions_json_overlay_runtime_host"
+          ],
           "component": "ActionsJsonOverlay"
         },
         "result_schema": {
           "type": "object",
           "properties": {
-            "ok": { "type": "boolean" },
-            "overlay_id": { "type": "string" },
+            "ok": {
+              "type": "boolean"
+            },
+            "overlay_id": {
+              "type": "string"
+            },
             "launchers": {
               "type": "array",
               "items": {
                 "type": "object",
                 "properties": {
-                  "launcher_id": { "type": "string" },
-                  "placement": { "type": "string" },
-                  "target_text": { "type": "string" }
+                  "launcher_id": {
+                    "type": "string"
+                  },
+                  "placement": {
+                    "type": "string"
+                  },
+                  "target_text": {
+                    "type": "string"
+                  }
                 }
               }
             }
           },
-          "required": ["ok"]
+          "required": [
+            "ok"
+          ]
         }
       }
     },
@@ -204,7 +636,9 @@
                 },
                 "selectors": {
                   "type": "array",
-                  "items": { "type": "string" },
+                  "items": {
+                    "type": "string"
+                  },
                   "description": "Ordered CSS selector hints for the element to place the button near."
                 },
                 "text_contains": {
@@ -225,7 +659,12 @@
                 },
                 "placement": {
                   "type": "string",
-                  "enum": ["beforebegin", "afterbegin", "beforeend", "afterend"],
+                  "enum": [
+                    "beforebegin",
+                    "afterbegin",
+                    "beforeend",
+                    "afterend"
+                  ],
                   "default": "afterend"
                 },
                 "max_instances": {
@@ -239,7 +678,10 @@
             }
           }
         },
-        "required": ["html", "launchers"],
+        "required": [
+          "html",
+          "launchers"
+        ],
         "additionalProperties": false
       },
       "x_actions": {
@@ -247,29 +689,47 @@
         "handler": "actionsJsonOverlay.registerLauncher",
         "scope": "active_surface",
         "source": {
-          "files": ["src/content.js"],
-          "symbols": ["actionsJsonOverlay.registerLauncher"],
-          "selectors": ["[data-actions-json-overlay-launcher]"],
+          "files": [
+            "src/content.js"
+          ],
+          "symbols": [
+            "actionsJsonOverlay.registerLauncher"
+          ],
+          "selectors": [
+            "[data-actions-json-overlay-launcher]"
+          ],
           "component": "ActionsJsonOverlay"
         },
         "result_schema": {
           "type": "object",
           "properties": {
-            "ok": { "type": "boolean" },
-            "overlay_id": { "type": "string" },
+            "ok": {
+              "type": "boolean"
+            },
+            "overlay_id": {
+              "type": "string"
+            },
             "launchers": {
               "type": "array",
               "items": {
                 "type": "object",
                 "properties": {
-                  "launcher_id": { "type": "string" },
-                  "placement": { "type": "string" },
-                  "target_text": { "type": "string" }
+                  "launcher_id": {
+                    "type": "string"
+                  },
+                  "placement": {
+                    "type": "string"
+                  },
+                  "target_text": {
+                    "type": "string"
+                  }
                 }
               }
             }
           },
-          "required": ["ok"]
+          "required": [
+            "ok"
+          ]
         }
       }
     },
@@ -286,9 +746,15 @@
         "handler": "actionsJsonOverlay.close",
         "scope": "active_surface",
         "source": {
-          "files": ["src/content.js"],
-          "symbols": ["actionsJsonOverlay.close"],
-          "selectors": ["#__actions_json_overlay_runtime_host"],
+          "files": [
+            "src/content.js"
+          ],
+          "symbols": [
+            "actionsJsonOverlay.close"
+          ],
+          "selectors": [
+            "#__actions_json_overlay_runtime_host"
+          ],
           "component": "ActionsJsonOverlay"
         }
       }
@@ -310,6 +776,22 @@
       }
     },
     {
+      "name": "runtime.session.log",
+      "description": "Return the extension-local hosted-agent session log, including recent transcript turns, tool calls, tool failures, Realtime errors, screenshots, and session lifecycle events. Use this for debugging a session after the user reports transcript or tool behavior problems.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000,
+            "default": 2000
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "browser.screenshot",
       "description": "Capture the currently visible browser tab as an image so the agent can inspect the page state after authorization.",
       "input_schema": {
@@ -317,7 +799,10 @@
         "properties": {
           "format": {
             "type": "string",
-            "enum": ["png", "jpeg"],
+            "enum": [
+              "png",
+              "jpeg"
+            ],
             "default": "png"
           },
           "quality": {
@@ -370,23 +855,50 @@
         "handler": "actionsJsonOverlay.screenshot",
         "scope": "active_surface",
         "source": {
-          "files": ["src/content.js", "src/background.js"],
-          "symbols": ["actionsJsonOverlay.screenshot", "chrome.tabs.captureVisibleTab"],
+          "files": [
+            "src/content.js",
+            "src/background.js"
+          ],
+          "symbols": [
+            "actionsJsonOverlay.screenshot",
+            "chrome.tabs.captureVisibleTab"
+          ],
           "component": "ActionsJsonOverlay"
         },
         "result_schema": {
           "type": "object",
           "properties": {
-            "ok": { "type": "boolean" },
-            "data_url": { "type": "string" },
-            "mime_type": { "type": "string" },
-            "image_bytes": { "type": "integer" },
-            "encoded": { "type": "object" },
-            "viewport": { "type": "object" },
-            "url": { "type": "string" },
-            "captured_at": { "type": "string" }
+            "ok": {
+              "type": "boolean"
+            },
+            "data_url": {
+              "type": "string"
+            },
+            "mime_type": {
+              "type": "string"
+            },
+            "image_bytes": {
+              "type": "integer"
+            },
+            "encoded": {
+              "type": "object"
+            },
+            "viewport": {
+              "type": "object"
+            },
+            "url": {
+              "type": "string"
+            },
+            "captured_at": {
+              "type": "string"
+            }
           },
-          "required": ["ok", "data_url", "mime_type", "viewport"]
+          "required": [
+            "ok",
+            "data_url",
+            "mime_type",
+            "viewport"
+          ]
         }
       }
     },
@@ -401,7 +913,9 @@
             "description": "A versioned actions.json.storage.bundle object built by the agent-side bridge."
           }
         },
-        "required": ["bundle"],
+        "required": [
+          "bundle"
+        ],
         "additionalProperties": false
       },
       "x_actions": {
@@ -409,19 +923,38 @@
         "handler": "actionsJsonOverlay.importStorageBundle",
         "scope": "persistent",
         "source": {
-          "files": ["src/content.js"],
-          "symbols": ["actionsJsonOverlay.importStorageBundle", "chrome.storage.local.set"],
+          "files": [
+            "src/content.js"
+          ],
+          "symbols": [
+            "actionsJsonOverlay.importStorageBundle",
+            "chrome.storage.local.set"
+          ],
           "component": "ActionsJsonOverlay"
         },
         "result_schema": {
           "type": "object",
           "properties": {
-            "ok": { "type": "boolean" },
-            "entry_count": { "type": "integer" },
-            "synced_at_ms": { "type": ["integer", "null"] },
-            "imported_at": { "type": "string" }
+            "ok": {
+              "type": "boolean"
+            },
+            "entry_count": {
+              "type": "integer"
+            },
+            "synced_at_ms": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "imported_at": {
+              "type": "string"
+            }
           },
-          "required": ["ok", "entry_count"]
+          "required": [
+            "ok",
+            "entry_count"
+          ]
         }
       }
     },
@@ -441,7 +974,9 @@
               },
               "selectors": {
                 "type": "array",
-                "items": { "type": "string" },
+                "items": {
+                  "type": "string"
+                },
                 "description": "Ordered CSS selector hints for locating the scope element."
               },
               "text_equals": {
@@ -458,7 +993,11 @@
               },
               "root_strategy": {
                 "type": "string",
-                "enum": ["scope", "parent", "nearest_ancestor_containing_items"],
+                "enum": [
+                  "scope",
+                  "parent",
+                  "nearest_ancestor_containing_items"
+                ],
                 "default": "scope",
                 "description": "Generic strategy for deriving the extraction root from the scope element."
               },
@@ -495,17 +1034,24 @@
                 },
                 "attributes": {
                   "type": "array",
-                  "items": { "type": "string" },
+                  "items": {
+                    "type": "string"
+                  },
                   "description": "Ordered attributes or text pseudo-attribute to try."
                 }
               },
-              "required": ["name"],
+              "required": [
+                "name"
+              ],
               "additionalProperties": false
             },
             "minItems": 1
           }
         },
-        "required": ["item_selector", "fields"],
+        "required": [
+          "item_selector",
+          "fields"
+        ],
         "additionalProperties": false
       },
       "x_actions": {
@@ -513,24 +1059,44 @@
         "handler": "actionsJsonOverlay.extractElements",
         "scope": "active_surface",
         "source": {
-          "files": ["src/content.js"],
-          "symbols": ["actionsJsonOverlay.extractElements"],
+          "files": [
+            "src/content.js"
+          ],
+          "symbols": [
+            "actionsJsonOverlay.extractElements"
+          ],
           "component": "ActionsJsonOverlay"
         },
         "result_schema": {
           "type": "object",
           "properties": {
-            "ok": { "type": "boolean" },
-            "scope": { "type": "object" },
+            "ok": {
+              "type": "boolean"
+            },
+            "scope": {
+              "type": "object"
+            },
             "items": {
               "type": "array",
-              "items": { "type": "object" }
+              "items": {
+                "type": "object"
+              }
             },
-            "item_count": { "type": "integer" },
-            "extracted_at": { "type": "string" },
-            "url": { "type": "string" }
+            "item_count": {
+              "type": "integer"
+            },
+            "extracted_at": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
           },
-          "required": ["ok", "items", "item_count"]
+          "required": [
+            "ok",
+            "items",
+            "item_count"
+          ]
         }
       }
     },
@@ -553,7 +1119,9 @@
             "description": "Structured arguments passed to the JavaScript body."
           }
         },
-        "required": ["source"],
+        "required": [
+          "source"
+        ],
         "additionalProperties": false
       },
       "x_actions": {
@@ -561,18 +1129,29 @@
         "handler": "actionsJsonOverlay.runJavascript",
         "scope": "active_surface",
         "source": {
-          "files": ["src/content.js"],
-          "symbols": ["actionsJsonOverlay.runJavascript"],
+          "files": [
+            "src/content.js"
+          ],
+          "symbols": [
+            "actionsJsonOverlay.runJavascript"
+          ],
           "component": "ActionsJsonOverlay"
         },
         "result_schema": {
           "type": "object",
           "properties": {
-            "ok": { "type": "boolean" },
+            "ok": {
+              "type": "boolean"
+            },
             "result": {},
-            "url": { "type": "string" }
+            "url": {
+              "type": "string"
+            }
           },
-          "required": ["ok", "result"]
+          "required": [
+            "ok",
+            "result"
+          ]
         }
       }
     },
@@ -616,8 +1195,12 @@
         "handler": "actionsJsonOverlay.domListSections",
         "scope": "active_surface",
         "source": {
-          "files": ["src/content.js"],
-          "symbols": ["actionsJsonOverlay.domListSections"],
+          "files": [
+            "src/content.js"
+          ],
+          "symbols": [
+            "actionsJsonOverlay.domListSections"
+          ],
           "component": "ActionsJsonOverlay"
         }
       }
@@ -641,7 +1224,9 @@
             "description": "Structured arguments passed to the JavaScript body."
           }
         },
-        "required": ["source"],
+        "required": [
+          "source"
+        ],
         "additionalProperties": false
       },
       "x_actions": {
@@ -651,19 +1236,36 @@
         "capability_class": "debug",
         "portable": false,
         "source": {
-          "files": ["src/content.js", "src/background.js"],
-          "symbols": ["actionsJsonOverlay.debugRunJavascript", "chrome.debugger.sendCommand"],
+          "files": [
+            "src/content.js",
+            "src/background.js"
+          ],
+          "symbols": [
+            "actionsJsonOverlay.debugRunJavascript",
+            "chrome.debugger.sendCommand"
+          ],
           "component": "ActionsJsonOverlay"
         },
         "result_schema": {
           "type": "object",
           "properties": {
-            "ok": { "type": "boolean" },
+            "ok": {
+              "type": "boolean"
+            },
             "result": {},
-            "url": { "type": ["string", "null"] },
-            "execution": { "type": "object" }
+            "url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "execution": {
+              "type": "object"
+            }
           },
-          "required": ["ok"]
+          "required": [
+            "ok"
+          ]
         }
       }
     },
@@ -673,9 +1275,13 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "locator": { "type": "object" }
+          "locator": {
+            "type": "object"
+          }
         },
-        "required": ["locator"],
+        "required": [
+          "locator"
+        ],
         "additionalProperties": false
       },
       "x_actions": {
@@ -683,8 +1289,12 @@
         "handler": "actionsJsonOverlay.locatorElementInfo",
         "scope": "active_surface",
         "source": {
-          "files": ["src/content.js"],
-          "symbols": ["actionsJsonOverlay.locatorElementInfo"],
+          "files": [
+            "src/content.js"
+          ],
+          "symbols": [
+            "actionsJsonOverlay.locatorElementInfo"
+          ],
           "component": "ActionsJsonOverlay"
         }
       }
@@ -695,20 +1305,41 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "delta_x": { "type": "number" },
-          "delta_y": { "type": "number" },
+          "delta_x": {
+            "type": "number"
+          },
+          "delta_y": {
+            "type": "number"
+          },
           "scope": {
             "type": "object",
             "description": "Optional page region used to find a scrollable element instead of scrolling the global viewport.",
             "properties": {
-              "selector": { "type": "string" },
-              "selectors": { "type": "array", "items": { "type": "string" } },
-              "text_equals": { "type": "string" },
-              "text_contains": { "type": "string" },
-              "root_selector": { "type": "string" },
+              "selector": {
+                "type": "string"
+              },
+              "selectors": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "text_equals": {
+                "type": "string"
+              },
+              "text_contains": {
+                "type": "string"
+              },
+              "root_selector": {
+                "type": "string"
+              },
               "root_strategy": {
                 "type": "string",
-                "enum": ["scope", "parent", "nearest_ancestor_containing_items"],
+                "enum": [
+                  "scope",
+                  "parent",
+                  "nearest_ancestor_containing_items"
+                ],
                 "default": "scope"
               },
               "max_ancestor_depth": {
@@ -732,8 +1363,12 @@
         "handler": "actionsJsonOverlay.viewportScroll",
         "scope": "active_surface",
         "source": {
-          "files": ["src/content.js"],
-          "symbols": ["actionsJsonOverlay.viewportScroll"],
+          "files": [
+            "src/content.js"
+          ],
+          "symbols": [
+            "actionsJsonOverlay.viewportScroll"
+          ],
           "component": "ActionsJsonOverlay"
         }
       }
@@ -744,11 +1379,25 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "x": { "type": "number" },
-          "y": { "type": "number" },
-          "button": { "type": "string", "enum": ["left", "middle", "right"] }
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "button": {
+            "type": "string",
+            "enum": [
+              "left",
+              "middle",
+              "right"
+            ]
+          }
         },
-        "required": ["x", "y"],
+        "required": [
+          "x",
+          "y"
+        ],
         "additionalProperties": false
       },
       "x_actions": {
@@ -756,8 +1405,12 @@
         "handler": "actionsJsonOverlay.pointerClick",
         "scope": "active_surface",
         "source": {
-          "files": ["src/content.js"],
-          "symbols": ["actionsJsonOverlay.pointerClick"],
+          "files": [
+            "src/content.js"
+          ],
+          "symbols": [
+            "actionsJsonOverlay.pointerClick"
+          ],
           "component": "ActionsJsonOverlay"
         }
       }
@@ -775,25 +1428,60 @@
         "handler": "actionsJsonOverlay.listStorageBundle",
         "scope": "persistent",
         "source": {
-          "files": ["src/content.js"],
-          "symbols": ["actionsJsonOverlay.listStorageBundle", "chrome.storage.local.get"],
+          "files": [
+            "src/content.js"
+          ],
+          "symbols": [
+            "actionsJsonOverlay.listStorageBundle",
+            "chrome.storage.local.get"
+          ],
           "component": "ActionsJsonOverlay"
         },
         "result_schema": {
           "type": "object",
           "properties": {
-            "ok": { "type": "boolean" },
-            "protocol": { "type": ["string", "null"] },
-            "version": { "type": ["integer", "null"] },
-            "synced_at_ms": { "type": ["integer", "null"] },
-            "imported_at": { "type": ["string", "null"] },
-            "entry_count": { "type": "integer" },
+            "ok": {
+              "type": "boolean"
+            },
+            "protocol": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "version": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "synced_at_ms": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "imported_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "entry_count": {
+              "type": "integer"
+            },
             "paths": {
               "type": "array",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             }
           },
-          "required": ["ok", "entry_count", "paths"]
+          "required": [
+            "ok",
+            "entry_count",
+            "paths"
+          ]
         }
       }
     }
@@ -808,13 +1496,21 @@
       "payload": {
         "type": "object",
         "properties": {
-          "overlay_id": { "type": "string" }
+          "overlay_id": {
+            "type": "string"
+          }
         }
       },
       "source": {
-        "files": ["src/content.js"],
-        "symbols": ["actions-json:overlay-closed"],
-        "selectors": ["#__actions_json_overlay_runtime_host"]
+        "files": [
+          "src/content.js"
+        ],
+        "symbols": [
+          "actions-json:overlay-closed"
+        ],
+        "selectors": [
+          "#__actions_json_overlay_runtime_host"
+        ]
       }
     },
     {
@@ -826,13 +1522,21 @@
       "payload": {
         "type": "object",
         "properties": {
-          "overlay_id": { "type": "string" }
+          "overlay_id": {
+            "type": "string"
+          }
         }
       },
       "source": {
-        "files": ["src/content.js"],
-        "symbols": ["actions-json:overlay-minimized"],
-        "selectors": ["#__actions_json_overlay_runtime_host"]
+        "files": [
+          "src/content.js"
+        ],
+        "symbols": [
+          "actions-json:overlay-minimized"
+        ],
+        "selectors": [
+          "#__actions_json_overlay_runtime_host"
+        ]
       }
     },
     {
@@ -844,13 +1548,21 @@
       "payload": {
         "type": "object",
         "properties": {
-          "overlay_id": { "type": "string" }
+          "overlay_id": {
+            "type": "string"
+          }
         }
       },
       "source": {
-        "files": ["src/content.js"],
-        "symbols": ["actions-json:overlay-expanded"],
-        "selectors": ["#__actions_json_overlay_runtime_host"]
+        "files": [
+          "src/content.js"
+        ],
+        "symbols": [
+          "actions-json:overlay-expanded"
+        ],
+        "selectors": [
+          "#__actions_json_overlay_runtime_host"
+        ]
       }
     },
     {
@@ -862,13 +1574,21 @@
       "payload": {
         "type": "object",
         "properties": {
-          "launcher_id": { "type": "string" }
+          "launcher_id": {
+            "type": "string"
+          }
         }
       },
       "source": {
-        "files": ["src/content.js"],
-        "symbols": ["actions-json:overlay-launcher-opened"],
-        "selectors": ["[data-actions-json-overlay-launcher]"]
+        "files": [
+          "src/content.js"
+        ],
+        "symbols": [
+          "actions-json:overlay-launcher-opened"
+        ],
+        "selectors": [
+          "[data-actions-json-overlay-launcher]"
+        ]
       }
     }
   ]

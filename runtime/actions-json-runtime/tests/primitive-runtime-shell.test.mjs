@@ -95,7 +95,10 @@ test("bookmarklet and extension manifests expose shared primitive dictionary met
     /const primitiveDictionaryMetadata = (\{[\s\S]*?\n  \});/,
   );
 
-  assert.deepEqual(extensionManifest.primitive_dictionary, primitiveManifestMetadata(dictionary, "extension"));
+  assert.deepEqual(
+    extensionManifest.primitive_dictionary,
+    primitiveManifestMetadata(dictionary, "extension", { includeSchemas: true }),
+  );
   assert.ok(bookmarkletMetadataMatch, "bookmarklet should declare primitiveDictionaryMetadata");
   assert.deepEqual(
     JSON.parse(bookmarkletMetadataMatch[1]),

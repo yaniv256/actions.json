@@ -2,146 +2,124 @@
 
 `actions.json` is a readable action map for websites.
 
-It lets an agent ask a browser surface what can be done, call declared actions,
-and reuse learned website knowledge instead of rediscovering the same page from
-scratch.
+It lets agents discover what a site can do, call declared actions, and reuse
+website knowledge instead of scraping, guessing, or rediscovering the same DOM
+every run.
 
-The project is currently an experimental runtime, bridge, storage model, and
-authoring skill for building those maps.
+The category claim is simple: OpenAPI described servers. `actions.json`
+describes website actions.
 
-<p align="center">
-  <a href="https://yaniv256.github.io/actions.json/decks/schema-v1-proposal-deck.html">
-    <img src="docs/assets/schema-v1-teaching-deck-preview.gif" alt="Animated preview of the actions.json schema v1 teaching deck" width="960">
-  </a>
-</p>
+## What You Can Do Now
 
-## What This Repository Contains
+This repository contains the current public reference implementation for:
 
-- **Public docs** for the draft schema, bridge protocol, primitive dictionary,
-  storage model, and runtime architecture.
-- **A canonical authoring skill** at `skills/SKILL.md` that teaches agents how
-  to explore a website, use debugger tools only for learning, and turn those
-  discoveries into reusable `actions.json` actions.
-- **A Chrome extension runtime** for privileged browser authoring. It can take
-  true screenshots after tab authorization, keep authorized tabs grouped, render
-  overlays, and execute the currently exposed primitive/tool surface.
-- **A bookmarklet/runtime shell** for testing what can be done from page
-  JavaScript. It is useful as an embed-path approximation, but it is constrained
-  by page CSP and cannot autonomously capture true screenshots.
-- **An MCP-shaped bridge** in Rust. It exposes stable HTTP tool-list/tool-call
-  endpoints and routes calls to connected browser runtimes. It is not yet a
-  fully conforming MCP server.
+- writing `actions.json` maps with an agent authoring skill;
+- running a Chrome extension that can host a GPT Realtime browser agent with
+  your own OpenAI API key;
+- loading `actions.json.storage` so the hosted agent can use site-specific
+  context and actions;
+- exposing actions to external coding agents through an MCP-shaped bridge;
+- testing the page-JavaScript/embed path through the bookmarklet runtime;
+- rendering in-page overlays, launchers, screenshots, and structured reports.
 
-## Current Shape
+The project is pre-1.0. The schema, primitive dictionary, bridge protocol, and
+runtime split are still active design surfaces. Current docs distinguish
+implemented behavior from future direction.
 
-The core loop is:
+## Choose Your Path
 
-1. Start the bridge.
-2. Connect a browser runtime, usually the Chrome extension for authoring.
-3. Load or sync `actions.json.storage` when site memory exists.
-4. Ask the stable site-action tool which actions are available.
-5. Use stored actions first.
-6. Use debugger or primitive tools only when the action map is missing or
-   broken.
-7. Write the learned operation back into `actions.json`.
-8. Retest through the stored action.
+### I Want An Agent On The Current Website
 
-The current bridge exposes routes such as:
+Install the Chrome extension, authorize a tab, open the `actions.json` menu, add
+your OpenAI API key, and start the hosted agent from the Agent tab.
 
-- `GET /health`
-- `GET /runtimes`
-- `GET /mcp/tools/list`
-- `POST /mcp/tools/call`
-- `POST /mcp/tools/reload`
-- `POST /mcp/tools/resolve`
-- `GET /extension` for the browser runtime WebSocket
+The extension-hosted agent can:
 
-The current `/runtimes` response reports runtime ids, runtime keys,
-authorization ids, extension version, timestamps, and URL. Normalized host,
-title, and top-level capability summaries are implementation pending.
+- speak and listen through `gpt-realtime-2`;
+- use screenshots after tab authorization;
+- use uploaded storage to discover and run current-site actions;
+- use direct primitives such as `browser.screenshot`, `locator.element_info`,
+  `viewport.scroll`, and `pointer.click`;
+- keep transcript and session diagnostics in extension storage;
+- keep the live voice session in an extension-owned offscreen document so page
+  overlay reinjection does not intentionally restart the session.
 
-## Runtime Choices
+Read [Hosted Agent](docs/hosted-agent.md) and
+[Chrome Extension](docs/chrome-extension.md).
 
-Use the **Chrome extension** when possible. It is the preferred development
-environment because it can provide privileged browser capabilities after user
-authorization:
+### I Want My Coding Agent To Operate A Website
 
-- true rendered screenshots;
-- stable tab/session identity;
-- controlled-tab grouping;
-- extension-assisted relay for bookmarklet pages blocked by CSP;
-- debugger-only authoring fallback tools.
+Use the authoring skill and the MCP-shaped bridge. The coding agent explores a
+site, writes or improves `actions.json`, syncs storage, asks `actions.site` what
+actions are available, and then calls stored actions instead of rediscovering
+the page. From the user's point of view, you ask the coding agent to inspect the
+site, write the map, test it, and save the reusable actions.
 
-Use the **bookmarklet** when you need a lightweight install or want to test the
-page-JavaScript/embed path. It can run portable primitives and local overlay
-logic, but it is intentionally less capable:
+Read [Getting Started](docs/getting-started.md),
+[Bridge Architecture](docs/bridge-architecture.md), and the authoring skill at
+[skills/SKILL.md](skills/SKILL.md).
 
-- page CSP may block direct bridge transport;
-- overlays can be affected by the host page;
-- true screenshots require browser/user consent and cannot be taken
-  autonomously.
+### I Want To Make My Website Agent-Ready
 
-The two hosts should share the same action model and primitive dictionary where
-their capabilities allow it.
+Write an official `actions.json` for your site. Use it to describe important
+workflows, page context, product or documentation knowledge, navigation targets,
+and safe actions. A first-party action map gives agents the official context for
+how your website should be understood and operated.
+
+Read [actions.json Format](docs/actions-json-format.md),
+[Schema V1 Reference](docs/schema-v1-proposal.md), and
+[actions.json.storage](docs/actions-json-storage.md).
+
+### I Want To Test The Embed Path
+
+Use the bookmarklet/runtime shell to test what can be done from page
+JavaScript. This approximates a future first-party website embed, but it is less
+capable than the extension because host pages can block local transport, affect
+overlay styling, and require user consent for screenshots.
+
+Read [Getting Started](docs/getting-started.md) and
+[Runtime README](runtime/actions-json-runtime/README.md).
+
+## Runtime And Bridge Model
+
+`actions.json` is the map. A browser runtime interprets the map. An agent
+adapter translates model or MCP tool calls into runtime actions.
+
+Current runtime hosts:
+
+- **Chrome extension**: preferred authoring and hosted-agent runtime. It has tab
+  authorization, screenshots, storage upload/download, overlay UI, debugger
+  fallback for authoring, and durable hosted voice sessions.
+- **Bookmarklet/runtime shell**: lightweight page-JavaScript runtime for
+  bookmarklet and future embed-path testing.
+- **MCP-shaped bridge**: external-agent adapter that exposes stable HTTP
+  tool-list and tool-call endpoints and routes calls to connected browser
+  runtimes. It is not yet a fully conforming MCP server.
+
+The hosted extension agent does not require the local bridge for its local tool
+catalog or uploaded storage-backed `actions.site` actions. External coding
+agents still use the bridge.
 
 ## Install Or Try It
 
-For normal use, install released artifacts rather than building from source.
-A release should provide one or more of:
+For normal use, install release artifacts instead of building from source.
+Start with [Getting Started](docs/getting-started.md).
 
-- a bookmarklet `install.html`;
-- a bookmarklet `.url` or text file containing a `javascript:` URL;
-- a Chrome extension ZIP or unpacked extension directory;
-- bridge binary or source checkout instructions.
+For source development:
 
-For source-based development, start the bridge with:
+```bash
+npm install
+npm run test:runtime
+npm run test:overlay-runtime
+node scripts/validate-skills.mjs
+```
+
+Run the bridge from source when you need an external coding agent to connect:
 
 ```bash
 cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- serve \
   --actions extensions/chrome-overlay-runtime/actions/overlay.actions.json \
   --storage-root ../actions.json.storage
-```
-
-Then verify:
-
-```bash
-curl -s http://127.0.0.1:17345/runtimes
-curl -s http://127.0.0.1:17345/mcp/tools/list
-```
-
-See [Getting Started](docs/getting-started.md) for the complete install and
-connection flow.
-
-## Development
-
-Install JavaScript dependencies:
-
-```bash
-npm install
-```
-
-Build the bookmarklet from source:
-
-```bash
-npm run build:storage-bookmarklet
-```
-
-Run runtime tests:
-
-```bash
-npm run test:runtime
-```
-
-Run Chrome overlay runtime tests:
-
-```bash
-npm run test:overlay-runtime
-```
-
-Validate skill packaging:
-
-```bash
-node scripts/validate-skills.mjs
 ```
 
 ## Repository Map
@@ -152,8 +130,8 @@ skills/SKILL.md               Canonical installable authoring skill
 skills/references/            Skill reference docs, symlinked to public docs
 runtime/actions-json-runtime/ Shared runtime and bookmarklet code
 extensions/chrome-overlay-runtime/
-                              Chrome extension runtime
-mcp/actions-json-mcp/         MCP-shaped bridge
+                              Chrome extension runtime and hosted-agent UI
+mcp/actions-json-mcp/         MCP-shaped bridge for external agents
 examples/                     Public examples
 adapters/                     Packaging glue for agent ecosystems
 specs/                        Spec Kit feature work and task records
@@ -169,26 +147,31 @@ implementation-pending design.
 
 Start here:
 
-- [Getting Started](docs/getting-started.md)
-- [actions.json Format](docs/actions-json-format.md)
 - [Documentation Index](docs/index.md)
+- [Getting Started](docs/getting-started.md)
+- [Hosted Agent](docs/hosted-agent.md)
+- [Chrome Extension](docs/chrome-extension.md)
+- [Troubleshooting](docs/troubleshooting.md)
 
 Reference:
 
+- [actions.json Format](docs/actions-json-format.md)
 - [Schema V1 Reference](docs/schema-v1-proposal.md)
-- [Schema Teaching Deck](docs/decks/schema-v1-proposal-deck.html)
 - [Bridge Architecture](docs/bridge-architecture.md)
 - [Actions Bridge Protocol](docs/actions-bridge-protocol.md)
 - [Primitive Dictionary Architecture](docs/primitive-dictionary-architecture.md)
+- [Hosted Agent Tools](docs/hosted-agent-tools.md)
 - [actions.json.storage](docs/actions-json-storage.md)
 - [Storage Visibility Scopes](docs/storage-visibility-scopes.md)
 - [Repository Structure](docs/repo-structure.md)
 
-## Status
+## Status And Boundaries
 
-This repository is pre-1.0. The schema, bridge protocol, primitive dictionary,
-and runtime split are active design surfaces. Documents should distinguish
-current implementation from implementation-pending architecture.
+The Chrome extension requires user authorization for browser tabs. The hosted
+agent uses the OpenAI API key you store in Chrome extension storage. The
+debugger fallback is for authoring and repair, not normal product actions. Site
+policies, browser permissions, CSP, and microphone settings can limit what a
+runtime can do.
 
 ## License
 

@@ -34,7 +34,7 @@ export function primitiveCatalogForHost(dictionary, host) {
   });
 }
 
-export function primitiveManifestMetadata(dictionary, host) {
+export function primitiveManifestMetadata(dictionary, host, { includeSchemas = false } = {}) {
   return {
     version: dictionary.version,
     stage: dictionary.stage,
@@ -45,6 +45,12 @@ export function primitiveManifestMetadata(dictionary, host) {
       reason: primitive.reason,
       capability_class: primitive.capability_class,
       portable: primitive.portable,
+      ...(includeSchemas
+        ? {
+            summary: primitive.summary,
+            input_schema: dictionary.primitives.find((source) => source.name === primitive.name)?.input_schema,
+          }
+        : {}),
     })),
   };
 }

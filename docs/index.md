@@ -1,45 +1,75 @@
 # actions.json Documentation
 
-`actions.json` is a readable action map for websites. It lets an agent discover
-what a site can do, call declared actions, and reuse learned website knowledge
-without rediscovering the page from scratch.
+`actions.json` is a readable action map for websites. It lets agents operate a
+site through declared actions instead of scraping, guessing, or rediscovering
+the DOM.
 
-Use this page to choose the right document for the task in front of you.
+Use this page to choose what to read next.
 
-## Start Here
+## Start By Task
 
-- [Getting Started](getting-started.md): install a runtime, start the
-  MCP-shaped bridge, connect a browser page, and verify that the system is
-  reachable.
-- [actions.json Format](actions-json-format.md): learn what belongs in an
-  `actions.json` file and how site actions are written.
+| I want to... | Read |
+|---|---|
+| Try the browser-hosted agent | [Getting Started](getting-started.md), then [Hosted Agent](hosted-agent.md) |
+| Understand the Chrome extension runtime | [Chrome Extension](chrome-extension.md) |
+| See what tools the hosted agent can call | [Hosted Agent Tools](hosted-agent-tools.md) |
+| Author or review an action map | [actions.json Format](actions-json-format.md), then [Schema V1 Reference](schema-v1-proposal.md) |
+| Use local storage for site maps and context | [actions.json.storage](actions-json-storage.md) |
+| Connect an external coding agent | [Bridge Architecture](bridge-architecture.md), then [Actions Bridge Protocol](actions-bridge-protocol.md) |
+| Debug a broken setup | [Troubleshooting](troubleshooting.md) |
+| Contribute to the repo structure | [Repository Structure](repo-structure.md) |
 
-## Authoring And Schema
+## Try The Hosted Browser Agent
 
-- [Schema V1 Reference](schema-v1-proposal.md): field-level reference for the
-  current draft manifest shape.
-- [Schema Teaching Deck](decks/schema-v1-proposal-deck.html): visual walkthrough
-  of the schema concepts. This is educational; the schema reference is the
-  authoritative document.
+- [Getting Started](getting-started.md): choose an install path, authorize a
+  tab, add an OpenAI key, upload storage, and verify that tools are available.
+- [Hosted Agent](hosted-agent.md): user guide for the extension-hosted
+  `gpt-realtime-2` voice/text agent.
+- [Chrome Extension](chrome-extension.md): the runtime capabilities behind the
+  hosted agent, overlays, storage tools, screenshots, bridge connection, and
+  debugger fallback.
+- [Hosted Agent Tools](hosted-agent-tools.md): how `actions.site`, direct
+  primitives, screenshots, and storage-backed context reach the hosted agent.
 
-## Runtime And Bridge
+## Author Action Maps
 
-- [Bridge Architecture](bridge-architecture.md): how the skill, bridge, browser
-  runtime, storage, and agent fit together.
-- [Actions Bridge Protocol](actions-bridge-protocol.md): message shapes for
-  runtime readiness, action calls, action results, events, status, and errors.
+- [actions.json Format](actions-json-format.md): practical guide to what
+  belongs in an action map.
+- [Schema V1 Reference](schema-v1-proposal.md): field-level draft reference.
 - [Primitive Dictionary Architecture](primitive-dictionary-architecture.md):
-  how portable and privileged browser primitives are defined across extension,
-  bookmarklet/embed, and future mobile hosts.
+  portable and privileged primitive definitions across browser hosts.
+- [Authoring Skill](../skills/SKILL.md): operational instructions for agents
+  that explore sites and write action maps.
 
-## Storage
+## Use Storage
 
-- [actions.json.storage](actions-json-storage.md): recommended file workspace
-  for observations, runs, item indexes, overlays, and site action maps.
+- [actions.json.storage](actions-json-storage.md): file workspace for site
+  maps, observations, item indexes, overlays, reports, and hosted-agent context.
 - [Storage Visibility Scopes](storage-visibility-scopes.md): private, shared,
-  and public promotion rules for stored artifacts.
+  and public promotion rules.
 
-## Repository
+## Use The Bridge Or Runtime
 
-- [Repository Structure](repo-structure.md): where the public docs, skill,
-  runtime, bridge, and examples live in this repository.
+- [Bridge Architecture](bridge-architecture.md): how external agents, the
+  hosted extension agent, browser runtimes, storage, and `actions.site` fit
+  together.
+- [Actions Bridge Protocol](actions-bridge-protocol.md): item shapes for
+  runtime readiness, action calls, results, status, events, and errors.
+- [Runtime README](../runtime/actions-json-runtime/README.md): bookmarklet and
+  injectable runtime notes.
+- [Extension Package README](../extensions/chrome-overlay-runtime/README.md):
+  contributor/operator notes for the Chrome MV3 extension package.
+- [MCP Bridge README](../mcp/actions-json-mcp/README.md): bridge command and
+  endpoint reference.
+
+## Troubleshooting And Release Notes
+
+- [Troubleshooting](troubleshooting.md): symptom-based guide for extension,
+  hosted-agent, storage, bridge, bookmarklet, screenshot, and tool-call issues.
+- [0.1.74 Release Notes](release-notes/0.1.74.md): public release summary for
+  the hosted agent, storage-backed tools, and durable session work.
+
+## UI Implementation Reference
+
+- [Hosted Agent Chat UI](hosted-agent-chat-ui.md): focused reference for
+  transcript delta handling and status separation in the extension UI.

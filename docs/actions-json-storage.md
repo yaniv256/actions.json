@@ -3,44 +3,40 @@
 `actions.json.storage` is a user-owned file workspace for website operating
 memory.
 
-An `actions.json` file describes how an agent can operate a website. Storage
-keeps the durable evidence and artifacts that agents create while learning or
-using those actions:
+An `actions.json` file tells an agent how to operate a website. Storage keeps
+the durable context that makes those actions useful over time:
 
-- observations from web pages;
+- site action maps;
+- page and product knowledge;
+- observations captured from browser sessions;
 - run logs and lessons;
-- deduplicated item indexes;
 - generated overlays and reports;
-- site-specific `actions.json` maps.
+- shared or public maps that can be reviewed and reused.
 
-Storage should be readable, auditable, versioned, and easy to diff. The
-reference design uses plain files in Git repositories rather than an opaque
-database.
+The reference storage format uses ordinary files in Git repositories so users
+can read, diff, branch, review, and share the memory that agents use.
 
-## What Storage Is For
+## When To Use Storage
 
 Use storage when an agent learns something that should survive the current
 browser session.
 
 Examples:
 
-- A carousel scan discovers titles, URLs, and cover images. Store the raw
-  observation and update an item index so removed items are not forgotten.
-- A site action fails because the selector drifted. Store a run log with the
-  failed selector, page state, and corrected target.
-- An overlay is generated from stored data. Store the source data and the
-  generated report so it can be reviewed or rebuilt.
-- A debugger probe reveals a reliable page operation. Convert the lesson into a
-  reviewed `actions.json` action map update.
+- A site guide learns what every menu page contains.
+- A product guide stores product descriptions, buying advice, and cart actions.
+- A carousel scan stores every item it saw, including items that later scroll out
+  of view.
+- A navigation action fails and the corrected selector should be remembered.
+- A generated overlay should be available next time the same site is opened.
 
-## Recommended Workspace
+## Workspace Layout
 
-The recommended local checkout is:
+The recommended root checkout is:
 
 ```text
 actions.json.storage/
   README.md
-  .gitmodules
   storage.json
   scopes/
     private/
@@ -48,50 +44,43 @@ actions.json.storage/
     public/
 ```
 
-The root checkout is a workspace and mount table. The data for each visibility
-scope should live in a separate repository mounted under `scopes/`.
+The root repository is the workspace and mount table. Each visibility scope can
+be a separate repository mounted under `scopes/`.
 
-Why separate repositories:
+Separate scope repositories help because:
 
-- GitHub permissions are repository-scoped, not folder-scoped.
-- Private observations should not share access rules with public examples.
-- Shared artifacts often need one repository per audience.
-- Git history stays auditable for each scope.
+- private browsing observations do not need the same access rules as public
+  examples;
+- shared site maps can be given to a specific website owner or collaborator;
+- public maps can be published without exposing private history;
+- Git history stays reviewable by audience.
 
-The root repository can stay private even when it mounts a public scope.
+## Scope Layout
 
-## Scope Repositories
-
-Each scope repository should use the same internal layout:
+Each mounted scope should use the same internal shape:
 
 ```text
-scopes/private/
+scopes/shared/example-owner/
   scope.json
   agents/
-    codex.json
     chrome-extension.json
+    codex.json
   sites/
     example.com/
-      search/
-        actions.json
-        observations/
-          search-results.jsonl
-        items/
-          search-results.items.json
-        runs/
-          2026-06-04T162500Z.json
-        overlays/
-          categories.overlay.json
-        reports/
-          categories.html
+      actions.json
+      observations/
+      items/
+      runs/
+      overlays/
+      reports/
 ```
 
-Use the same shape under `scopes/shared/<audience>/` and `scopes/public/` so
-artifacts can be promoted without changing their internal structure.
+Use the same layout under `scopes/private/` and `scopes/public/` so artifacts can
+move between scopes without being reshaped.
 
 ## Root Manifest
 
-`storage.json` identifies the workspace and mounted scope repositories.
+`storage.json` describes the workspace and mounted scopes.
 
 ```json
 {
@@ -105,13 +94,11 @@ artifacts can be promoted without changing their internal structure.
   "mounts": {
     "private": {
       "path": "scopes/private",
-      "repo": "git@github.com:<owner>/actions.json.storage.private.git",
       "mount_type": "git_submodule",
       "visibility": "private"
     },
     "public": {
       "path": "scopes/public",
-      "repo": "https://github.com/<owner>/actions.json.storage.public.git",
       "mount_type": "git_submodule",
       "visibility": "public"
     }
@@ -119,56 +106,51 @@ artifacts can be promoted without changing their internal structure.
 }
 ```
 
-The mount table should contain only the information needed to locate and
-validate mounted scopes. Raw browsing data should live inside the scope
-repositories, not in the root workspace.
+The manifest should describe where scopes live. Raw browsing data belongs inside
+the scope repositories, not in the root manifest.
 
-## Scope Manifest
+## Site Folders
 
-Each mounted scope can include a `scope.json` file:
+A site folder is the unit the browser runtime uploads, reads, and updates.
 
-```json
-{
-  "protocol": "actions.json.storage.scope",
-  "version": "0.1.0",
-  "scope": "private",
-  "parent": "actions.json.storage",
-  "write_policy": {
-    "observations": "append",
-    "items": "merge",
-    "runs": "write",
-    "actions": "review"
-  }
-}
+```text
+sites/example.com/
+  actions.json
+  context/
+    overview.md
+  observations/
+    2026-06-07T140000Z.jsonl
+  items/
+    products.items.json
+  runs/
+    2026-06-07T141500Z.json
+  overlays/
+    product-guide.overlay.json
+  reports/
+    product-guide.html
 ```
 
-The scope manifest tells agents where they are writing and which artifact types
-require review.
-
-## Agent Identity
-
-Every writer should have an identity file under `agents/`.
-
-```json
-{
-  "id": "chrome-extension",
-  "display_name": "Chrome Extension Runtime",
-  "actor_type": "browser_extension",
-  "allowed_writes": [
-    "sites/*/*/observations/*.jsonl",
-    "sites/*/*/runs/*.json"
-  ],
-  "requires_review_for": [
-    "sites/*/*/actions.json"
-  ]
-}
-```
-
-The first goal is an audit trail, not cryptographic identity. Every observation
-and run should say which agent produced it, what page it observed, and what
-action or schema it used.
+The exact artifact set depends on the site. A simple site may only need
+`actions.json`; a product or content site may need context, product inventory,
+navigation maps, overlays, and run history.
 
 ## Data Classes
+
+### Action Maps
+
+`actions.json` stores reusable actions and context for the site.
+
+Good action maps include:
+
+- what the site is for;
+- important pages and sections;
+- reliable navigation actions;
+- product or content explanations;
+- when to use point-based actions versus DOM inspection;
+- any site policy limits, such as blocked page JavaScript.
+
+Action maps guide future automation, so edits should be reviewed before they are
+shared or published.
 
 ### Observations
 
@@ -178,17 +160,14 @@ append-only JSONL.
 ```json
 {
   "type": "observation",
-  "schema": "actions.storage.observation.v1",
-  "observed_at": "2026-06-04T16:25:00Z",
+  "observed_at": "2026-06-07T14:00:00Z",
   "site": "example.com",
-  "surface": "search.results",
-  "agent_id": "codex",
-  "source_url": "https://example.com/search?q=maps",
+  "surface": "products",
+  "source_url": "https://example.com/products",
   "items": [
     {
-      "title": "Example result",
-      "url": "https://example.com/results/1",
-      "source": "visible_results"
+      "title": "Example product",
+      "url": "https://example.com/products/example"
     }
   ]
 }
@@ -203,20 +182,19 @@ Item indexes deduplicate observations into stable memory.
 ```json
 {
   "type": "item_index",
-  "surface": "search.results",
+  "surface": "products",
   "items": {
-    "result:https://example.com/results/1": {
-      "title": "Example result",
-      "url": "https://example.com/results/1",
-      "first_seen_at": "2026-06-04T16:25:00Z",
-      "last_seen_at": "2026-06-04T16:25:00Z",
-      "seen_count": 1
+    "product:https://example.com/products/example": {
+      "title": "Example product",
+      "url": "https://example.com/products/example",
+      "first_seen_at": "2026-06-07T14:00:00Z",
+      "last_seen_at": "2026-06-07T14:00:00Z"
     }
   }
 }
 ```
 
-Items answer: what does this user remember having seen before?
+Items answer: what do we remember across sessions?
 
 ### Runs
 
@@ -225,56 +203,71 @@ Runs record what an agent did and what happened.
 ```json
 {
   "type": "run",
-  "schema": "actions.storage.run.v1",
-  "run_id": "2026-06-04T162500Z-codex-example-search",
-  "agent_id": "codex",
+  "run_id": "2026-06-07T141500Z-example-navigation",
   "site": "example.com",
-  "surface": "search.results",
   "actions_taken": [
     {
-      "action": "search.submit",
-      "arguments": { "query": "maps" },
-      "result": "results_visible"
+      "action": "navigation.open_products",
+      "result": "products_page_visible"
     }
   ],
   "lessons": [
     {
-      "type": "selector",
-      "text": "Result links are exposed as article a[href]."
+      "type": "navigation",
+      "text": "The products page should be opened by link URL, not by approximate scroll position."
     }
   ]
 }
 ```
 
-Runs answer: what did the agent do, and what did it learn?
-
-### Action Maps
-
-Per-site `actions.json` files store reusable operations for future agents.
-Because they can change future automation behavior, they require more review
-than append-only observations.
-
-```text
-sites/example.com/search/actions.json
-```
-
-Action maps answer: how should an agent operate this page next time?
+Runs answer: what did the agent do, what failed, and what should improve?
 
 ### Reports And Overlays
 
-Reports and overlays are generated views derived from stored data.
+Reports and overlays are human-facing views generated from stored data.
 
 ```text
-sites/example.com/search/reports/categories.html
-sites/example.com/search/overlays/categories.overlay.json
+reports/product-guide.html
+overlays/product-guide.overlay.json
 ```
 
-Generated views are useful for humans, but the canonical source should remain
-the structured observations, items, runs, and action maps that produced them.
+The canonical source should remain structured actions, observations, items, and
+runs. Generated views can be rebuilt from that source.
+
+## Upload And Download In The Extension
+
+The Chrome extension can upload a local `actions.json.storage` checkout into
+browser storage. The hosted agent can then use `actions.site` to read matching
+site maps without a local bridge.
+
+Typical workflow:
+
+1. Pull the storage repository and its mounted scope repositories.
+2. Open the target website in Chrome.
+3. Open the extension `actions.json` menu.
+4. Open **Settings**.
+5. Press **Upload** and choose the root `actions.json.storage` folder.
+6. Start or restart the hosted agent.
+7. Ask what actions are available for the current site.
+8. After the agent creates or updates useful artifacts, press **Download** to
+   write them back to the selected local checkout.
+9. Review and commit the storage changes.
+
+The upload should send the whole storage checkout, not a single site folder, so
+the runtime can resolve scopes and related sites.
+
+## Bridge Sync
+
+External coding agents can also load storage through the MCP-shaped bridge.
+Use this path when a coding agent outside the extension is authoring, testing,
+or validating maps.
+
+The bridge path and extension upload path should produce the same current-site
+catalog for `actions.site`.
 
 ## Write Policy
 
-Default policy:
+Recommended default policy:
 
 | Data | Default write mode | Reason |
 | --- | --- | --- |
@@ -283,30 +276,20 @@ Default policy:
 | `items/*.json` | Deterministic merge | Derived memory from observations. |
 | `reports/*` | Generated artifact | Human-facing view. |
 | `overlays/*` | Generated or reviewed artifact | May be shown to the user. |
-| `actions.json` | Branch or review | Changes future automation behavior. |
-| `schemas/*.json` | Branch or review | Changes validation and compatibility. |
+| `actions.json` | Review before sharing | Changes future automation behavior. |
+| `schemas/*.json` | Review before sharing | Changes compatibility and validation. |
 
-## Sync Workflow
+## Visibility And Sharing
 
-Recommended loop:
+Use scopes to decide who should see the memory:
 
-1. Pull the root storage checkout and mounted scope repositories.
-2. Load the site folder relevant to the current browser page when using the
-   browser runtime UI.
-3. Let the runtime read existing actions before using debugger tools.
-4. Write observations, runs, and derived item indexes into the selected scope.
-5. Propose `actions.json` changes through review when learned procedures should
-   guide future agents.
-6. Commit scope repository changes.
-7. If using submodules, update and commit the root pointer for any mounted scope
-   that advanced.
+- **private**: personal observations, debugging runs, private browsing memory;
+- **shared**: maps or overlays prepared for a specific collaborator or website
+  owner;
+- **public**: reviewed examples intended for broad reuse.
 
-Submodules pin commits. A complete sync includes both the scope commit and the
-root pointer update.
-
-Implementation pending: the bridge-side `storage.sync` tool currently imports
-the configured storage root as one bundle. Page-relevant bridge sync should
-replace that broader import path.
+Do not publish internal development notes, private customer observations, or
+unreviewed browser logs as public storage.
 
 ## Security Rules
 
@@ -317,15 +300,27 @@ Never store:
 - access tokens;
 - session storage;
 - payment data;
-- secrets or private keys.
+- private keys;
+- private messages or personal data that the user did not intend to preserve.
 
-Prefer:
+The browser runtime should not need credentials from storage. It operates the
+page that the user has already opened and authorized.
 
-- URLs visible to the user;
-- titles and public metadata;
-- page observations the user asked to retain;
-- selector and runtime lessons;
-- generated reports from already-stored data.
+## Verify Storage Is Working
 
-Keep private browsing observations private by default. Promotion to shared or
-public scopes must be explicit. See [Storage Visibility Scopes](storage-visibility-scopes.md).
+1. Upload the storage root from the extension Settings tab.
+2. Open a website that has a matching site folder.
+3. Start the hosted agent.
+4. Ask it what actions are available.
+5. If you inspect the log, confirm the agent used `actions.site` and received
+   site-specific actions.
+6. Create or update one harmless artifact.
+7. Press **Download** and confirm the local checkout changed.
+
+If actions are missing, see [Troubleshooting](troubleshooting.md).
+
+## Read Next
+
+- [Hosted Agent Tools](hosted-agent-tools.md)
+- [Storage Visibility Scopes](storage-visibility-scopes.md)
+- [Getting Started](getting-started.md)
