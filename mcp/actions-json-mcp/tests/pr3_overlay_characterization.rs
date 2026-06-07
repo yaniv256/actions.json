@@ -5,7 +5,7 @@ use actions_json_mcp::{
 };
 use axum::{
     body::{to_bytes, Body},
-    http::{Request, StatusCode},
+    http::{header, Method, Request, StatusCode},
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -115,6 +115,48 @@ async fn runtime_count(app: axum::Router) -> usize {
     assert_eq!(status, StatusCode::OK);
     let payload: Value = serde_json::from_slice(&body).unwrap();
     payload["runtimes"].as_array().unwrap().len()
+}
+
+#[tokio::test]
+async fn bridge_http_routes_accept_browser_preflight_requests() {
+    let app = app_from_manifest_value(json!({
+        "tools": [
+            {
+                "name": "overlay.open",
+                "description": "Open an overlay",
+                "input_schema": { "type": "object" }
+            }
+        ]
+    }));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/mcp/tools/list")
+                .header(header::ORIGIN, "chrome-extension://actions-json-test")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .unwrap(),
+        "*"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-private-network")
+            .unwrap(),
+        "true"
+    );
 }
 
 #[tokio::test]
@@ -284,6 +326,81 @@ async fn pr3_ambiguous_url_routing_fails_without_dispatch() {
         Some("target_url_contains matched multiple runtimes")
     );
     assert_eq!(payload["matches"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn url_routing_failure_reports_candidate_rejection_trace() {
+    let app = app_from_manifest_value_with_runtimes(
+        json!({
+            "tools": [
+                {
+                    "name": "browser.screenshot",
+                    "description": "Capture screenshot",
+                    "input_schema": { "type": "object" }
+                }
+            ]
+        }),
+        vec![RuntimeSeed {
+            runtime_id: "runtime-a".to_string(),
+            url: Some("https://pragmaworks.dev/#research".to_string()),
+        }],
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/mcp/tools/call")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "name": "browser.screenshot",
+                        "target_url_contains": "https://genspec.dev/",
+                        "arguments": {},
+                        "timeout_ms": 1
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(
+        payload["error"].as_str(),
+        Some("no runtime URL matched target_url_contains")
+    );
+    assert_eq!(
+        payload["routing_trace"]["requested"]["target_url_contains"].as_str(),
+        Some("https://genspec.dev/")
+    );
+    assert_eq!(
+        payload["routing_trace"]["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        payload["routing_trace"]["candidates"][0]["runtime_id"].as_str(),
+        Some("runtime-a")
+    );
+    assert_eq!(
+        payload["routing_trace"]["candidates"][0]["url"].as_str(),
+        Some("https://pragmaworks.dev/#research")
+    );
+    assert_eq!(
+        payload["routing_trace"]["candidates"][0]["url_contains_match"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        payload["routing_trace"]["decision"].as_str(),
+        Some("no_match")
+    );
 }
 
 #[tokio::test]
@@ -748,6 +865,72 @@ async fn actions_site_call_dispatches_site_action_handler_from_base_manifest() {
     assert_eq!(payload["ok"], true);
 
     server.abort();
+}
+
+#[tokio::test]
+async fn actions_site_call_returns_static_storage_output_without_runtime() {
+    let storage_root = tempfile::tempdir().unwrap();
+    let site_map = storage_root
+        .path()
+        .join("scopes/private/sites/pragmaworks.dev/home/actions.json");
+    std::fs::create_dir_all(site_map.parent().unwrap()).unwrap();
+    std::fs::write(
+        &site_map,
+        json!({
+            "protocol": "actions.json",
+            "tools": [
+                {
+                    "name": "pragmaworks.site.map",
+                    "description": "Return the mapped PragmaWorks page and menu knowledge.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    },
+                    "x_actions": {
+                        "static_output": {
+                            "ok": true,
+                            "pages": [
+                                {
+                                    "path": "/forge",
+                                    "title": "The Forge Cycle"
+                                }
+                            ]
+                        }
+                    }
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let app = app_from_manifest_map_paths_and_storage_root(
+        json!({ "tools": [] }),
+        Vec::new(),
+        Some(storage_root.path().to_path_buf()),
+    )
+    .await
+    .unwrap();
+
+    let (status, payload) = call_tool(
+        app,
+        json!({
+            "name": "actions.site",
+            "target_url_contains": "pragmaworks.dev",
+            "arguments": {
+                "mode": "call",
+                "action": "pragmaworks.site.map",
+                "arguments": {}
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["output"]["ok"], true);
+    assert_eq!(payload["output"]["pages"][0]["path"], "/forge");
 }
 
 #[tokio::test]
@@ -1750,6 +1933,23 @@ async fn storage_sync_tool_is_exposed_when_storage_root_is_configured() {
     assert!(tool_names
         .iter()
         .any(|name| name == "storage.import_bundle"));
+}
+
+#[tokio::test]
+async fn runtime_session_log_tool_is_exposed_by_the_bridge_catalog() {
+    let app = app_from_manifest_value(json!({
+        "tools": [
+            {
+                "name": "overlay.open",
+                "description": "Open an overlay",
+                "input_schema": { "type": "object" }
+            }
+        ]
+    }));
+
+    let tool_names = list_tool_names(app).await;
+
+    assert!(tool_names.iter().any(|name| name == "runtime.session.log"));
 }
 
 #[tokio::test]

@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>actions.json Agent</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #15171d;
+        --muted: #626b7a;
+        --line: #d9e0e9;
+        --panel: #f6f8fb;
+        --accent: #126b7d;
+        --accent-soft: #e5f5f7;
+        --danger: #b64040;
+        --ok: #24744a;
+        --voice-idle-bg: #ffffff;
+        --voice-idle-border: #d8e0ea;
+        --voice-idle-ink: #253041;
+        --voice-live-bg: #e6fcf5;
+        --voice-live-border: #63e6be;
+        --voice-live-ink: #087f5b;
+        --voice-busy-bg: #fff4e6;
+        --voice-busy-border: #ffc078;
+        --voice-busy-ink: #d9480f;
+        --voice-listening-bg: #fff5f5;
+        --voice-listening-border: #ffa8a8;
+        --voice-listening-ink: #fa5252;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        min-width: 0;
+        min-height: 100%;
+        margin: 0;
+      }
+
+      body {
+        color: var(--ink);
+        background: #ffffff;
+        font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      main {
+        min-width: 0;
+        padding: 10px;
+      }
+
+      .tab-panel {
+        display: grid;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .tab-panel[hidden] {
+        display: none;
+      }
+
+      .agent-panel {
+        grid-template-rows: auto minmax(0, 1fr);
+        height: calc(100vh - 20px);
+        min-height: 260px;
+      }
+
+      .agent-controls {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .voice-launcher {
+        display: inline-grid;
+        grid-template-columns: 42px minmax(0, 1fr);
+        align-items: center;
+        width: 100%;
+        min-width: 0;
+        height: 46px;
+        padding: 0;
+        border: 1px solid var(--voice-idle-border);
+        border-radius: 8px;
+        background: var(--voice-idle-bg);
+        color: var(--voice-idle-ink);
+        box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
+      }
+
+      .voice-launcher[data-voice-state="live"] {
+        border-color: var(--voice-live-border);
+        background: var(--voice-live-bg);
+        color: var(--voice-live-ink);
+      }
+
+      .voice-launcher[data-voice-state="connecting"],
+      .voice-launcher[data-voice-state="busy"] {
+        border-color: var(--voice-busy-border);
+        background: var(--voice-busy-bg);
+        color: var(--voice-busy-ink);
+      }
+
+      .voice-launcher[data-voice-state="listening"] {
+        border-color: var(--voice-listening-border);
+        background: var(--voice-listening-bg);
+        color: var(--voice-listening-ink);
+      }
+
+      .voice-launcher[data-voice-state="error"] {
+        border-color: #ff8787;
+        background: #fff5f5;
+        color: #e03131;
+      }
+
+      .voice-launcher:focus-visible,
+      button:focus-visible,
+      input:focus-visible {
+        outline: 2px solid color-mix(in srgb, currentColor 38%, transparent);
+        outline-offset: 2px;
+      }
+
+      .voice-launcher-icon {
+        display: inline-flex;
+        width: 100%;
+        height: 100%;
+        align-items: center;
+        justify-content: center;
+        border-right: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+      }
+
+      .voice-launcher-icon svg {
+        display: block;
+        width: 17px;
+        height: 17px;
+        overflow: visible;
+      }
+
+      .voice-launcher-label {
+        min-width: 0;
+        padding: 0 10px;
+        overflow: hidden;
+        text-align: left;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .voice-launcher-dot {
+        transform-box: fill-box;
+        transform-origin: center;
+      }
+
+      @media (prefers-reduced-motion: no-preference) {
+        .voice-launcher[data-voice-state="connecting"] .voice-launcher-dot {
+          animation: voice-launcher-pulse 1s ease-in-out infinite;
+          opacity: 0.38;
+        }
+
+        .voice-launcher[data-voice-state="connecting"] .voice-launcher-dot:nth-child(2) {
+          animation-delay: 120ms;
+        }
+
+        .voice-launcher[data-voice-state="connecting"] .voice-launcher-dot:nth-child(3) {
+          animation-delay: 240ms;
+        }
+      }
+
+      @keyframes voice-launcher-pulse {
+        0%,
+        100% {
+          opacity: 0.38;
+          transform: translateY(0) scale(0.92);
+        }
+
+        40% {
+          opacity: 1;
+          transform: translateY(-0.75px) scale(1.08);
+        }
+      }
+
+      button {
+        min-width: 0;
+        height: 34px;
+        padding: 0 9px;
+        border: 0;
+        border-radius: 7px;
+        background: var(--accent);
+        color: white;
+        font-size: 13px;
+        font-weight: 800;
+        cursor: pointer;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      button.secondary {
+        background: #202836;
+      }
+
+      button.icon-only {
+        width: 42px;
+        height: 46px;
+        padding: 0;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.52;
+      }
+
+      button.icon-only:disabled {
+        background: #eef2f6;
+        color: #778291;
+        opacity: 1;
+      }
+
+      .transcript {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-height: 0;
+        height: 100%;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fbfcfe;
+        overflow-y: auto;
+        overflow-x: hidden;
+        overflow-wrap: anywhere;
+        overscroll-behavior: contain;
+      }
+
+      .transcript-line {
+        width: fit-content;
+        max-width: 100%;
+        padding: 7px 9px;
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        border-radius: 8px;
+        font-size: 14px;
+        line-height: 1.38;
+      }
+
+      .transcript-line-user {
+        align-self: flex-end;
+        background: #e8f0fe;
+        color: #12376f;
+        border-bottom-right-radius: 2px;
+      }
+
+      .transcript-line-assistant {
+        align-self: flex-start;
+        background: #f1f5f9;
+        color: #1f2937;
+        border-bottom-left-radius: 2px;
+      }
+
+      .transcript-line-status {
+        align-self: stretch;
+        background: transparent;
+        color: var(--muted);
+        border-color: transparent;
+        padding: 2px 0;
+        font-size: 13px;
+      }
+
+      .transcript-line.is-live::after,
+      .transcript-line.is-pending::after {
+        content: "▍";
+        margin-left: 1px;
+        color: var(--accent);
+        animation: transcript-cursor-blink 0.8s step-end infinite;
+      }
+
+      @keyframes transcript-cursor-blink {
+        50% {
+          opacity: 0;
+        }
+      }
+
+      .empty {
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .config-panel {
+        gap: 12px;
+      }
+
+      section {
+        display: grid;
+        gap: 8px;
+        min-width: 0;
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.2;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 800;
+      }
+
+      input {
+        width: 100%;
+        min-width: 0;
+        height: 34px;
+        padding: 0 9px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        color: var(--ink);
+        font: 13px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+
+      input[type="range"] {
+        padding: 0;
+      }
+
+      input[type="checkbox"] {
+        width: auto;
+        height: auto;
+      }
+
+      .inline-check {
+        display: flex;
+        grid-template-columns: none;
+        flex-direction: row;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .inline-check input {
+        flex: 0 0 auto;
+      }
+
+      select {
+        width: 100%;
+        min-width: 0;
+        height: 34px;
+        padding: 0 9px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #fff;
+        color: var(--ink);
+        font: 13px/1.2 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .button-row {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(82px, 1fr));
+        gap: 7px;
+        min-width: 0;
+      }
+
+      .status-card {
+        display: grid;
+        gap: 4px;
+        padding: 9px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+      }
+
+      .status-card strong {
+        font-size: 12px;
+      }
+
+      .agent-state {
+        display: inline-flex;
+        width: fit-content;
+        align-items: center;
+        min-height: 22px;
+        padding: 2px 7px;
+        border-radius: 999px;
+        background: #e8edf3;
+        color: #2b3340;
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .agent-state[data-state="ready"] {
+        background: #dff3e6;
+        color: var(--ok);
+      }
+
+      .agent-state[data-state="blocked"] {
+        background: #f7e5e5;
+        color: var(--danger);
+      }
+
+      .status-line {
+        min-height: 18px;
+        color: var(--ok);
+        font-size: 13px;
+      }
+
+      .status-line[data-error="true"] {
+        color: var(--danger);
+      }
+
+      @media (max-width: 220px) {
+        main {
+          padding: 8px;
+        }
+
+        .agent-controls {
+          grid-template-columns: 1fr;
+        }
+
+        button.icon-only {
+          width: 100%;
+          height: 34px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div id="agentPanel" class="tab-panel agent-panel" role="tabpanel" aria-label="Agent">
+        <section class="agent-controls" aria-label="Voice controls">
+          <button id="startAgent" class="voice-launcher" data-voice-state="idle" disabled>
+            <span id="voiceLauncherIcon" class="voice-launcher-icon" aria-hidden="true"></span>
+            <span id="voiceLauncherLabel" class="voice-launcher-label">Start voice</span>
+          </button>
+          <button id="stopAgent" class="secondary icon-only" disabled title="Stop voice" aria-label="Stop voice">■</button>
+        </section>
+
+        <section aria-label="Transcript">
+          <div id="transcript" class="transcript">
+            <div class="empty">Realtime transcript will appear here.</div>
+          </div>
+        </section>
+      </div>
+
+      <div id="configPanel" class="tab-panel config-panel" role="tabpanel" aria-label="Settings" hidden>
+        <section class="status-card" aria-label="Agent status">
+          <strong>Agent</strong>
+          <span id="agentState" class="agent-state" data-state="blocked">Blocked</span>
+          <p id="keySummary">No OpenAI key configured.</p>
+          <p id="targetSummary">No active hosted-agent session.</p>
+        </section>
+
+        <section aria-labelledby="voiceHeading">
+          <h2 id="voiceHeading">Voice</h2>
+          <p>Applies to the next Realtime voice session. OpenAI locks the voice after audio has started in a session.</p>
+          <label>
+            Realtime voice
+            <select id="voiceSelect">
+              <option value="alloy">alloy</option>
+              <option value="ash">ash</option>
+              <option value="ballad">ballad</option>
+              <option value="coral">coral</option>
+              <option value="echo">echo</option>
+              <option value="sage">sage</option>
+              <option value="shimmer">shimmer</option>
+              <option value="verse">verse</option>
+              <option value="marin">marin</option>
+              <option value="cedar">cedar</option>
+            </select>
+          </label>
+          <div id="voiceStatus" class="status-line" role="status"></div>
+        </section>
+
+        <section aria-labelledby="turnDetectionHeading">
+          <h2 id="turnDetectionHeading">Turn detection</h2>
+          <p>Applies to the next Realtime voice session. Use these controls when speech is interrupted too easily or the agent waits too long.</p>
+          <label>
+            VAD mode
+            <select id="vadMode">
+              <option value="server_vad">server VAD</option>
+              <option value="semantic_vad">semantic VAD</option>
+            </select>
+          </label>
+          <label>
+            Server threshold
+            <input id="vadThreshold" type="range" min="0" max="1" step="0.05" />
+          </label>
+          <label>
+            Silence duration ms
+            <input id="vadSilenceDuration" type="number" min="100" max="5000" step="100" />
+          </label>
+          <label>
+            Semantic eagerness
+            <select id="vadEagerness">
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="auto">auto</option>
+            </select>
+          </label>
+          <label class="inline-check">
+            <input id="vadInterruptResponse" type="checkbox" />
+            Interrupt assistant when user speaks
+          </label>
+          <div id="vadStatus" class="status-line" role="status"></div>
+        </section>
+
+        <section aria-labelledby="credentialsHeading">
+          <h2 id="credentialsHeading">OpenAI API key</h2>
+          <p>The key stays in Chrome extension storage and is used only by this extension to connect to OpenAI.</p>
+          <label>
+            API key
+            <input id="apiKey" type="password" autocomplete="off" placeholder="sk-..." />
+          </label>
+          <div class="button-row">
+            <button id="saveKey">Save key</button>
+            <button id="clearKey" class="secondary">Clear</button>
+          </div>
+          <div id="credentialStatus" class="status-line" role="status"></div>
+        </section>
+
+        <section aria-labelledby="bridgeHeading">
+          <h2 id="bridgeHeading">Bridge</h2>
+          <label>
+            URL
+            <input id="bridgeUrl" value="ws://127.0.0.1:17345/extension" />
+          </label>
+          <div class="button-row">
+            <button id="authorizeBridge">Connect</button>
+            <button id="closeOverlay" class="secondary">Close overlay</button>
+          </div>
+          <div id="bridgeStatus" class="status-line" role="status"></div>
+        </section>
+
+        <section aria-labelledby="storageHeading">
+          <h2 id="storageHeading">Storage folder</h2>
+          <p>Upload or download actions.json storage from a local checkout.</p>
+          <div class="button-row">
+            <button id="loadStorageFolder">Upload</button>
+            <button id="writeStorageFolder" class="secondary">Download</button>
+          </div>
+          <div id="storageFolderStatus" class="status-line" role="status"></div>
+        </section>
+
+        <section aria-labelledby="memoryHeading">
+          <h2 id="memoryHeading">Memory and logs</h2>
+          <p id="memoryStatus">Memory unavailable.</p>
+          <div class="button-row">
+            <button id="clearMemory" class="secondary">Clear memory</button>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <script type="module" src="src/sidepanel.js"></script>
+  </body>
+</html>

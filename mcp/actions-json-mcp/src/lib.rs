@@ -10,12 +10,17 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use axum::{
+    body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    http::StatusCode,
-    response::IntoResponse,
+    http::{
+        header::{self, HeaderValue},
+        Request, StatusCode,
+    },
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -143,6 +148,7 @@ struct ResolvedToolCall {
     target_runtime_id: Option<String>,
     target_url_contains: Option<String>,
     timeout_ms: u64,
+    static_output: Option<Value>,
 }
 
 enum StoragePathError {
@@ -332,6 +338,12 @@ async fn build_catalog_manifests(
             .push(site_actions_tool_manifest());
     }
 
+    ensure_advertised_tool(
+        &mut advertised_manifest,
+        runtime_session_log_tool_manifest(),
+    )?;
+    ensure_site_tool(&mut site_manifest, runtime_session_log_tool_manifest())?;
+
     if storage_root.is_some() {
         advertised_manifest
             .as_object_mut()
@@ -352,6 +364,31 @@ async fn build_catalog_manifests(
     }
 
     Ok((advertised_manifest, site_manifest, site_action_names))
+}
+
+fn ensure_advertised_tool(manifest: &mut Value, tool: Value) -> Result<()> {
+    let name = tool
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("tool manifest requires name"))?;
+    let tools = manifest
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("base manifest must be a JSON object"))?
+        .entry("tools")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .ok_or_else(|| anyhow!("base manifest tools must be an array"))?;
+    if !tools
+        .iter()
+        .any(|existing| existing.get("name").and_then(Value::as_str) == Some(name))
+    {
+        tools.push(tool);
+    }
+    Ok(())
+}
+
+fn ensure_site_tool(manifest: &mut Value, tool: Value) -> Result<()> {
+    ensure_advertised_tool(manifest, tool)
 }
 
 fn site_actions_tool_manifest() -> Value {
@@ -379,6 +416,25 @@ fn site_actions_tool_manifest() -> Value {
                 "target_url_contains": {
                     "type": "string",
                     "description": "Target page URL substring used to select the applicable site catalog and runtime."
+                }
+            }
+        }
+    })
+}
+
+fn runtime_session_log_tool_manifest() -> Value {
+    json!({
+        "name": "runtime.session.log",
+        "description": "Return the extension-local hosted-agent session log, including recent transcript turns, tool calls, tool failures, Realtime errors, screenshots, and session lifecycle events.",
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 80,
+                    "default": 80
                 }
             }
         }
@@ -512,10 +568,18 @@ pub fn app_from_manifest_value_with_runtimes(
 }
 
 fn app_from_manifest_value_with_storage_root(
-    catalog: ActionCatalog,
+    mut catalog: ActionCatalog,
     runtime_seeds: Vec<RuntimeSeed>,
     storage_root: Option<PathBuf>,
 ) -> Router {
+    ensure_advertised_tool(&mut catalog.manifest, runtime_session_log_tool_manifest())
+        .expect("runtime.session.log tool must be insertable into advertised manifest");
+    ensure_site_tool(
+        &mut catalog.site_manifest,
+        runtime_session_log_tool_manifest(),
+    )
+    .expect("runtime.session.log tool must be insertable into site manifest");
+
     let timestamp = now_ms();
     let seeded_runtimes = runtime_seeds
         .into_iter()
@@ -551,11 +615,52 @@ fn app_from_manifest_value_with_storage_root(
         .route("/actions", get(actions))
         .route("/runtimes", get(runtimes))
         .route("/extension", get(extension_ws))
-        .route("/mcp/tools/list", get(tools_list))
-        .route("/mcp/tools/resolve", post(tools_resolve))
-        .route("/mcp/tools/reload", post(tools_reload))
-        .route("/mcp/tools/call", post(tools_call))
+        .route("/mcp/tools/list", get(tools_list).options(cors_preflight))
+        .route(
+            "/mcp/tools/resolve",
+            post(tools_resolve).options(cors_preflight),
+        )
+        .route(
+            "/mcp/tools/reload",
+            post(tools_reload).options(cors_preflight),
+        )
+        .route("/mcp/tools/call", post(tools_call).options(cors_preflight))
+        .layer(middleware::from_fn(add_cors_headers))
         .with_state(state)
+}
+
+async fn cors_preflight() -> impl IntoResponse {
+    (StatusCode::NO_CONTENT, cors_headers())
+}
+
+async fn add_cors_headers(request: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    for (name, value) in cors_headers() {
+        response.headers_mut().insert(name, value);
+    }
+    response
+}
+
+fn cors_headers() -> [(header::HeaderName, HeaderValue); 5] {
+    [
+        (
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("*"),
+        ),
+        (
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, POST, OPTIONS"),
+        ),
+        (
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("content-type"),
+        ),
+        (
+            header::HeaderName::from_static("access-control-allow-private-network"),
+            HeaderValue::from_static("true"),
+        ),
+        (header::VARY, HeaderValue::from_static("Origin")),
+    ]
 }
 
 async fn health() -> Json<Value> {
@@ -681,6 +786,7 @@ async fn tools_call(
             target_runtime_id: request.target_runtime_id.clone(),
             target_url_contains: request.target_url_contains.clone(),
             timeout_ms: request.timeout_ms,
+            static_output: None,
         }
     } else {
         resolve_tool_call_with_storage(&state, &request).await?
@@ -693,6 +799,14 @@ async fn dispatch_resolved_tool_call(
     resolved: ResolvedToolCall,
 ) -> Result<Json<ToolCallResponse>, (StatusCode, Json<Value>)> {
     let call_id = Uuid::new_v4().to_string();
+    if let Some(output) = resolved.static_output {
+        return Ok(Json(ToolCallResponse {
+            ok: true,
+            call_id,
+            output: Some(output),
+            error: None,
+        }));
+    }
     let runtime = select_runtime(state, &resolved).await?;
 
     let (response_tx, response_rx) = oneshot::channel::<Value>();
@@ -767,6 +881,20 @@ fn resolve_tool_call(
         .and_then(|x_actions| x_actions.get("handler"))
         .and_then(Value::as_str);
     let Some(handler) = handler else {
+        if let Some(output) = tool
+            .get("x_actions")
+            .and_then(|x_actions| x_actions.get("static_output"))
+            .cloned()
+        {
+            return Ok(ResolvedToolCall {
+                name: request.name.clone(),
+                arguments: request.arguments.clone(),
+                target_runtime_id: request.target_runtime_id.clone(),
+                target_url_contains: request.target_url_contains.clone(),
+                timeout_ms: request.timeout_ms,
+                static_output: Some(output),
+            });
+        }
         if stored_tool_execution_mode(tool) == Some("state_machine") {
             return Ok(resolve_state_machine_tool(tool, request));
         }
@@ -820,6 +948,7 @@ fn resolve_tool_call(
         target_runtime_id: request.target_runtime_id.clone(),
         target_url_contains,
         timeout_ms: request.timeout_ms,
+        static_output: None,
     })
 }
 
@@ -1536,6 +1665,7 @@ fn unresolved_tool_call(request: &ToolCallRequest) -> ResolvedToolCall {
         target_runtime_id: request.target_runtime_id.clone(),
         target_url_contains: request.target_url_contains.clone(),
         timeout_ms: request.timeout_ms,
+        static_output: None,
     }
 }
 
@@ -1584,6 +1714,7 @@ fn resolve_state_machine_tool(tool: &Value, request: &ToolCallRequest) -> Resolv
         target_runtime_id: request.target_runtime_id.clone(),
         target_url_contains: request.target_url_contains.clone(),
         timeout_ms: request.timeout_ms,
+        static_output: None,
     }
 }
 
@@ -1857,7 +1988,10 @@ async fn select_runtime(
     if runtimes.is_empty() {
         return Err((
             StatusCode::CONFLICT,
-            Json(json!({ "error": "no extension runtime connected" })),
+            Json(json!({
+                "error": "no extension runtime connected",
+                "routing_trace": runtime_routing_trace(&runtimes, request, "no_runtimes")
+            })),
         ));
     }
 
@@ -1868,7 +2002,8 @@ async fn select_runtime(
                 Json(json!({
                     "error": "target runtime not connected",
                     "target_runtime_id": runtime_id,
-                    "runtimes": runtime_summaries(&runtimes)
+                    "runtimes": runtime_summaries(&runtimes),
+                    "routing_trace": runtime_routing_trace(&runtimes, request, "runtime_id_not_found")
                 })),
             )
         });
@@ -1888,7 +2023,8 @@ async fn select_runtime(
                 Json(json!({
                     "error": "no runtime URL matched target_url_contains",
                     "target_url_contains": needle,
-                    "runtimes": runtime_summaries(&runtimes)
+                    "runtimes": runtime_summaries(&runtimes),
+                    "routing_trace": runtime_routing_trace(&runtimes, request, "no_match")
                 })),
             )),
             _ => Err((
@@ -1896,7 +2032,8 @@ async fn select_runtime(
                 Json(json!({
                     "error": "target_url_contains matched multiple runtimes",
                     "target_url_contains": needle,
-                    "matches": matches.iter().map(runtime_summary).collect::<Vec<_>>()
+                    "matches": matches.iter().map(runtime_summary).collect::<Vec<_>>(),
+                    "routing_trace": runtime_routing_trace(&runtimes, request, "multiple_matches")
                 })),
             )),
         };
@@ -1910,9 +2047,46 @@ async fn select_runtime(
         StatusCode::CONFLICT,
         Json(json!({
             "error": "multiple extension runtimes connected; specify target_runtime_id or target_url_contains",
-            "runtimes": runtime_summaries(&runtimes)
+            "runtimes": runtime_summaries(&runtimes),
+            "routing_trace": runtime_routing_trace(&runtimes, request, "ambiguous_without_target")
         })),
     ))
+}
+
+fn runtime_routing_trace(
+    runtimes: &HashMap<String, RuntimeClient>,
+    request: &ResolvedToolCall,
+    decision: &str,
+) -> Value {
+    let target_runtime_id = request.target_runtime_id.as_deref();
+    let target_url_contains = request.target_url_contains.as_deref();
+    let candidates = runtimes
+        .values()
+        .map(|client| {
+            let url = client.url.as_deref().unwrap_or("");
+            json!({
+                "runtime_id": client.runtime_id,
+                "runtime_key": client.runtime_key,
+                "url": client.url,
+                "runtime_id_match": target_runtime_id
+                    .map(|target| target == client.runtime_id)
+                    .unwrap_or(false),
+                "url_contains_match": target_url_contains
+                    .map(|needle| url.contains(needle))
+                    .unwrap_or(false),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "decision": decision,
+        "requested": {
+            "tool": request.name,
+            "target_runtime_id": request.target_runtime_id,
+            "target_url_contains": request.target_url_contains,
+        },
+        "candidate_count": candidates.len(),
+        "candidates": candidates,
+    })
 }
 
 fn runtime_summaries(runtimes: &HashMap<String, RuntimeClient>) -> Vec<Value> {

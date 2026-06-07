@@ -117,10 +117,12 @@ for (const internalTopic of [
 const gettingStarted = await readFile(gettingStartedPath, "utf8");
 for (const phrase of [
   "# Getting Started",
-  "Choose A Runtime",
-  "Install From A Release",
-  "Start The Bridge",
-  "Verify The Connection",
+  "Choose A Path",
+  "Path A: Chrome Extension Hosted Agent",
+  "Path B: External Coding Agent Through The Bridge",
+  "Path C: Bookmarklet Or Embed-Path Testing",
+  "Upload And Download Storage",
+  "Verify Hosted Tools",
   "127.0.0.1:17345",
   "Content Security",
 ]) {
