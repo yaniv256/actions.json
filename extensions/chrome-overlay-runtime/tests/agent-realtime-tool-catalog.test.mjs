@@ -56,11 +56,18 @@ test("realtime tool catalog reads the packaged extension primitive manifest", as
   assert.equal(names.includes("viewport.scroll"), true);
   assert.equal(names.includes("locator.element_info"), true);
   assert.equal(names.includes("browser.screenshot"), true);
+  assert.equal(names.includes("overlay.open"), true);
+  assert.equal(names.includes("overlay.register_launcher"), true);
+  assert.equal(names.includes("overlay.close"), true);
 
   const click = tools.find((tool) => tool.name === "pointer.click");
   assert.deepEqual(click.parameters.required, ["x", "y"]);
   assert.equal(click.parameters.properties.x.type, "number");
   assert.equal(click.parameters.properties.y.type, "number");
+
+  const overlayOpen = tools.find((tool) => tool.name === "overlay.open");
+  assert.deepEqual(overlayOpen.parameters.required, ["html"]);
+  assert.equal(overlayOpen.parameters.properties.html.type, "string");
 });
 
 test("packaged extension supported primitives all carry model-usable metadata", async () => {

@@ -425,6 +425,220 @@
           },
           "additionalProperties": false
         }
+      },
+      {
+        "name": "overlay.open",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "privileged",
+        "portable": false,
+        "summary": "Render an agent-created HTML document in the authorized page overlay.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "html": {
+              "type": "string",
+              "description": "HTML body or document markup to render inside the overlay."
+            },
+            "title": {
+              "type": "string",
+              "description": "Overlay title shown in the drag handle."
+            },
+            "width": {
+              "type": "integer",
+              "minimum": 420,
+              "maximum": 1400
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 320,
+              "maximum": 1000
+            },
+            "launchers": {
+              "type": "array",
+              "description": "Optional visible-page buttons that reopen this overlay from a relevant DOM anchor.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "Stable launcher id used to replace older buttons for the same overlay affordance."
+                  },
+                  "label": {
+                    "type": "string",
+                    "description": "Button text shown in the original page DOM."
+                  },
+                  "title": {
+                    "type": "string",
+                    "description": "Tooltip/title for the launcher button."
+                  },
+                  "selector": {
+                    "type": "string",
+                    "description": "Single CSS selector hint for the element to place the button near."
+                  },
+                  "selectors": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Ordered CSS selector hints for the element to place the button near."
+                  },
+                  "text_contains": {
+                    "type": "string",
+                    "description": "Optional visible text filter for selected anchor candidates."
+                  },
+                  "text_equals": {
+                    "type": "string",
+                    "description": "Optional exact visible text filter for selected anchor candidates."
+                  },
+                  "url_contains": {
+                    "type": "string",
+                    "description": "Only install this launcher when the current page URL contains this string."
+                  },
+                  "url_matches": {
+                    "type": "string",
+                    "description": "Only install this launcher when the current page URL matches this regular expression."
+                  },
+                  "placement": {
+                    "type": "string",
+                    "enum": [
+                      "beforebegin",
+                      "afterbegin",
+                      "beforeend",
+                      "afterend"
+                    ],
+                    "default": "afterend"
+                  },
+                  "max_instances": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "default": 3
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "html"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "overlay.register_launcher",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "privileged",
+        "portable": false,
+        "summary": "Register visible-page launcher buttons that can reopen an overlay later.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "html": {
+              "type": "string",
+              "description": "HTML body or document markup to render later when a registered launcher is clicked."
+            },
+            "title": {
+              "type": "string",
+              "description": "Overlay title shown when the launcher opens the overlay."
+            },
+            "width": {
+              "type": "integer",
+              "minimum": 420,
+              "maximum": 1400
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 320,
+              "maximum": 1000
+            },
+            "launchers": {
+              "type": "array",
+              "description": "Visible-page buttons that reopen this overlay from a relevant DOM anchor.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "Stable launcher id used to replace older buttons for the same overlay affordance."
+                  },
+                  "label": {
+                    "type": "string",
+                    "description": "Button text shown in the original page DOM."
+                  },
+                  "title": {
+                    "type": "string",
+                    "description": "Tooltip/title for the launcher button."
+                  },
+                  "selector": {
+                    "type": "string",
+                    "description": "Single CSS selector hint for the element to place the button near."
+                  },
+                  "selectors": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Ordered CSS selector hints for the element to place the button near."
+                  },
+                  "text_contains": {
+                    "type": "string",
+                    "description": "Optional visible text filter for selected anchor candidates."
+                  },
+                  "text_equals": {
+                    "type": "string",
+                    "description": "Optional exact visible text filter for selected anchor candidates."
+                  },
+                  "url_contains": {
+                    "type": "string",
+                    "description": "Only install this launcher when the current page URL contains this string."
+                  },
+                  "url_matches": {
+                    "type": "string",
+                    "description": "Only install this launcher when the current page URL matches this regular expression."
+                  },
+                  "placement": {
+                    "type": "string",
+                    "enum": [
+                      "beforebegin",
+                      "afterbegin",
+                      "beforeend",
+                      "afterend"
+                    ],
+                    "default": "afterend"
+                  },
+                  "max_instances": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "default": 3
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "html",
+            "launchers"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "overlay.close",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "privileged",
+        "portable": false,
+        "summary": "Close the current actions.json overlay if one exists.",
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
       }
     ]
   },
