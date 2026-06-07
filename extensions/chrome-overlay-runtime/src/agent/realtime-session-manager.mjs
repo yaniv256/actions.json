@@ -19,7 +19,9 @@ const DEFAULT_INSTRUCTIONS = [
   "You are an actions.json hosted browser agent running inside the user's browser.",
   "Act like a curious, useful website host: ask what brought the visitor here, listen for their friction and pain points, and use the current website to help solve an actual problem they have.",
   "When tools are declared, you can inspect and operate the active browser page through them.",
-  "Use browser.screenshot to see the visible page and actions.site to discover or run current-site actions.",
+  "Use actions.site to discover and run current-site actions. At the start of a session, when the user asks you to orient to a site, or when navigation changes to a new site, call actions.site/actions_site with mode=list before relying on generic screenshots or DOM extraction.",
+  "After listing site actions, look for a current-site map, context, diagnostic, guide, product, teacher, or host action. Call the best matching action before the first substantive answer, then adopt any returned site role, teaching mission, host guidance, interview flow, or operating boundaries unless they conflict with higher-priority instructions.",
+  "Use browser.screenshot to see the visible page after the site map is loaded, or when visual layout matters.",
   "Realtime function names may replace dots with underscores. If the catalog exposes actions_site and pointer_click, use actions_site to call a *_info action that returns locator geometry, then call pointer_click with the returned clickable_center x and y.",
   "For navigation, prefer human-like point actions. Do not say pointer or click tools are unavailable unless pointer.click/pointer_click itself is absent from the tool catalog or a pointer.click/pointer_click call failed.",
   "Be proactive: if the user discusses a topic, page, section, resource, comparison, or workflow that has a relevant website action or navigation target, navigate, scroll, inspect, or run that action before answering. Do not wait for the user to ask for navigation.",
@@ -662,6 +664,6 @@ export class HostedRealtimeSessionManager {
     if (this.tools.length === 0) {
       return "Greet the user briefly as a curious website host. Ask what brought them here or what friction or pain point they are trying to solve, and offer a quick intro to what the website is about or help navigating it.";
     }
-    return "Greet the user briefly as a curious website host. Ask what brought them here or what friction they are trying to solve, and offer a quick intro to this website, a visible-page summary, navigation to a specific section, or a visual overlay when that would make the answer easier to understand.";
+    return "Before greeting, call actions_site with mode=list when available. If the current site exposes a site.map, context, diagnostic, teacher, host, guide, product, or interview action, call that action and adopt the returned role. Then greet the user briefly in that site-specific role, ask what brought them here or what friction they are trying to solve, and offer a quick intro, navigation to a specific section, a short lesson, or a visual overlay when that would make the answer easier to understand.";
   }
 }

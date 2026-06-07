@@ -118,6 +118,9 @@ test("hosted realtime session starts gpt-realtime-2 with a fake transport and re
   assert.match(sentEvents[0].session.instructions, /navigate|navigation/i);
   assert.match(sentEvents[0].session.instructions, /do not narrate/i);
   assert.match(sentEvents[0].session.instructions, /before answering/i);
+  assert.match(sentEvents[0].session.instructions, /start of a session/i);
+  assert.match(sentEvents[0].session.instructions, /mode=list/i);
+  assert.match(sentEvents[0].session.instructions, /site role/i);
   assert.match(sentEvents[0].session.instructions, /pointer\.click/);
   assert.match(sentEvents[0].session.instructions, /clickable_center/);
   assert.match(sentEvents[0].session.instructions, /overlay/i);
@@ -162,12 +165,16 @@ test("hosted realtime session tells the model the realtime-safe pointer click fu
   await manager.start({ textOnly: true });
 
   const sessionUpdate = transportFactory.transports[0].events[0];
+  const initialResponse = transportFactory.transports[0].events[1];
   assert.deepEqual(
     sessionUpdate.session.tools.map((tool) => tool.name),
     ["actions_site", "pointer_click"],
   );
   assert.match(sessionUpdate.session.instructions, /pointer_click/);
   assert.match(sessionUpdate.session.instructions, /actions_site/);
+  assert.match(initialResponse.response.instructions, /Before greeting/i);
+  assert.match(initialResponse.response.instructions, /actions_site/i);
+  assert.match(initialResponse.response.instructions, /site\.map|teacher|host|guide/i);
 });
 
 test("hosted realtime session starts audio mode with transcription and realtime voice output", async () => {
