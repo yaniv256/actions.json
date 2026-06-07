@@ -124,6 +124,8 @@ test("hosted realtime session starts gpt-realtime-2 with a fake transport and re
   assert.match(sentEvents[0].session.instructions, /pointer\.click/);
   assert.match(sentEvents[0].session.instructions, /clickable_center/);
   assert.match(sentEvents[0].session.instructions, /overlay/i);
+  assert.match(sentEvents[0].session.instructions, /overlay_open|overlay\.open/);
+  assert.match(sentEvents[0].session.instructions, /Do not say you cannot directly open an overlay/i);
   assert.equal(sentEvents[0].session.tool_choice, "auto");
   assert.equal(sentEvents[1].type, "response.create");
   assert.match(sentEvents[1].response.instructions, /intro/i);
@@ -159,6 +161,17 @@ test("hosted realtime session tells the model the realtime-safe pointer click fu
           additionalProperties: false,
         },
       },
+      {
+        type: "function",
+        name: "overlay.open",
+        description: "Open an HTML overlay.",
+        parameters: {
+          type: "object",
+          required: ["html"],
+          properties: { html: { type: "string" }, title: { type: "string" } },
+          additionalProperties: false,
+        },
+      },
     ],
   });
 
@@ -168,10 +181,11 @@ test("hosted realtime session tells the model the realtime-safe pointer click fu
   const initialResponse = transportFactory.transports[0].events[1];
   assert.deepEqual(
     sessionUpdate.session.tools.map((tool) => tool.name),
-    ["actions_site", "pointer_click"],
+    ["actions_site", "pointer_click", "overlay_open"],
   );
   assert.match(sessionUpdate.session.instructions, /pointer_click/);
   assert.match(sessionUpdate.session.instructions, /actions_site/);
+  assert.match(sessionUpdate.session.instructions, /overlay_open/);
   assert.match(initialResponse.response.instructions, /Before greeting/i);
   assert.match(initialResponse.response.instructions, /actions_site/i);
   assert.match(initialResponse.response.instructions, /site\.map|teacher|host|guide/i);

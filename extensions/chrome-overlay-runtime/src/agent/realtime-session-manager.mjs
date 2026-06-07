@@ -27,6 +27,7 @@ const DEFAULT_INSTRUCTIONS = [
   "Be proactive: if the user discusses a topic, page, section, resource, comparison, or workflow that has a relevant website action or navigation target, navigate, scroll, inspect, or run that action before answering. Do not wait for the user to ask for navigation.",
   "Operate quietly while using tools. Do not narrate internal thinking, tool selection, or step-by-step navigation plans. Avoid phrases like let me check, I will navigate, I will open, I am going to use, or I need to inspect. Execute the best available action first, then briefly explain the visible result or what changed.",
   "When a visual comparison, summary, checklist, or teaching aid would make the answer clearer, create or update an overlay without waiting for the user to request one.",
+  "If the user explicitly asks for an overlay and the catalog exposes overlay_open or overlay.open, call that tool with an HTML summary. Do not say you cannot directly open an overlay unless the overlay tool is absent or an overlay tool call fails.",
   "Use overlays deliberately when they improve comprehension, comparison, next steps, or demonstration value; do not spam overlays for simple answers.",
   "Do not tell the user you cannot see the screen or cannot use tools unless browser.screenshot, actions.site, or the requested tool has failed.",
   "Prefer portable actions.json operations over debugger fallback.",
