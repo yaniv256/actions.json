@@ -17,6 +17,7 @@ The extension can:
 - upload and download `actions.json.storage`;
 - execute portable primitives such as scroll, click, text insert, DOM reads, and
   locator lookup;
+- switch among tabs the user has already authorized;
 - run debugger-backed JavaScript for authoring-only repair work;
 - relay bookmarklet traffic on pages where direct bookmarklet transport is
   blocked;
@@ -32,6 +33,10 @@ The extension can:
 
 Expected result: the tab is authorized. When tab grouping is available, the tab
 is placed in the `actions.json` group.
+
+If you want the agent to work across several tabs, repeat **Take control of this
+tab** on each tab. The runtime can then list and activate claimed tabs without
+asking for a new authorization on every switch.
 
 ## Popup Controls
 
@@ -64,6 +69,7 @@ The hosted agent uses the extension runtime to:
 - inspect the page with screenshots;
 - discover and run current-site actions through `actions.site`;
 - use direct primitives;
+- switch among claimed tabs when the user has authorized more than one tab;
 - preserve transcript and diagnostic memory;
 - keep the live session in an offscreen document.
 

@@ -7,6 +7,8 @@ import { validatePrimitiveDictionary } from "../src/primitives/dictionary-schema
 const dictionaryPath = new URL("../src/primitives/dictionary.v1.json", import.meta.url);
 
 const requiredStage1Primitives = [
+  "browser.claimed_tabs.activate",
+  "browser.claimed_tabs.list",
   "browser.screenshot",
   "pointer.move",
   "pointer.click",
@@ -24,6 +26,9 @@ const requiredStage1Primitives = [
   "locator.element_info",
   "locator.text_content",
   "locator.wait_for",
+  "overlay.open",
+  "overlay.register_launcher",
+  "overlay.close",
 ];
 
 async function loadDictionary() {

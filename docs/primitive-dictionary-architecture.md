@@ -191,6 +191,8 @@ Privileged capabilities require browser-level access.
 Examples:
 
 - `browser.screenshot`
+- `browser.claimed_tabs.list`
+- `browser.claimed_tabs.activate`
 - `browser.tabs`
 - `browser.history`
 - `browser.downloads`
@@ -203,6 +205,12 @@ Examples:
 
 Privileged actions may be valid in an authoring workflow, but they must not be
 advertised as portable embed actions.
+
+Claimed-tab primitives are privileged browser-host primitives. They are useful
+when the user has explicitly authorized more than one tab and wants an agent to
+switch among those known surfaces. Bookmarklet/embed hosts should report
+`capability_unavailable` for tab-management primitives unless the first-party
+site provides its own equivalent navigation surface.
 
 ### Debug-Only Capabilities
 

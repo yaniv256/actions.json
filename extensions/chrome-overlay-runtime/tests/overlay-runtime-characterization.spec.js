@@ -1,5 +1,6 @@
 const { test, expect } = require("@playwright/test");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const contentScriptPath = path.join(__dirname, "../src/content.js");
@@ -43,7 +44,7 @@ async function addBackgroundScript(page) {
   await page.addScriptTag({ content: backgroundScriptForBrowserTest() });
 }
 
-async function installRuntime(page, manifestOverride) {
+async function installRuntime(page, manifestOverride, options = {}) {
   await page.addInitScript(() => {
     window.__actionsJsonMessages = [];
     window.__actionsJsonRuntimeListeners = [];
@@ -133,7 +134,7 @@ async function installRuntime(page, manifestOverride) {
       }),
     })
   );
-  await page.goto("data:text/html,<main><h1>Test surface</h1></main>");
+  await page.goto(options.pageUrl || "data:text/html,<main><h1>Test surface</h1></main>");
   await page.addScriptTag({ path: contentScriptPath });
 }
 
@@ -182,6 +183,18 @@ async function actionOutput(page, callId) {
   callId);
 }
 
+async function actionError(page, callId) {
+  return page.evaluate((id) =>
+    window.__actionsJsonMessages.find(
+      (item) => item.type === "action_error" && item.call_id === id
+    ) || null,
+  callId);
+}
+
+function overlayReportFrame(page) {
+  return page.frameLocator("#__actions_json_overlay_runtime_host iframe[data-overlay-document]");
+}
+
 test("PR3 overlay.open creates an overlay host and returns an overlay id", async ({ page }) => {
   await installRuntime(page);
 
@@ -205,12 +218,583 @@ test("PR3 overlay.open creates an overlay host and returns an overlay id", async
       host.shadowRoot.querySelector(".overlay-title").textContent
     )
   ).resolves.toBe("Characterization Overlay");
-  await expect(
-    page.locator("#__actions_json_overlay_runtime_host").evaluate((host) =>
-      host.shadowRoot.querySelector(".overlay-body").textContent
-    )
-  ).resolves.toContain("Overlay body");
+  await expect(overlayReportFrame(page).locator("body")).toContainText("Overlay body");
   await expect(page.evaluate(() => window.__scriptRan === true)).resolves.toBe(false);
+});
+
+test("browser.claimed_tabs.list forwards to the extension tab registry", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "browser.claimed_tabs.list", input_schema: { type: "object" } },
+    ],
+  });
+  await connectRuntime(page);
+  await page.evaluate(() => {
+    window.__actionsJsonRuntimeMessageHandler = async (message) => {
+      if (message.type !== "actions-json:claimed-tabs-list") {
+        return { ok: false, error: `unexpected message ${message.type}` };
+      }
+      return {
+        ok: true,
+        tabs: [
+          {
+            tab_id: 101,
+            runtime_key: "chrome-tab:101",
+            title: "LinkedIn Messaging",
+            url: "https://www.linkedin.com/messaging/",
+            active: false,
+          },
+        ],
+        active_tab_id: 101,
+      };
+    };
+  });
+
+  await callRuntimeAction(page, "claimed-tabs-list", "browser.claimed_tabs.list");
+
+  const result = await actionOutput(page, "claimed-tabs-list");
+  expect(result.output).toEqual({
+    ok: true,
+    tabs: [
+      {
+        tab_id: 101,
+        runtime_key: "chrome-tab:101",
+        title: "LinkedIn Messaging",
+        url: "https://www.linkedin.com/messaging/",
+        active: false,
+      },
+    ],
+    active_tab_id: 101,
+  });
+  await expect(page.evaluate(() => window.__actionsJsonMessages.at(-2).message.type)).resolves.toBe(
+    "actions-json:claimed-tabs-list"
+  );
+});
+
+test("browser.claimed_tabs.activate schedules a claimed tab reconnect through background", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "browser.claimed_tabs.activate", input_schema: { type: "object" } },
+    ],
+  });
+  await connectRuntime(page);
+  await page.evaluate(() => {
+    window.__actionsJsonRuntimeMessageHandler = async (message) => {
+      if (message.type !== "actions-json:claimed-tabs-activate") {
+        return { ok: false, error: `unexpected message ${message.type}` };
+      }
+      return {
+        ok: true,
+        scheduled: true,
+        tab: {
+          tab_id: 202,
+          runtime_key: "chrome-tab:202",
+          title: "Amazon Prime Video",
+          url: "https://www.amazon.com/gp/video/storefront/",
+          active: true,
+        },
+      };
+    };
+  });
+
+  await callRuntimeAction(page, "claimed-tabs-activate", "browser.claimed_tabs.activate", {
+    tab_id: 202,
+  });
+
+  const result = await actionOutput(page, "claimed-tabs-activate");
+  expect(result.output).toEqual({
+    ok: true,
+    scheduled: true,
+    tab: {
+      tab_id: 202,
+      runtime_key: "chrome-tab:202",
+      title: "Amazon Prime Video",
+      url: "https://www.amazon.com/gp/video/storefront/",
+      active: true,
+    },
+  });
+  await expect(page.evaluate(() => window.__actionsJsonMessages.at(-2).message)).resolves.toEqual({
+    type: "actions-json:claimed-tabs-activate",
+    tabId: 202,
+    reconnectDelayMs: 300,
+  });
+});
+
+test("overlay.open renders full document CSS in an isolated report iframe", async ({ page }) => {
+  await installRuntime(page);
+
+  await page.evaluate(() =>
+    window.actionsJsonOverlay.openHtml({
+      title: "Sandboxed Report",
+      html: `
+        <!doctype html>
+        <html>
+          <head>
+            <style>
+              html, body {
+                height: 100%;
+                margin: 0;
+                background: rgb(17, 24, 39);
+                color: white;
+              }
+              header {
+                display: flex;
+                padding: 18px;
+                background: rgb(236, 72, 153);
+              }
+              .topbar {
+                display: flex;
+                border: 4px solid rgb(34, 197, 94);
+              }
+            </style>
+          </head>
+          <body>
+            <header class="topbar"><h1>Agent-authored header</h1></header>
+            <main><p>Full document CSS should render here.</p></main>
+            <script>window.__sandboxScriptRan = true;</script>
+          </body>
+        </html>
+      `,
+      width: 640,
+      height: 480,
+    })
+  );
+
+  const host = page.locator("#__actions_json_overlay_runtime_host");
+  await expect(host).toHaveCount(1);
+  await expect(
+    host.evaluate((node) =>
+      window.getComputedStyle(node.shadowRoot.querySelector(".overlay-bar")).backgroundColor
+    )
+  ).resolves.toBe("rgb(24, 32, 44)");
+
+  const reportFrameElement = page.locator("#__actions_json_overlay_runtime_host iframe[data-overlay-document]");
+  await expect(reportFrameElement).toHaveAttribute("sandbox", "allow-same-origin");
+  const reportFrame = page.frameLocator("#__actions_json_overlay_runtime_host iframe[data-overlay-document]");
+
+  await expect(reportFrame.locator("body")).toHaveCSS("background-color", "rgb(17, 24, 39)");
+  await expect(reportFrame.locator("header.topbar")).toBeVisible();
+  await expect(reportFrame.locator("header.topbar")).toHaveCSS("display", "flex");
+  await expect(reportFrame.locator("header.topbar")).toHaveCSS("border-top-color", "rgb(34, 197, 94)");
+  await expect(page.evaluate(() => window.__sandboxScriptRan === true)).resolves.toBe(false);
+});
+
+test("overlay.open report iframe styles survive restrictive page CSP", async ({ page }) => {
+  await page.route("https://strict-csp-actions-json.test/", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      headers: {
+        "content-security-policy": "default-src 'self'; frame-src 'none'; child-src 'none'; script-src 'unsafe-inline'",
+      },
+      body: "<main><h1>Strict CSP surface</h1></main>",
+    }),
+  );
+  await installRuntime(page, undefined, { pageUrl: "https://strict-csp-actions-json.test/" });
+
+  await page.evaluate(() =>
+    window.actionsJsonOverlay.openHtml({
+      title: "CSP-safe Report",
+      html: `
+        <!doctype html>
+        <html>
+          <head>
+            <style>body { margin: 0; background: rgb(15, 23, 42); color: white; }</style>
+          </head>
+          <body><main><h1>CSP-safe iframe report</h1></main></body>
+        </html>
+      `,
+      width: 640,
+      height: 480,
+    })
+  );
+
+  await expect(overlayReportFrame(page).locator("h1")).toHaveText("CSP-safe iframe report");
+  await expect(overlayReportFrame(page).locator("body")).toHaveCSS("background-color", "rgb(15, 23, 42)");
+});
+
+test("report overlay can download and upload sanitized HTML artifacts", async ({ page }) => {
+  await installRuntime(page);
+
+  await page.evaluate(() => {
+    window.__actionsJsonDownloads = [];
+    window.__actionsJsonBlobUrls = new Map();
+    const originalCreateObjectUrl = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = (blob) => {
+      const url = `blob:actions-json-test-${window.__actionsJsonBlobUrls.size + 1}`;
+      window.__actionsJsonBlobUrls.set(url, blob);
+      blob.text().then((text) => {
+        window.__actionsJsonDownloads.push({ url, text });
+      });
+      return url;
+    };
+    URL.revokeObjectURL = () => {};
+    HTMLAnchorElement.prototype.click = function click() {
+      window.__actionsJsonLastDownload = {
+        href: this.href,
+        download: this.download,
+      };
+    };
+    window.__actionsJsonOriginalCreateObjectUrl = originalCreateObjectUrl;
+  });
+
+  await page.evaluate(() =>
+    window.actionsJsonOverlay.openHtml({
+      title: "Beautiful Course Notes",
+      html: `
+        <!doctype html>
+        <html>
+          <head>
+            <title>Course Artifact</title>
+            <style>.slide { color: rgb(124, 58, 237); }</style>
+          </head>
+          <body>
+            <section class="slide"><h2>Slide One</h2><p>Keep this note.</p></section>
+            <script>window.__downloadScriptRan = true;</script>
+          </body>
+        </html>
+      `,
+      width: 640,
+      height: 480,
+    })
+  );
+
+  const host = page.locator("#__actions_json_overlay_runtime_host");
+  await expect(host.locator("[data-download]")).toHaveText("Download");
+  await expect(host.locator("[data-upload]")).toHaveText("Upload");
+  await host.locator("[data-download]").click();
+
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonLastDownload))
+    .toMatchObject({
+      download: "beautiful-course-notes.html",
+    });
+  const exported = await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonDownloads[0]?.text || null))
+    .toContain("Slide One");
+  expect(exported).toBeUndefined();
+
+  const exportedHtml = await page.evaluate(() => window.__actionsJsonDownloads[0].text);
+  expect(exportedHtml).toContain("<!doctype html>");
+  expect(exportedHtml).toContain("<title>Beautiful Course Notes</title>");
+  expect(exportedHtml).toContain("Keep this note.");
+  expect(exportedHtml).toContain(".slide");
+  expect(exportedHtml).not.toContain("<script>");
+  await expect(page.evaluate(() => window.__downloadScriptRan === true)).resolves.toBe(false);
+
+  await page.evaluate(() => {
+    document.querySelector("#__actions_json_overlay_runtime_host").remove();
+  });
+  const uploadPath = path.join(os.tmpdir(), `actions-json-overlay-upload-${Date.now()}.html`);
+  fs.writeFileSync(
+    uploadPath,
+    '<!doctype html><html><head><title>Uploaded Deck</title></head><body><section><h2>Restored Slide</h2></section><script>window.__uploadScriptRan = true;</script></body></html>',
+  );
+  try {
+    await page.evaluate(() =>
+      window.actionsJsonOverlay.openHtml({
+        title: "Temporary Shell",
+        html: "<section><h2>Temporary</h2></section>",
+      })
+    );
+    await page.locator("#__actions_json_overlay_runtime_host [data-upload-input]").setInputFiles(uploadPath);
+    await expect
+      .poll(() =>
+        page.locator("#__actions_json_overlay_runtime_host").evaluate((node) =>
+          node.shadowRoot.querySelector(".overlay-title").textContent
+        )
+      )
+      .toBe("Uploaded Deck");
+    await expect(overlayReportFrame(page).locator("body")).toContainText("Restored Slide");
+    await expect(page.evaluate(() => window.__uploadScriptRan === true)).resolves.toBe(false);
+  } finally {
+    fs.rmSync(uploadPath, { force: true });
+  }
+});
+
+test("overlay.open renders public template with private data from storage bundle", async ({ page }) => {
+  await installRuntime(page);
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "template-storage-import", "storage.import_bundle", {
+    bundle: {
+      protocol: "actions.json.storage.bundle",
+      version: 1,
+      entries: [
+        {
+          path: "scopes/public/sites/linkedin.com/overlays/outreach-radar/template.html",
+          content_type: "text/html",
+          content: `<!doctype html>
+            <html>
+              <head><title>Reusable Outreach Template</title></head>
+              <body>
+                <main id="report">Loading</main>
+                <script>
+                  const data = JSON.parse(document.querySelector('[data-actions-json-overlay-data]').textContent);
+                  document.getElementById('report').innerHTML =
+                    '<h1>' + data.title + '</h1><p>Total: ' + data.total + '</p>';
+                </script>
+              </body>
+            </html>`,
+        },
+        {
+          path: "scopes/private/sites/linkedin.com/overlays/outreach-radar/data.json",
+          content_type: "application/json",
+          content: JSON.stringify({ title: "Private Outreach Radar", total: 10 }),
+        },
+      ],
+    },
+  });
+
+  await expect
+    .poll(() => actionOutput(page, "template-storage-import"))
+    .toMatchObject({ output: { ok: true, entry_count: 2 } });
+
+  await callRuntimeAction(page, "template-open", "overlay.open", {
+    title: "LinkedIn Outreach Radar",
+    template: {
+      scope: "public",
+      path: "sites/linkedin.com/overlays/outreach-radar/template.html",
+    },
+    data: {
+      scope: "private",
+      path: "sites/linkedin.com/overlays/outreach-radar/data.json",
+    },
+  });
+
+  await expect
+    .poll(() => actionOutput(page, "template-open"))
+    .toMatchObject({
+      output: {
+        ok: true,
+        template: {
+          scope: "public",
+          path: "sites/linkedin.com/overlays/outreach-radar/template.html",
+        },
+        data: {
+          scope: "private",
+          path: "sites/linkedin.com/overlays/outreach-radar/data.json",
+        },
+      },
+    });
+  await expect(overlayReportFrame(page).locator("h1")).toHaveText("Private Outreach Radar");
+  await expect(overlayReportFrame(page).locator("body")).toContainText("Total: 10");
+
+  const sandbox = await page.locator("#__actions_json_overlay_runtime_host iframe[data-overlay-document]").getAttribute("sandbox");
+  expect(sandbox).toBe("allow-scripts");
+});
+
+test("overlay.open resolves private template data imported with storage-relative paths", async ({ page }) => {
+  await installRuntime(page);
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "relative-private-template-import", "storage.import_bundle", {
+    bundle: {
+      protocol: "actions.json.storage.bundle",
+      version: 1,
+      entries: [
+        {
+          path: "sites/linkedin.com/messaging/overlays/outreach-radar/template.html",
+          content_type: "text/html",
+          content: `<!doctype html><html><body><h1 id="title"></h1><script>const data = JSON.parse(document.querySelector('[data-actions-json-overlay-data]').textContent); document.getElementById('title').textContent = data.title;</script></body></html>`,
+        },
+        {
+          path: "sites/linkedin.com/messaging/overlays/outreach-radar/data.json",
+          content_type: "application/json",
+          content: JSON.stringify({ title: "Relative Private Storage Works" }),
+        },
+      ],
+    },
+  });
+  await expect.poll(() => actionOutput(page, "relative-private-template-import")).toMatchObject({ output: { ok: true } });
+
+  await callRuntimeAction(page, "relative-private-template-open", "overlay.open", {
+    title: "LinkedIn Outreach Radar",
+    template: {
+      scope: "private",
+      path: "sites/linkedin.com/messaging/overlays/outreach-radar/template.html",
+    },
+    data: {
+      scope: "private",
+      path: "sites/linkedin.com/messaging/overlays/outreach-radar/data.json",
+    },
+  });
+
+  await expect.poll(() => actionOutput(page, "relative-private-template-open")).toMatchObject({ output: { ok: true } });
+  await expect(overlayReportFrame(page).locator("h1")).toHaveText("Relative Private Storage Works");
+});
+
+test("overlay.open resolves shared templates and reports storage reference failures", async ({ page }) => {
+  await installRuntime(page);
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "template-storage-import-errors", "storage.import_bundle", {
+    bundle: {
+      protocol: "actions.json.storage.bundle",
+      version: 1,
+      entries: [
+        {
+          path: "scopes/shared/acme/sites/linkedin.com/overlays/shared/template.html",
+          content_type: "text/html",
+          content: `<!doctype html><html><body><h1 id="title"></h1><script>const data = JSON.parse(document.querySelector('[data-actions-json-overlay-data]').textContent); document.getElementById('title').textContent = data.title;</script></body></html>`,
+        },
+        {
+          path: "scopes/private/sites/linkedin.com/overlays/shared/data.json",
+          content_type: "application/json",
+          content: JSON.stringify({ title: "Shared Template Works" }),
+        },
+        {
+          path: "scopes/private/sites/linkedin.com/overlays/shared/broken.json",
+          content_type: "application/json",
+          content: "{not json",
+        },
+      ],
+    },
+  });
+  await expect.poll(() => actionOutput(page, "template-storage-import-errors")).toMatchObject({ output: { ok: true } });
+
+  await callRuntimeAction(page, "template-open-shared", "overlay.open", {
+    title: "Shared Overlay",
+    template: { scope: "shared/acme", path: "sites/linkedin.com/overlays/shared/template.html" },
+    data: { scope: "private", path: "sites/linkedin.com/overlays/shared/data.json" },
+  });
+  await expect(overlayReportFrame(page).locator("h1")).toHaveText("Shared Template Works");
+
+  await callRuntimeAction(page, "template-open-invalid-json", "overlay.open", {
+    template: { scope: "shared/acme", path: "sites/linkedin.com/overlays/shared/template.html" },
+    data: { scope: "private", path: "sites/linkedin.com/overlays/shared/broken.json" },
+  });
+  await expect.poll(() => actionError(page, "template-open-invalid-json")).toMatchObject({
+    error: {
+      code: "handler_failed",
+      message: expect.stringContaining("not valid JSON"),
+    },
+  });
+
+  await callRuntimeAction(page, "template-open-missing", "overlay.open", {
+    template: { scope: "public", path: "sites/linkedin.com/overlays/missing/template.html" },
+  });
+  await expect.poll(() => actionError(page, "template-open-missing")).toMatchObject({
+    error: {
+      code: "handler_failed",
+      message: expect.stringContaining("Overlay template asset not found"),
+    },
+  });
+
+  await callRuntimeAction(page, "template-open-unknown-scope", "overlay.open", {
+    template: { scope: "mystery", path: "sites/linkedin.com/overlays/shared/template.html" },
+  });
+  await expect.poll(() => actionError(page, "template-open-unknown-scope")).toMatchObject({
+    error: {
+      code: "handler_failed",
+      message: expect.stringContaining("Unknown storage scope"),
+    },
+  });
+
+  await callRuntimeAction(page, "template-open-unsafe", "overlay.open", {
+    template: { scope: "public", path: "../template.html" },
+  });
+  await expect.poll(() => actionError(page, "template-open-unsafe")).toMatchObject({
+    error: {
+      code: "handler_failed",
+      message: expect.stringContaining("Unsafe storage path"),
+    },
+  });
+});
+
+test("template-driven overlays download and upload standalone bundles into private scope", async ({ page }) => {
+  await installRuntime(page);
+  await connectRuntime(page);
+
+  await page.evaluate(() => {
+    window.__actionsJsonDownloads = [];
+    window.__actionsJsonBlobUrls = new Map();
+    URL.createObjectURL = (blob) => {
+      const url = `blob:actions-json-template-test-${window.__actionsJsonBlobUrls.size + 1}`;
+      window.__actionsJsonBlobUrls.set(url, blob);
+      blob.text().then((text) => {
+        window.__actionsJsonDownloads.push({ url, text });
+      });
+      return url;
+    };
+    URL.revokeObjectURL = () => {};
+    HTMLAnchorElement.prototype.click = function click() {
+      window.__actionsJsonLastDownload = {
+        href: this.href,
+        download: this.download,
+      };
+    };
+  });
+
+  await callRuntimeAction(page, "bundle-storage-import", "storage.import_bundle", {
+    bundle: {
+      protocol: "actions.json.storage.bundle",
+      version: 1,
+      entries: [
+        {
+          path: "scopes/public/sites/linkedin.com/overlays/outreach-radar/template.html",
+          content_type: "text/html",
+          content: `<!doctype html><html><body><h1 id="title"></h1><script>const data = JSON.parse(document.querySelector('[data-actions-json-overlay-data]').textContent); document.getElementById('title').textContent = data.title;</script></body></html>`,
+        },
+        {
+          path: "scopes/private/sites/linkedin.com/overlays/outreach-radar/data.json",
+          content_type: "application/json",
+          content: JSON.stringify({ title: "Downloadable Private Data" }),
+        },
+      ],
+    },
+  });
+  await expect.poll(() => actionOutput(page, "bundle-storage-import")).toMatchObject({ output: { ok: true } });
+
+  await callRuntimeAction(page, "bundle-open", "overlay.open", {
+    title: "LinkedIn Outreach Radar",
+    template: { scope: "public", path: "sites/linkedin.com/overlays/outreach-radar/template.html" },
+    data: { scope: "private", path: "sites/linkedin.com/overlays/outreach-radar/data.json" },
+  });
+  await expect(overlayReportFrame(page).locator("h1")).toHaveText("Downloadable Private Data");
+
+  await page.locator("#__actions_json_overlay_runtime_host").locator("[data-download]").click();
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonLastDownload))
+    .toMatchObject({ download: "linkedin-outreach-radar.html" });
+
+  const downloaded = await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonDownloads[0]?.text || null))
+    .toContain("actions.json.overlay.bundle");
+  expect(downloaded).toBeUndefined();
+  const bundleHtml = await page.evaluate(() => window.__actionsJsonDownloads[0].text);
+  expect(bundleHtml).toContain("Downloadable Private Data");
+  expect(bundleHtml).toContain('"scope":"public"');
+  expect(bundleHtml).toContain('"scope":"private"');
+
+  await callRuntimeAction(page, "bundle-storage-replace", "storage.import_bundle", {
+    bundle: {
+      protocol: "actions.json.storage.bundle",
+      version: 1,
+      entries: [],
+    },
+  });
+  await expect.poll(() => actionOutput(page, "bundle-storage-replace")).toMatchObject({ output: { ok: true, entry_count: 0 } });
+
+  const uploadPath = path.join(os.tmpdir(), `actions-json-template-bundle-${Date.now()}.html`);
+  fs.writeFileSync(uploadPath, bundleHtml);
+  try {
+    await page.locator("#__actions_json_overlay_runtime_host [data-upload-input]").setInputFiles(uploadPath);
+    await expect(overlayReportFrame(page).locator("h1")).toHaveText("Downloadable Private Data");
+
+    await callRuntimeAction(page, "bundle-storage-list", "storage.list", {});
+    await expect
+      .poll(() => actionOutput(page, "bundle-storage-list"))
+      .toMatchObject({
+        output: {
+          paths: [
+            "scopes/private/sites/linkedin.com/overlays/outreach-radar/template.html",
+            "scopes/private/sites/linkedin.com/overlays/outreach-radar/data.json",
+          ],
+        },
+      });
+  } finally {
+    fs.rmSync(uploadPath, { force: true });
+  }
 });
 
 test("hosted agent action calls are not accepted as a content-script bridge bypass", async ({ page }) => {
@@ -367,6 +951,90 @@ test("runtime reconnects when the bridge WebSocket closes", async ({ page }) => 
   await expect
     .poll(() => page.evaluate(() => window.__actionsJsonMessages.filter((item) => item.type === "runtime_ready").length))
     .toBe(2);
+});
+
+test("HTTPS pages use the extension background bridge socket to avoid mixed content", async ({ page }) => {
+  await page.route("https://secure-actions-json.test/", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: "<main><h1>Secure surface</h1></main>",
+    }),
+  );
+  await installRuntime(page, {
+    tools: [
+      { name: "page.info", input_schema: { type: "object" } },
+    ],
+  }, { pageUrl: "https://secure-actions-json.test/" });
+  await page.evaluate(() => {
+    window.__actionsJsonRuntimeMessageHandler = async (message) => {
+      if (message.type === "actions-json:bridge-connect") {
+        window.__actionsJsonBackgroundBridgeConnect = message;
+        return { ok: true, transport_owner: "extension_background" };
+      }
+      if (message.type === "actions-json:bridge-protocol") {
+        window.__actionsJsonBackgroundBridgeProtocol = window.__actionsJsonBackgroundBridgeProtocol || [];
+        window.__actionsJsonBackgroundBridgeProtocol.push(message.item);
+        return { ok: true, connected: true };
+      }
+      return { ok: true };
+    };
+  });
+
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener(
+        {
+          type: "actions-json:connect",
+          bridgeUrl: "ws://100.99.150.49:17345/extension",
+          runtimeKey: "secure-tab",
+          authorizationId: "secure-auth",
+          extensionVersion: "test",
+        },
+        {},
+        resolve,
+      ),
+    );
+  });
+
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonWebSockets?.length || 0))
+    .toBe(0);
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonBackgroundBridgeConnect?.bridgeUrl || null))
+    .toBe("ws://100.99.150.49:17345/extension");
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonBackgroundBridgeConnect?.readyItem?.type || null))
+    .toBe("runtime_ready");
+
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener(
+        {
+          type: "actions-json:bridge-message",
+          item: {
+            type: "action_call",
+            call_id: "secure-page-info",
+            name: "page.info",
+            arguments: {},
+          },
+        },
+        {},
+        resolve,
+      ),
+    );
+  });
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.__actionsJsonBackgroundBridgeProtocol?.find(
+          (item) => item.type === "action_call_output" && item.call_id === "secure-page-info",
+        )?.output?.primitive || null,
+      ),
+    )
+    .toBe("page.info");
 });
 
 test("runtime reconnect preserves an already-open menu overlay without rebuilding it", async ({ page }) => {
@@ -1007,6 +1675,198 @@ test("background screenshot focuses the sender window before visible-tab capture
     { method: "tabs.update", tabId: 123, props: { active: true } },
     { method: "tabs.captureVisibleTab", windowId: 77, options: { format: "png" } },
   ]);
+});
+
+test("background lists and activates extension-claimed tabs", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__actionsJsonBackgroundCalls = [];
+    window.__actionsJsonStorage = {
+      ACTIONS_JSON_OVERLAY_SESSION_STATE: {
+        sessions: {
+          "actions-json-default": {
+            chromeGroupId: 42,
+            title: "actions.json",
+            activeTabId: 101,
+            tabs: {
+              101: {
+                bridgeUrl: "ws://127.0.0.1:17345/extension",
+                authorizationId: "auth-101",
+                runtimeKey: "chrome-tab:101",
+                url: "https://www.linkedin.com/messaging/",
+              },
+              202: {
+                bridgeUrl: "ws://127.0.0.1:17345/extension",
+                authorizationId: "auth-202",
+                runtimeKey: "chrome-tab:202",
+                url: "https://www.amazon.com/gp/video/storefront/",
+              },
+            },
+          },
+        },
+      },
+    };
+    window.chrome = {
+      runtime: {
+        lastError: null,
+        getManifest() {
+          return { version: "test-version" };
+        },
+        onInstalled: {
+          addListener() {},
+        },
+        onMessage: {
+          addListener(listener) {
+            window.__actionsJsonBackgroundMessageListener = listener;
+          },
+        },
+      },
+      storage: {
+        local: {
+          async get(key) {
+            if (typeof key === "string") {
+              return { [key]: window.__actionsJsonStorage[key] };
+            }
+            return { ...window.__actionsJsonStorage };
+          },
+          async set(values) {
+            Object.assign(window.__actionsJsonStorage, values);
+          },
+        },
+      },
+      scripting: {
+        async executeScript(details) {
+          window.__actionsJsonBackgroundCalls.push({ method: "scripting.executeScript", details });
+        },
+      },
+      tabGroups: {
+        async get(id) {
+          return { id };
+        },
+        async update() {},
+      },
+      tabs: {
+        async get(id) {
+          if (id === 101) {
+            return {
+              id,
+              windowId: 77,
+              title: "LinkedIn Messaging",
+              url: "https://www.linkedin.com/messaging/",
+              active: false,
+            };
+          }
+          if (id === 202) {
+            return {
+              id,
+              windowId: 88,
+              title: "Amazon Prime Video",
+              url: "https://www.amazon.com/gp/video/storefront/",
+              active: false,
+            };
+          }
+          throw new Error(`missing tab ${id}`);
+        },
+        async group() {
+          return 42;
+        },
+        async sendMessage(tabId, message) {
+          window.__actionsJsonBackgroundCalls.push({ method: "tabs.sendMessage", tabId, message });
+        },
+        async update(tabId, props) {
+          window.__actionsJsonBackgroundCalls.push({ method: "tabs.update", tabId, props });
+        },
+      },
+      windows: {
+        async update(windowId, props) {
+          window.__actionsJsonBackgroundCalls.push({ method: "windows.update", windowId, props });
+        },
+      },
+    };
+  });
+
+  await page.goto("data:text/html,<main><h1>Claimed tab background test</h1></main>");
+  await addBackgroundScript(page);
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            { type: "actions-json:claimed-tabs-list" },
+            {},
+            resolve
+          );
+        })
+    )
+  ).resolves.toMatchObject({
+    ok: true,
+    active_tab_id: 101,
+    count: 2,
+    tabs: [
+      expect.objectContaining({
+        tab_id: 101,
+        runtime_key: "chrome-tab:101",
+        title: "LinkedIn Messaging",
+        url: "https://www.linkedin.com/messaging/",
+      }),
+      expect.objectContaining({
+        tab_id: 202,
+        runtime_key: "chrome-tab:202",
+        title: "Amazon Prime Video",
+        url: "https://www.amazon.com/gp/video/storefront/",
+      }),
+    ],
+  });
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              type: "actions-json:claimed-tabs-activate",
+              tabId: 202,
+              reconnectDelayMs: 1,
+            },
+            {},
+            resolve
+          );
+        })
+    )
+  ).resolves.toMatchObject({
+    ok: true,
+    scheduled: true,
+    reconnect_delay_ms: 1,
+    tab: expect.objectContaining({
+      tab_id: 202,
+      runtime_key: "chrome-tab:202",
+      active: true,
+    }),
+  });
+
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonBackgroundCalls))
+    .toContainEqual({ method: "tabs.update", tabId: 202, props: { active: true } });
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonBackgroundCalls))
+    .toContainEqual({ method: "windows.update", windowId: 88, props: { focused: true } });
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonBackgroundCalls))
+    .toContainEqual({
+      method: "scripting.executeScript",
+      details: { target: { tabId: 202 }, files: ["src/content.js"] },
+    });
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonBackgroundCalls))
+    .toContainEqual({
+      method: "tabs.sendMessage",
+      tabId: 202,
+      message: expect.objectContaining({
+        type: "actions-json:connect",
+        runtimeKey: "chrome-tab:202",
+        authorizationId: "auth-202",
+      }),
+    });
 });
 
 test("background session log handler returns stored agent memory without dynamic import", async ({ page }) => {
@@ -1990,6 +2850,111 @@ test("dom.list_sections treats viewport-edge sections as not visible", async ({ 
   });
 });
 
+test("background bridge connect reports failure when WebSocket never opens", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__actionsJsonBackgroundDiagnostics = [];
+    window.__actionsJsonStorage = {};
+    window.chrome = {
+      runtime: {
+        lastError: null,
+        getManifest() {
+          return { version: "test-version" };
+        },
+        onInstalled: {
+          addListener() {},
+        },
+        onMessage: {
+          addListener(listener) {
+            window.__actionsJsonBackgroundMessageListener = listener;
+          },
+        },
+      },
+      storage: {
+        local: {
+          async get(key) {
+            if (typeof key === "string") {
+              return { [key]: window.__actionsJsonStorage[key] };
+            }
+            return { ...window.__actionsJsonStorage };
+          },
+          async set(values) {
+            Object.assign(window.__actionsJsonStorage, values);
+          },
+        },
+      },
+      scripting: {
+        async executeScript() {},
+      },
+      tabGroups: {
+        async get(id) {
+          return { id };
+        },
+        async update() {},
+      },
+      tabs: {
+        async get(id) {
+          return { id, windowId: 77, url: "https://secure-actions-json.test/" };
+        },
+        async group() {
+          return 42;
+        },
+        async sendMessage() {},
+      },
+    };
+    window.WebSocket = class FailingWebSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
+      constructor(url) {
+        super();
+        this.url = url;
+        this.readyState = FailingWebSocket.CONNECTING;
+        window.__actionsJsonBackgroundWebSocket = this;
+        setTimeout(() => {
+          this.dispatchEvent(new Event("error"));
+          this.readyState = FailingWebSocket.CLOSED;
+          this.dispatchEvent(new CloseEvent("close"));
+        }, 0);
+      }
+
+      send() {}
+
+      close() {
+        this.readyState = FailingWebSocket.CLOSED;
+      }
+    };
+  });
+
+  await page.goto("data:text/html,<main><h1>Background bridge test</h1></main>");
+  await addBackgroundScript(page);
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              type: "actions-json:bridge-connect",
+              bridgeUrl: "ws://100.99.150.49:17345/extension",
+              readyItem: {
+                type: "runtime_ready",
+                runtime_id: "secure-runtime",
+                manifest: { tools: [] },
+              },
+            },
+            { tab: { id: 123, windowId: 77, url: "https://secure-actions-json.test/" } },
+            resolve,
+          );
+        }),
+    )
+  ).resolves.toMatchObject({
+    ok: false,
+    error: expect.stringContaining("WebSocket"),
+  });
+});
+
 test("debug.run_javascript delegates arbitrary evaluation to the privileged background fallback", async ({ page }) => {
   await installRuntime(page, {
     tools: [
@@ -2144,11 +3109,7 @@ test("root attachments declaration installs an overlay launcher", async ({ page 
   );
   await page.locator("[data-actions-json-overlay-launcher='issue-execution-path']").click();
 
-  await expect(
-    page.locator("#__actions_json_overlay_runtime_host").evaluate((host) =>
-      host.shadowRoot.querySelector(".overlay-body").textContent
-    )
-  ).resolves.toContain("Opened from a root attachment");
+  await expect(overlayReportFrame(page).locator("body")).toContainText("Opened from a root attachment");
 });
 
 test("overlay.register_launcher installs a launcher without opening the overlay", async ({ page }) => {

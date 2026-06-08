@@ -1,7 +1,7 @@
 ---
 name: write-actions-json
 description: Use when an agent is exploring a website, automating a browser workflow, converting browser discoveries into reusable actions.json actions, validating a site action map through MCP/runtime tools, or preparing public/shared website operating memory.
-version: 0.1.4
+version: 0.1.5
 ---
 
 # Write actions.json
@@ -30,6 +30,55 @@ The project has three cooperating pieces:
 
 The extension and bookmarklet should share the same primitive dictionary and
 runtime contract. They differ only in host capability.
+
+## Bridge Address Selection
+
+Choose the bridge address based on where the browser runtime actually runs.
+`localhost` and `127.0.0.1` are machine-local names, not project-local names.
+
+- If the browser and bridge run in the same environment, the default bridge
+  launch is enough:
+
+  ```bash
+  actions-json-mcp serve
+  ```
+
+  Use `http://127.0.0.1:17345` for HTTP tool calls and
+  `ws://127.0.0.1:17345/extension` for extension WebSocket config.
+
+- If Chrome runs on a different machine than the coding agent host where the
+  bridge is running, do not use `127.0.0.1` in the extension config. That points
+  Chrome at the browser machine, not the agent host. Launch the bridge on an
+  externally reachable interface:
+
+  ```bash
+  actions-json-mcp serve --bind 0.0.0.0:17345
+  ```
+
+  Then find the agent host's Tailscale IP and use it in the extension config:
+
+  ```bash
+  tailscale ip -4
+  ```
+
+  Configure the extension as `ws://<agent-host-tailscale-ip>:17345/extension`.
+
+- Verify the boundary before debugging runtime code:
+
+  ```bash
+  curl -sS http://127.0.0.1:17345/mcp/tools/list
+  curl -sS http://<agent-host-tailscale-ip>:17345/mcp/tools/list
+  ss -ltnp | rg ':17345'
+  ```
+
+  A listener on `127.0.0.1:17345` will refuse Tailscale connections even when
+  Tailscale itself is healthy. For split-machine testing, the listener should
+  show `0.0.0.0:17345` or a reachable non-loopback address.
+
+When the extension reports `net::ERR_CONNECTION_REFUSED` from
+`src/background.js`, first prove the bridge is listening on the address Chrome
+is using. Treat this as a launch/bind problem until the Tailscale HTTP tool list
+endpoint succeeds and `runtime.session.log` can see a connected runtime.
 
 ## Setup Reference
 
@@ -71,6 +120,10 @@ Read public docs selectively through the skill-local references in
   artifact belongs.
 - `skills/references/docs/index.md`: read when updating public documentation
   navigation, not as the primary source for design details.
+- Use the public docs index (`docs/index.md`) when you need to route yourself to
+  the current user-facing or contributor-facing reference. Public action-map
+  work should rely on the shipped docs and source manifests, not on unpublished
+  internal notes.
 
 Development-team documents are not part of this public-docs reference set. If a
 topic points to prototype history, private PR packaging, or implementation
@@ -207,6 +260,47 @@ Representative tool concepts:
   consent path in bookmarklet/embed.
 - `debug.run_javascript`: privileged authoring fallback, not a portable action.
 - `runtime.configure_pacing`: configure delays between human-observable actions.
+
+### Read Session Logs From The Current Envelope
+
+When inspecting `runtime.session.log`, do not guess at older wrapper shapes.
+First print the raw response, then read events from the current primitive
+envelope:
+
+```bash
+curl -sS http://<bridge-host>:17345/mcp/tools/call \
+  -H 'content-type: application/json' \
+  --data '{
+    "name": "runtime.session.log",
+    "target_runtime_id": "runtime-id-from-/runtimes",
+    "arguments": { "limit": 2000 }
+  }' | jq '.output.value'
+```
+
+The current successful shape is:
+
+```json
+{
+  "ok": true,
+  "call_id": "...",
+  "output": {
+    "adapter": "extension",
+    "ok": true,
+    "primitive": "runtime.session.log",
+    "value": {
+      "eventCount": 86,
+      "events": []
+    }
+  },
+  "error": null
+}
+```
+
+Use `output.value.eventCount` and `output.value.events`. Do not treat the mere
+presence of an `error` key as failure; check whether it is non-null and whether
+top-level `ok` is false. If `output.value.events` is empty while the user just
+ran a hosted-agent session, that is itself evidence to investigate logging or
+session ownership rather than assuming there were no events.
 
 ### Verify Tool Availability By Contract
 

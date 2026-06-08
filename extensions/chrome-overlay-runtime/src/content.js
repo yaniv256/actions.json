@@ -6,6 +6,7 @@
 
   const RUNTIME_ID = `actions-json-runtime-${Math.random().toString(36).slice(2)}`;
   let socket = null;
+  let backgroundBridge = false;
   let reconnectTimer = null;
   let reconnectAttempts = 0;
   let shouldReconnect = false;
@@ -29,10 +30,16 @@
   const LAUNCHER_ATTR = "data-actions-json-overlay-launcher";
   const OVERLAY_REGISTRY_STORAGE_KEY = "actionsJsonOverlayRegistry.v1";
   const MENU_OVERLAY_STATE_STORAGE_KEY = "actionsJsonMenuOverlayState.v1";
+  const STORAGE_BUNDLE_KEY = "actionsJsonStorageBundle";
+  const OVERLAY_BUNDLE_MARKER = "actions.json.overlay.bundle";
   const BOOKMARKLET_RELAY_SOURCE = "ajbm";
   const EXTENSION_RELAY_SOURCE = "ajex";
 
   const protocolSend = (item) => {
+    if (backgroundBridge) {
+      chrome.runtime.sendMessage({ type: "actions-json:bridge-protocol", item }, () => {});
+      return;
+    }
     if (socket?.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(item));
     }
@@ -116,7 +123,7 @@
   window.addEventListener("message", handleBookmarkletRelayMessage);
 
   const scheduleReconnect = (bridgeUrl) => {
-    if (!shouldReconnect || !bridgeUrl) return;
+    if (!shouldReconnect || !bridgeUrl || backgroundBridge) return;
     clearTimeout(reconnectTimer);
     const delay = Math.min(5000, 500 * 2 ** Math.min(reconnectAttempts, 4));
     reconnectAttempts += 1;
@@ -136,16 +143,160 @@
     });
   };
 
-  const parseHtmlDocument = (html) => {
+  const removeUnsafeAttributes = (root) => {
+    root.querySelectorAll("*").forEach((node) => {
+      for (const attribute of Array.from(node.attributes)) {
+        const name = attribute.name.toLowerCase();
+        const value = String(attribute.value || "").trim().toLowerCase();
+        if (name.startsWith("on") || value.startsWith("javascript:")) {
+          node.removeAttribute(attribute.name);
+        }
+      }
+    });
+  };
+
+  const parseHtmlDocument = (html, options = {}) => {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, "text/html");
     const style = Array.from(doc.querySelectorAll("style")).map((node) => node.textContent || "").join("\n");
-    doc.querySelectorAll("script").forEach((node) => node.remove());
+    removeUnsafeAttributes(doc);
+    if (!options.preserveScripts) {
+      doc.querySelectorAll("script").forEach((node) => node.remove());
+    }
     return {
       title: doc.querySelector("title")?.textContent?.trim(),
       style,
-      body: doc.body ? doc.body.innerHTML : html
+      body: doc.body ? doc.body.innerHTML : html,
+      html: doc.documentElement ? doc.documentElement.outerHTML : html
     };
+  };
+
+  const buildOverlayArtifactHtml = ({ title, parsed }) => {
+    const artifactTitle = title || parsed?.title || "actions.json overlay";
+    const style = parsed?.style || "";
+    return [
+      "<!doctype html>",
+      "<html>",
+      "<head>",
+      '<meta charset="utf-8">',
+      '<meta name="viewport" content="width=device-width, initial-scale=1">',
+      `<title>${escapeHtml(artifactTitle)}</title>`,
+      `<style>\n${style}\n</style>`,
+      "</head>",
+      "<body>",
+      parsed?.body || "",
+      "</body>",
+      "</html>",
+      ""
+    ].join("\n");
+  };
+
+  const jsonForScriptText = (value) =>
+    JSON.stringify(value ?? null)
+      .replaceAll("<", "\\u003c")
+      .replaceAll(">", "\\u003e")
+      .replaceAll("&", "\\u0026")
+      .replaceAll("\u2028", "\\u2028")
+      .replaceAll("\u2029", "\\u2029");
+
+  const buildTemplateDocumentHtml = ({ parsed, data }) => {
+    const docHtml = parsed?.html || "<html><head></head><body></body></html>";
+    const dataScript = `<script type="application/json" data-actions-json-overlay-data>${jsonForScriptText(data)}</script>`;
+    if (/<head[^>]*>/i.test(docHtml)) {
+      return docHtml.replace(/<head([^>]*)>/i, `<head$1>${dataScript}`);
+    }
+    if (/<html[^>]*>/i.test(docHtml)) {
+      return docHtml.replace(/<html([^>]*)>/i, `<html$1><head>${dataScript}</head>`);
+    }
+    return `<!doctype html><html><head>${dataScript}</head><body>${docHtml}</body></html>`;
+  };
+
+  const buildOverlayBundleHtml = ({ title, templateHtml, dataJson, metadata }) => {
+    const artifactTitle = title || "actions.json overlay bundle";
+    const bootstrapData = {
+      protocol: OVERLAY_BUNDLE_MARKER,
+      version: 1,
+      title: artifactTitle,
+      metadata,
+      template_html: templateHtml,
+      data_json: dataJson
+    };
+    return [
+      "<!doctype html>",
+      "<html>",
+      "<head>",
+      '<meta charset="utf-8">',
+      '<meta name="viewport" content="width=device-width, initial-scale=1">',
+      `<title>${escapeHtml(artifactTitle)}</title>`,
+      "</head>",
+      "<body>",
+      '<main id="actions-json-overlay-bundle-root">Loading actions.json overlay bundle...</main>',
+      `<script type="application/json" data-actions-json-overlay-bundle>${jsonForScriptText(bootstrapData)}</script>`,
+      "<script>",
+      "(() => {",
+      "  const bundle = JSON.parse(document.querySelector('[data-actions-json-overlay-bundle]').textContent);",
+      "  const parser = new DOMParser();",
+      "  const doc = parser.parseFromString(bundle.template_html, 'text/html');",
+      "  const dataScript = doc.createElement('script');",
+      "  dataScript.type = 'application/json';",
+      "  dataScript.setAttribute('data-actions-json-overlay-data', '');",
+      "  dataScript.textContent = bundle.data_json;",
+      "  doc.head.prepend(dataScript);",
+      "  document.open();",
+      "  document.write('<!doctype html>' + doc.documentElement.outerHTML);",
+      "  document.close();",
+      "})();",
+      "</script>",
+      "</body>",
+      "</html>",
+      ""
+    ].join("\n");
+  };
+
+  const renderOverlayDocument = (container, parsed, options = {}) => {
+    container.textContent = "";
+    const iframe = document.createElement("iframe");
+    iframe.dataset.overlayDocument = "true";
+    iframe.setAttribute("sandbox", options.allowScripts ? "allow-scripts" : "allow-same-origin");
+    iframe.setAttribute("title", "actions.json overlay content");
+
+    if (options.allowScripts) {
+      iframe.srcdoc = buildTemplateDocumentHtml({ parsed, data: options.data });
+      container.appendChild(iframe);
+      return iframe;
+    }
+
+    const populate = () => {
+      const frameDoc = iframe.contentDocument;
+      if (!frameDoc) return;
+
+      frameDoc.open();
+      frameDoc.write("<!doctype html><html><head></head><body></body></html>");
+      frameDoc.close();
+      frameDoc.title = parsed?.title || "actions.json overlay";
+      frameDoc.body.innerHTML = parsed?.body || "";
+
+      const css = parsed?.style || "";
+      if (css && iframe.contentWindow?.CSSStyleSheet) {
+        const sheet = new iframe.contentWindow.CSSStyleSheet();
+        sheet.replaceSync(css);
+        frameDoc.adoptedStyleSheets = [...frameDoc.adoptedStyleSheets, sheet];
+      }
+    };
+
+    iframe.addEventListener("load", populate, { once: true });
+    container.appendChild(iframe);
+
+    return iframe;
+  };
+
+  const filenameFromTitle = (title) => {
+    const base = String(title || "actions-json-overlay")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80);
+    return `${base || "actions-json-overlay"}.html`;
   };
 
   const escapeHtml = (value) =>
@@ -249,11 +400,18 @@
   };
 
   const normalizeOverlayArgs = (overlayArgs) => {
-    const { html, title, width = 980, height = 760 } = overlayArgs || {};
-    if (typeof html !== "string" || html.length === 0) {
-      throw new Error("overlay.open requires a non-empty html string");
+    const { html, template, title, width = 980, height = 760 } = overlayArgs || {};
+    const hasHtml = typeof html === "string" && html.length > 0;
+    const hasTemplate = template && typeof template === "object";
+    if (hasHtml && hasTemplate) {
+      throw new Error("overlay.open accepts either html or template, not both");
     }
-    const normalized = { ...overlayArgs, html, title, width, height };
+    if (!hasHtml && !hasTemplate) {
+      throw new Error("overlay.open requires either a non-empty html string or a template storage reference");
+    }
+    const normalized = { ...overlayArgs, title, width, height };
+    if (hasHtml) normalized.html = html;
+    if (hasTemplate) normalized.template = template;
     normalized.__registryId = overlayRegistryIdFrom(normalized);
     return normalized;
   };
@@ -301,7 +459,12 @@
       event.preventDefault();
       event.stopPropagation();
       if (overlayArgs) {
-        openOverlay(overlayArgs);
+        openOverlay(overlayArgs).catch((error) => {
+          emitDomEvent("actions-json:overlay-open-failed", {
+            launcher_id: launcherId,
+            error: error.message || String(error)
+          });
+        });
         emitDomEvent("actions-json:overlay-launcher-opened", { launcher_id: launcherId });
       }
     });
@@ -525,19 +688,28 @@
     }
     .overlay-body .topbar { display: none; }
     .overlay-body .shell { width: 100%; max-width: 1180px; margin: 0 auto; padding-top: 26px; padding-bottom: 40px; }
+    .overlay-document-frame,
+    iframe[data-overlay-document] {
+      display: block;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: #fff;
+    }
   `;
 
-  const openOverlay = (overlayArgs) => {
+  const openOverlay = async (overlayArgs) => {
     const normalizedOverlayArgs = registerOverlayArgs(overlayArgs);
     if (normalizedOverlayArgs.launcher || Array.isArray(normalizedOverlayArgs.launchers)) {
       persistRegisteredOverlays().catch((_error) => {});
     }
-    const { html, title, width = 980, height = 760 } = normalizedOverlayArgs;
+    const resolvedOverlayArgs = await resolveOverlayContent(normalizedOverlayArgs);
+    const { html, title, width = 980, height = 760 } = resolvedOverlayArgs;
 
     const existing = document.getElementById("__actions_json_overlay_runtime_host");
     if (existing) existing.remove();
 
-    const parsed = parseHtmlDocument(html);
+    const parsed = parseHtmlDocument(html, { preserveScripts: Boolean(resolvedOverlayArgs.__templateDriven) });
     const overlayId = `overlay-${Date.now().toString(36)}`;
     const host = document.createElement("div");
     host.id = "__actions_json_overlay_runtime_host";
@@ -561,21 +733,41 @@
 
     const shadow = host.attachShadow({ mode: "open" });
     shadow.innerHTML = `
-      <style>${reportBaseCss}\n${parsed.style}</style>
+      <style>${reportBaseCss}</style>
       <section class="overlay-frame" role="dialog" aria-label="actions.json overlay report">
         <header class="overlay-bar" data-drag-handle>
           <div class="overlay-title"></div>
           <div class="overlay-actions">
+            <button class="overlay-btn" type="button" data-download>Download</button>
+            <button class="overlay-btn" type="button" data-upload>Upload</button>
             <button class="overlay-btn" type="button" data-minimize aria-expanded="true">Minimize</button>
             <button class="overlay-btn" type="button" data-reset>Reset</button>
             <button class="overlay-btn" type="button" data-close>Close</button>
+            <input type="file" accept=".html,text/html" data-upload-input hidden>
           </div>
         </header>
         <main class="overlay-body"></main>
       </section>
     `;
-    shadow.querySelector(".overlay-title").textContent = title || parsed.title || "actions.json overlay";
-    shadow.querySelector(".overlay-body").innerHTML = parsed.body;
+    const displayTitle = title || parsed.title || "actions.json overlay";
+    const artifactHtml = resolvedOverlayArgs.__templateDriven
+      ? buildOverlayBundleHtml({
+        title: displayTitle,
+        templateHtml: resolvedOverlayArgs.__templateAsset.content,
+        dataJson: resolvedOverlayArgs.__dataJson,
+        metadata: {
+          template: resolvedOverlayArgs.template,
+          data: resolvedOverlayArgs.data || null,
+          resolved_template_path: resolvedOverlayArgs.__templateAsset.canonicalPath,
+          resolved_data_path: resolvedOverlayArgs.__dataAsset?.canonicalPath || null
+        }
+      })
+      : buildOverlayArtifactHtml({ title: displayTitle, parsed });
+    shadow.querySelector(".overlay-title").textContent = displayTitle;
+    renderOverlayDocument(shadow.querySelector(".overlay-body"), parsed, {
+      allowScripts: Boolean(resolvedOverlayArgs.__templateDriven),
+      data: resolvedOverlayArgs.__dataValue
+    });
     document.documentElement.appendChild(host);
 
     const bar = shadow.querySelector("[data-drag-handle]");
@@ -583,6 +775,9 @@
     const close = shadow.querySelector("[data-close]");
     const minimize = shadow.querySelector("[data-minimize]");
     const reset = shadow.querySelector("[data-reset]");
+    const download = shadow.querySelector("[data-download]");
+    const upload = shadow.querySelector("[data-upload]");
+    const uploadInput = shadow.querySelector("[data-upload-input]");
     let drag = null;
     let restoreGeometry = null;
 
@@ -655,6 +850,65 @@
     minimize.addEventListener("click", () => {
       setMinimized(frame.dataset.minimized !== "true");
     });
+    download.addEventListener("click", () => {
+      const blob = new Blob([artifactHtml], { type: "text/html;charset=utf-8" });
+      const href = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = href;
+      anchor.download = filenameFromTitle(displayTitle);
+      anchor.rel = "noopener";
+      document.documentElement.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(href), 1000);
+      emitDomEvent("actions-json:overlay-downloaded", {
+        overlay_id: overlayId,
+        filename: anchor.download,
+        bytes: artifactHtml.length
+      });
+    });
+    upload.addEventListener("click", () => {
+      uploadInput.click();
+    });
+    uploadInput.addEventListener("change", async () => {
+      const file = uploadInput.files?.[0];
+      uploadInput.value = "";
+      if (!file) return;
+      try {
+        const uploadedHtml = await file.text();
+        const overlayBundle = parseOverlayBundleArtifact(uploadedHtml);
+        if (overlayBundle) {
+          const refs = await importOverlayBundleToPrivate(overlayBundle);
+          await openOverlay({
+            template: refs.template,
+            data: refs.data,
+            title: overlayBundle.title || file.name.replace(/\.html?$/i, "") || "Imported overlay",
+            width,
+            height
+          });
+        } else {
+          const uploadedParsed = parseHtmlDocument(uploadedHtml);
+          const uploadedTitle = uploadedParsed.title || file.name.replace(/\.html?$/i, "") || "Imported overlay";
+          await openOverlay({
+            html: uploadedHtml,
+            title: uploadedTitle,
+            width,
+            height
+          });
+        }
+        emitDomEvent("actions-json:overlay-uploaded", {
+          overlay_id: overlayId,
+          filename: file.name,
+          bytes: uploadedHtml.length
+        });
+      } catch (error) {
+        emitDomEvent("actions-json:overlay-upload-failed", {
+          overlay_id: overlayId,
+          filename: file.name,
+          error: error.message || String(error)
+        });
+      }
+    });
     close.addEventListener("click", () => {
       host.remove();
       emitDomEvent("actions-json:overlay-closed", { overlay_id: overlayId });
@@ -672,7 +926,13 @@
     const launchers = refreshRegisteredLaunchers();
     startLauncherObservers();
 
-    return { ok: true, overlay_id: overlayId, launchers };
+    return {
+      ok: true,
+      overlay_id: overlayId,
+      launchers,
+      template: resolvedOverlayArgs.__templateDriven ? resolvedOverlayArgs.template : null,
+      data: resolvedOverlayArgs.__templateDriven ? (resolvedOverlayArgs.data || null) : null
+    };
   };
 
   const closeOverlay = () => {
@@ -1207,6 +1467,200 @@
       });
     });
 
+  const normalizeStorageScope = (scope = "private") => {
+    const value = String(scope || "private").trim();
+    if (value === "private" || value === "public") return value;
+    const sharedMatch = value.match(/^shared[:/](.+)$/);
+    if (sharedMatch && /^[a-z0-9._-]+$/i.test(sharedMatch[1])) {
+      return `shared/${sharedMatch[1]}`;
+    }
+    throw new Error(`Unknown storage scope: ${value}`);
+  };
+
+  const normalizeStorageRelativePath = (path) => {
+    const value = String(path || "").trim().replaceAll("\\", "/").replace(/^\/+/, "");
+    if (!value) throw new Error("Storage asset path is required");
+    const parts = value.split("/");
+    if (parts.some((part) => !part || part === "." || part === "..")) {
+      throw new Error(`Unsafe storage path: ${path}`);
+    }
+    return parts.join("/");
+  };
+
+  const storageRefFrom = (ref, defaultScope = "private") => {
+    if (!ref || typeof ref !== "object") {
+      throw new Error("Storage asset reference must be an object");
+    }
+    const rawPath = normalizeStorageRelativePath(ref.path);
+    if (rawPath.startsWith("scopes/")) {
+      const parts = rawPath.split("/");
+      if (parts.length < 4) throw new Error(`Unsafe storage path: ${ref.path}`);
+      if (parts[1] === "shared") {
+        if (parts.length < 5) throw new Error(`Unsafe shared storage path: ${ref.path}`);
+        return {
+          scope: `shared/${parts[2]}`,
+          path: parts.slice(3).join("/"),
+          canonicalPath: rawPath
+        };
+      }
+      const scope = normalizeStorageScope(parts[1]);
+      return {
+        scope,
+        path: parts.slice(2).join("/"),
+        canonicalPath: rawPath
+      };
+    }
+    const scope = normalizeStorageScope(ref.scope || defaultScope);
+    return {
+      scope,
+      path: rawPath,
+      canonicalPath: `scopes/${scope}/${rawPath}`
+    };
+  };
+
+  const getStorageBundle = async () => {
+    const bundle = await storageGet(STORAGE_BUNDLE_KEY);
+    if (bundle?.protocol === "actions.json.storage.bundle" && Array.isArray(bundle.entries)) {
+      return bundle;
+    }
+    return { protocol: "actions.json.storage.bundle", version: 1, entries: [] };
+  };
+
+  const readStorageEntryContent = (entry) => {
+    if (typeof entry?.content === "string") return entry.content;
+    if (typeof entry?.text === "string") return entry.text;
+    if (entry?.content_json !== undefined) return JSON.stringify(entry.content_json, null, 2);
+    return "";
+  };
+
+  const storageLookupPathsFor = (normalizedRef) => {
+    const paths = [normalizedRef.canonicalPath];
+    if (normalizedRef.path && !paths.includes(normalizedRef.path)) {
+      paths.push(normalizedRef.path);
+    }
+    return paths;
+  };
+
+  const resolveStorageAsset = async (ref, options = {}) => {
+    const normalizedRef = storageRefFrom(ref, options.defaultScope || "private");
+    const bundle = await getStorageBundle();
+    const lookupPaths = storageLookupPathsFor(normalizedRef);
+    const entry = bundle.entries.find((candidate) => lookupPaths.includes(candidate?.path));
+    if (!entry) {
+      throw new Error(`${options.label || "Storage asset"} not found: ${normalizedRef.canonicalPath}`);
+    }
+    return {
+      ...normalizedRef,
+      content: readStorageEntryContent(entry),
+      content_type: entry.content_type || entry.contentType || null,
+      entry,
+      resolvedPath: entry.path
+    };
+  };
+
+  const parseJsonAsset = (asset, label) => {
+    try {
+      return JSON.parse(asset.content || "null");
+    } catch (error) {
+      throw new Error(`${label} is not valid JSON: ${asset.canonicalPath}`);
+    }
+  };
+
+  const resolveOverlayContent = async (normalizedOverlayArgs) => {
+    if (typeof normalizedOverlayArgs.html === "string") {
+      return normalizedOverlayArgs;
+    }
+    const templateAsset = await resolveStorageAsset(normalizedOverlayArgs.template, {
+      label: "Overlay template asset"
+    });
+    let dataAsset = null;
+    let dataValue = null;
+    if (normalizedOverlayArgs.data) {
+      dataAsset = await resolveStorageAsset(normalizedOverlayArgs.data, {
+        label: "Overlay data asset"
+      });
+      dataValue = parseJsonAsset(dataAsset, "Overlay data asset");
+    }
+    return {
+      ...normalizedOverlayArgs,
+      html: templateAsset.content,
+      __templateDriven: true,
+      __templateAsset: templateAsset,
+      __dataAsset: dataAsset,
+      __dataValue: dataValue,
+      __dataJson: dataAsset?.content || "null"
+    };
+  };
+
+  const parseOverlayBundleArtifact = (html) => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    const node = doc.querySelector("[data-actions-json-overlay-bundle]");
+    if (!node) return null;
+    const bundle = JSON.parse(node.textContent || "{}");
+    if (bundle?.protocol !== OVERLAY_BUNDLE_MARKER || typeof bundle.template_html !== "string") {
+      throw new Error("Uploaded overlay bundle is not an actions.json overlay bundle");
+    }
+    return bundle;
+  };
+
+  const privateRefForUploadedAsset = (ref, fallbackPath) => {
+    if (ref && typeof ref === "object") {
+      const normalized = storageRefFrom({ ...ref, scope: ref.scope || "private" }, "private");
+      return {
+        scope: "private",
+        path: normalized.path || fallbackPath,
+        canonicalPath: `scopes/private/${normalized.path || fallbackPath}`
+      };
+    }
+    const path = normalizeStorageRelativePath(fallbackPath);
+    return { scope: "private", path, canonicalPath: `scopes/private/${path}` };
+  };
+
+  const upsertStorageEntries = async (entriesToUpsert) => {
+    const bundle = await getStorageBundle();
+    const paths = new Set(entriesToUpsert.map((entry) => entry.path));
+    const entries = [
+      ...bundle.entries.filter((entry) => entry?.path && !paths.has(entry.path)),
+      ...entriesToUpsert
+    ];
+    await storageSet({
+      [STORAGE_BUNDLE_KEY]: {
+        ...bundle,
+        protocol: "actions.json.storage.bundle",
+        version: bundle.version || 1,
+        entries,
+        imported_at: new Date().toISOString()
+      }
+    });
+    return entries;
+  };
+
+  const importOverlayBundleToPrivate = async (bundle, currentUrl = location.href) => {
+    const host = new URL(currentUrl).hostname || "current-site";
+    const slug = filenameFromTitle(bundle.title || "imported-overlay").replace(/\.html$/i, "");
+    const metadata = bundle.metadata && typeof bundle.metadata === "object" ? bundle.metadata : {};
+    const templateRef = privateRefForUploadedAsset(metadata.template, `sites/${host}/overlays/${slug}/template.html`);
+    const dataRef = privateRefForUploadedAsset(metadata.data, `sites/${host}/overlays/${slug}/data.json`);
+    const dataJson = typeof bundle.data_json === "string" ? bundle.data_json : JSON.stringify(bundle.data_json ?? null, null, 2);
+    await upsertStorageEntries([
+      {
+        path: templateRef.canonicalPath,
+        content_type: "text/html",
+        content: bundle.template_html
+      },
+      {
+        path: dataRef.canonicalPath,
+        content_type: "application/json",
+        content: dataJson
+      }
+    ]);
+    return {
+      template: { scope: "private", path: templateRef.path },
+      data: { scope: "private", path: dataRef.path }
+    };
+  };
+
   const captureScreenshot = async (args = {}) => {
     const format = args.format === "jpeg" ? "jpeg" : "png";
     const delayMs = Number.isFinite(args.delay_ms)
@@ -1246,6 +1700,22 @@
     };
   };
 
+  const listClaimedTabs = async () => sendRuntimeMessage({
+    type: "actions-json:claimed-tabs-list"
+  });
+
+  const activateClaimedTab = async (args = {}) => {
+    const tabId = Number(args.tab_id ?? args.tabId);
+    if (!Number.isInteger(tabId)) {
+      throw new Error("browser.claimed_tabs.activate requires tab_id");
+    }
+    return sendRuntimeMessage({
+      type: "actions-json:claimed-tabs-activate",
+      tabId,
+      reconnectDelayMs: 300
+    });
+  };
+
   const importStorageBundle = async (args = {}) => {
     const bundle = args.bundle;
     if (bundle?.protocol !== "actions.json.storage.bundle" || !Array.isArray(bundle.entries)) {
@@ -1255,7 +1725,7 @@
       ...bundle,
       imported_at: new Date().toISOString()
     };
-    await storageSet({ actionsJsonStorageBundle: normalizedBundle });
+    await storageSet({ [STORAGE_BUNDLE_KEY]: normalizedBundle });
     return {
       ok: true,
       entry_count: normalizedBundle.entries.length,
@@ -1265,7 +1735,7 @@
   };
 
   const listStorageBundle = async () => {
-    const bundle = await storageGet("actionsJsonStorageBundle");
+    const bundle = await storageGet(STORAGE_BUNDLE_KEY);
     const entries = Array.isArray(bundle?.entries) ? bundle.entries : [];
     return {
       ok: true,
@@ -2156,7 +2626,7 @@
 
     let output;
     if (message.name === "overlay.open") {
-      output = openOverlay(message.arguments || {});
+      output = await openOverlay(message.arguments || {});
     } else if (message.name === "overlay.register_launcher") {
       output = await registerLauncher(message.arguments || {});
     } else if (message.name === "overlay.close") {
@@ -2165,6 +2635,10 @@
       output = configurePrimitivePacing(message.arguments || {});
     } else if (message.name === "runtime.session.log") {
       output = await runtimeSessionLog(message.arguments || {});
+    } else if (message.name === "browser.claimed_tabs.list") {
+      output = await listClaimedTabs();
+    } else if (message.name === "browser.claimed_tabs.activate") {
+      output = await activateClaimedTab(message.arguments || {});
     } else if (message.name === "browser.screenshot") {
       output = await captureScreenshot(message.arguments || {});
     } else if (message.name === "browser.extract_elements") {
@@ -2241,6 +2715,51 @@
     return run;
   };
 
+  const shouldUseBackgroundBridge = (bridgeUrl) => {
+    if (location.protocol !== "https:") return false;
+    try {
+      return new URL(bridgeUrl).protocol === "ws:";
+    } catch (_error) {
+      return false;
+    }
+  };
+
+  const runtimeReadyItem = (actions) => ({
+    type: "runtime_ready",
+    runtime_id: RUNTIME_ID,
+    runtime_key: runtimeKey,
+    authorization_id: authorizationId,
+    extension_version: extensionVersion,
+    url: location.href,
+    manifest: actions
+  });
+
+  const runtimeStatusItem = (actions) => ({
+    type: "runtime_status",
+    runtime_id: RUNTIME_ID,
+    runtime_key: runtimeKey,
+    authorization_id: authorizationId,
+    extension_version: extensionVersion,
+    url: location.href,
+    connected: true,
+    actions: actions.tools?.map((tool) => tool.name) || []
+  });
+
+  const handleBridgeMessage = async (message, actions) => {
+    if (message.type === "action_call") {
+      if (message.runtime_id && relayedRuntimeIds.has(message.runtime_id)) {
+        relayToPage(message);
+        return;
+      }
+      await enqueueActionCall(message);
+    } else if (message.type === "runtime_status") {
+      protocolSend(runtimeStatusItem(actions));
+      for (const runtimeId of relayedRuntimeIds) {
+        relayToPage({ ...message, runtime_id: runtimeId });
+      }
+    }
+  };
+
   const connect = async (bridgeUrl) => {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -2256,20 +2775,29 @@
       previousSocket.close();
     }
 
+    if (shouldUseBackgroundBridge(bridgeUrl)) {
+      backgroundBridge = true;
+      const readyItem = runtimeReadyItem(actions);
+      const response = await chrome.runtime.sendMessage({
+        type: "actions-json:bridge-connect",
+        bridgeUrl,
+        readyItem,
+        relayedReadyItems: Array.from(relayedRuntimeReady.values())
+      });
+      if (response?.ok === false) {
+        backgroundBridge = false;
+        throw new Error(response.error || "Background bridge connection failed.");
+      }
+      return;
+    }
+
+    backgroundBridge = false;
     const ws = new WebSocket(bridgeUrl);
     socket = ws;
     ws.addEventListener("open", () => {
       if (socket !== ws) return;
       reconnectAttempts = 0;
-      protocolSend({
-        type: "runtime_ready",
-        runtime_id: RUNTIME_ID,
-        runtime_key: runtimeKey,
-        authorization_id: authorizationId,
-        extension_version: extensionVersion,
-        url: location.href,
-        manifest: actions
-      });
+      protocolSend(runtimeReadyItem(actions));
       for (const item of relayedRuntimeReady.values()) {
         protocolSend(item);
       }
@@ -2277,27 +2805,7 @@
     ws.addEventListener("message", async (event) => {
       if (socket !== ws) return;
       const message = JSON.parse(event.data);
-      if (message.type === "action_call") {
-        if (message.runtime_id && relayedRuntimeIds.has(message.runtime_id)) {
-          relayToPage(message);
-          return;
-        }
-        await enqueueActionCall(message);
-      } else if (message.type === "runtime_status") {
-        protocolSend({
-          type: "runtime_status",
-          runtime_id: RUNTIME_ID,
-          runtime_key: runtimeKey,
-          authorization_id: authorizationId,
-          extension_version: extensionVersion,
-          url: location.href,
-          connected: true,
-          actions: actions.tools?.map((tool) => tool.name) || []
-        });
-        for (const runtimeId of relayedRuntimeIds) {
-          relayToPage({ ...message, runtime_id: runtimeId });
-        }
-      }
+      await handleBridgeMessage(message, actions);
     });
     ws.addEventListener("error", () => {
       if (socket === ws && ws.readyState !== WebSocket.CLOSED) {
@@ -2318,6 +2826,13 @@
       extensionVersion = message.extensionVersion || extensionVersion;
       connect(message.bridgeUrl).then(
         () => sendResponse({ ok: true }),
+        (error) => sendResponse({ ok: false, error: error.message || String(error) })
+      );
+      return true;
+    }
+    if (message?.type === "actions-json:bridge-message") {
+      loadManifest().then(
+        (actions) => handleBridgeMessage(message.item || {}, actions).then(() => sendResponse({ ok: true })),
         (error) => sendResponse({ ok: false, error: error.message || String(error) })
       );
       return true;

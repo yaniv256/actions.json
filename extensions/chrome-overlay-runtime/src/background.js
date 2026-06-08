@@ -19,6 +19,7 @@ const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:17345/extension";
 const AGENT_OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
 const AGENT_OFFSCREEN_TARGET = "actions-json-agent-offscreen";
 const EXTENSION_ACTIONS_URL = "actions/overlay.actions.json";
+const BACKGROUND_BRIDGE_CONNECT_TIMEOUT_MS = 8000;
 const HOSTED_SCREENSHOT_DEFAULTS = {
   format: "jpeg",
   quality: 60,
@@ -29,6 +30,10 @@ const HOSTED_SCREENSHOT_DEFAULTS = {
 };
 
 let creatingAgentOffscreenDocument = null;
+let bridgeSocket = null;
+let bridgeState = null;
+let bridgeReconnectTimer = null;
+let bridgeReconnectAttempts = 0;
 
 chrome.runtime.onInstalled.addListener(async () => {
   const existing = await chrome.storage.local.get("bridgeUrl");
@@ -37,7 +42,6 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
 });
 
-// Adapted from Open Browser Use's background-owned session/tab group model.
 class SessionStore {
   constructor() {
     this.state = { sessions: {} };
@@ -90,6 +94,166 @@ const runtimeKeyForTab = (tabId) => `chrome-tab:${tabId}`;
 const newAuthorizationId = () => `authorization-${Date.now().toString(36)}-${Math.random()
   .toString(36)
   .slice(2, 8)}`;
+
+const sendBridgeItem = (item) => {
+  if (bridgeSocket?.readyState === WebSocket.OPEN) {
+    bridgeSocket.send(JSON.stringify(item));
+    return true;
+  }
+  return false;
+};
+
+const closeBridgeSocket = () => {
+  clearTimeout(bridgeReconnectTimer);
+  bridgeReconnectTimer = null;
+  const previous = bridgeSocket;
+  bridgeSocket = null;
+  if (previous && previous.readyState !== WebSocket.CLOSED) {
+    previous.close();
+  }
+};
+
+const scheduleBridgeReconnect = () => {
+  if (!bridgeState?.shouldReconnect || !bridgeState.bridgeUrl) return;
+  clearTimeout(bridgeReconnectTimer);
+  const delay = Math.min(5000, 500 * 2 ** Math.min(bridgeReconnectAttempts, 4));
+  bridgeReconnectAttempts += 1;
+  bridgeReconnectTimer = setTimeout(() => connectBackgroundBridge(bridgeState).catch(() => {
+    scheduleBridgeReconnect();
+  }), delay);
+};
+
+const connectBackgroundBridge = async (state) => {
+  if (!state?.bridgeUrl || !state?.tabId) {
+    throw new Error("actions-json:bridge-connect requires bridgeUrl and sender tab.");
+  }
+  bridgeState = {
+    ...state,
+    shouldReconnect: false,
+  };
+  closeBridgeSocket();
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(bridgeState.bridgeUrl);
+    bridgeSocket = ws;
+    let opened = false;
+    let settled = false;
+    const settleFailure = (message) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(connectTimeout);
+      if (bridgeSocket === ws) {
+        bridgeSocket = null;
+      }
+      bridgeState = {
+        ...bridgeState,
+        shouldReconnect: false,
+      };
+      appendBackgroundDiagnosticEvent({
+        type: "transport",
+        name: "background.bridge.websocket",
+        ok: false,
+        summary: "Extension background failed to open the bridge WebSocket.",
+        input: {
+          bridge_url: bridgeState.bridgeUrl,
+          tab_id: bridgeState.tabId,
+          runtime_id: bridgeState.readyItem?.runtime_id || null,
+        },
+        output: {
+          error_message: message,
+          transport_owner: "extension_background",
+        },
+      });
+      reject(new Error(message));
+    };
+    const connectTimeout = setTimeout(() => {
+      if (bridgeSocket === ws && ws.readyState !== WebSocket.CLOSED) {
+        ws.close();
+      }
+      settleFailure(`Background bridge WebSocket did not open within ${BACKGROUND_BRIDGE_CONNECT_TIMEOUT_MS}ms.`);
+    }, BACKGROUND_BRIDGE_CONNECT_TIMEOUT_MS);
+    ws.addEventListener("open", () => {
+      if (bridgeSocket !== ws || settled) return;
+      opened = true;
+      settled = true;
+      clearTimeout(connectTimeout);
+      bridgeState = {
+        ...bridgeState,
+        shouldReconnect: true,
+      };
+      bridgeReconnectAttempts = 0;
+      sendBridgeItem(bridgeState.readyItem);
+      for (const item of bridgeState.relayedReadyItems || []) {
+        sendBridgeItem(item);
+      }
+      appendBackgroundDiagnosticEvent({
+        type: "transport",
+        name: "background.bridge.websocket",
+        ok: true,
+        summary: "Extension background connected the bridge WebSocket.",
+        input: {
+          bridge_url: bridgeState.bridgeUrl,
+          tab_id: bridgeState.tabId,
+          runtime_id: bridgeState.readyItem?.runtime_id || null,
+        },
+        output: {
+          transport_owner: "extension_background",
+        },
+      });
+      resolve();
+    });
+    ws.addEventListener("error", () => {
+      if (bridgeSocket !== ws || opened) return;
+      settleFailure(`Background bridge WebSocket failed to open: ${bridgeState.bridgeUrl}`);
+    });
+    ws.addEventListener("message", (event) => {
+      if (bridgeSocket !== ws) return;
+      let item = null;
+      try {
+        item = JSON.parse(event.data);
+      } catch (error) {
+        appendBackgroundDiagnosticEvent({
+          type: "transport",
+          name: "background.bridge.websocket",
+          ok: false,
+          summary: "Background bridge received invalid JSON from WebSocket.",
+          output: { error_message: error.message || String(error) },
+        });
+        return;
+      }
+      chrome.tabs.sendMessage(bridgeState.tabId, {
+        type: "actions-json:bridge-message",
+        item,
+      }).catch((error) => {
+        appendBackgroundDiagnosticEvent({
+          type: "transport",
+          name: "background.bridge.websocket",
+          ok: false,
+          summary: "Background bridge failed to forward a message to the content runtime.",
+          input: {
+            tab_id: bridgeState.tabId,
+            message_type: item?.type || null,
+            call_id: item?.call_id || null,
+          },
+          output: { error_message: error.message || String(error) },
+        });
+      });
+    });
+    ws.addEventListener("error", () => {
+      if (bridgeSocket === ws && ws.readyState !== WebSocket.CLOSED) {
+        ws.close();
+      }
+    });
+    ws.addEventListener("close", () => {
+      if (bridgeSocket !== ws) return;
+      bridgeSocket = null;
+      if (!opened) {
+        settleFailure(`Background bridge WebSocket closed before opening: ${bridgeState.bridgeUrl}`);
+        return;
+      }
+      scheduleBridgeReconnect();
+    });
+  });
+};
 
 const injectContent = async (tabId) => {
   await chrome.scripting.executeScript({
@@ -165,6 +329,103 @@ const claimAuthorizedTab = async (message) => {
     authorizationId,
     groupId,
   };
+};
+
+const serializeClaimedTab = (session, tab, claim) => ({
+  tab_id: tab.id,
+  runtime_key: claim.runtimeKey || runtimeKeyForTab(tab.id),
+  authorization_id: claim.authorizationId || null,
+  bridge_url: claim.bridgeUrl || DEFAULT_BRIDGE_URL,
+  url: tab.url || claim.url || null,
+  title: tab.title || null,
+  active: Boolean(session.activeTabId === tab.id || tab.active),
+  window_id: typeof tab.windowId === "number" ? tab.windowId : null,
+});
+
+const listClaimedTabs = async () => {
+  const entries = await sessionStore.getSessionEntries();
+  const tabs = [];
+  let activeTabId = null;
+  let changed = false;
+
+  for (const [_sessionId, session] of entries) {
+    activeTabId = session.activeTabId || activeTabId;
+    for (const [tabIdKey, claim] of Object.entries(session.tabs || {})) {
+      const tabId = Number(tabIdKey);
+      if (!Number.isInteger(tabId)) continue;
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        tabs.push(serializeClaimedTab(session, tab, claim));
+      } catch (_error) {
+        delete session.tabs[tabIdKey];
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    await sessionStore.save();
+  }
+
+  return {
+    ok: true,
+    active_tab_id: activeTabId,
+    count: tabs.length,
+    tabs,
+  };
+};
+
+const activateClaimedTab = async (message) => {
+  const tabId = Number(message.tabId);
+  if (!Number.isInteger(tabId)) {
+    throw new Error("actions-json:claimed-tabs-activate requires tabId");
+  }
+
+  const entries = await sessionStore.getSessionEntries();
+  for (const [_sessionId, session] of entries) {
+    const claim = session.tabs?.[String(tabId)];
+    if (!claim) continue;
+
+    const tab = await chrome.tabs.get(tabId);
+    if (typeof tab.windowId === "number") {
+      await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+    }
+    await chrome.tabs.update(tabId, { active: true });
+    claim.url = tab.url || claim.url || null;
+    session.activeTabId = tabId;
+    await sessionStore.save();
+
+    const reconnectDelayMs = Number.isFinite(message.reconnectDelayMs)
+      ? Math.max(0, Math.min(5000, Math.floor(message.reconnectDelayMs)))
+      : 300;
+    setTimeout(() => {
+      connectClaimedTab(tabId, claim).catch((error) => {
+        appendBackgroundDiagnosticEvent({
+          type: "navigation",
+          name: "background.claimed_tab.activate",
+          ok: false,
+          summary: "Claimed tab was activated but its content runtime reconnect failed.",
+          input: {
+            tab_id: tabId,
+            runtime_key: claim.runtimeKey || runtimeKeyForTab(tabId),
+            reconnect_delay_ms: reconnectDelayMs,
+          },
+          output: {
+            error_message: error.message || String(error),
+          },
+        });
+      });
+    }, reconnectDelayMs);
+
+    return {
+      ok: true,
+      scheduled: true,
+      reconnect_delay_ms: reconnectDelayMs,
+      tab: serializeClaimedTab(session, { ...tab, active: true }, claim),
+    };
+  }
+
+  throw new Error(`Chrome tab ${tabId} is not claimed by actions.json.`);
 };
 
 const reconnectClaimedTab = async (tabId, tab) => {
@@ -1019,6 +1280,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "actions-json:claimed-tabs-list") {
+    listClaimedTabs()
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message?.type === "actions-json:claimed-tabs-activate") {
+    activateClaimedTab(message)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
   if (message?.type === "actions-json:capture-visible-tab") {
     return captureVisibleTab(message, sender, sendResponse);
   }
@@ -1027,6 +1302,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     evaluateWithDebugger(message, sender)
       .then((result) => sendResponse(result))
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message?.type === "actions-json:bridge-connect") {
+    connectBackgroundBridge({
+      bridgeUrl: message.bridgeUrl || DEFAULT_BRIDGE_URL,
+      tabId: sender?.tab?.id,
+      readyItem: message.readyItem,
+      relayedReadyItems: Array.isArray(message.relayedReadyItems) ? message.relayedReadyItems : [],
+    })
+      .then(() => sendResponse({ ok: true, transport_owner: "extension_background" }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message?.type === "actions-json:bridge-protocol") {
+    const sent = sendBridgeItem(message.item);
+    if (!sent) {
+      appendBackgroundDiagnosticEvent({
+        type: "transport",
+        name: "background.bridge.websocket",
+        ok: false,
+        summary: "Content runtime emitted a bridge protocol item while the background WebSocket was disconnected.",
+        input: {
+          message_type: message.item?.type || null,
+          runtime_id: message.item?.runtime_id || null,
+          call_id: message.item?.call_id || null,
+        },
+        output: {
+          connected: false,
+        },
+      });
+    }
+    sendResponse({ ok: sent, connected: sent });
     return true;
   }
 

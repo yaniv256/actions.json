@@ -88,7 +88,8 @@ If the prompt is dismissed or blocked, see [Troubleshooting](troubleshooting.md)
 Use this path when an external coding agent should call browser actions through
 the MCP-shaped bridge.
 
-Run the bridge from source:
+Run the bridge from source. If the browser runtime and bridge are in the same
+environment, the default loopback bind is correct:
 
 ```bash
 cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- serve \
@@ -96,15 +97,29 @@ cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- serve \
   --storage-root ../actions.json.storage
 ```
 
-The default endpoint is:
+Use these endpoints:
 
 ```text
-http://127.0.0.1:17345
+HTTP: http://127.0.0.1:17345
+WebSocket: ws://127.0.0.1:17345/extension
 ```
 
-If the browser and agent are on different machines, expose the bridge endpoint
-through SSH, Tailscale, or another tunnel. Use a URL that the browser runtime
-can reach.
+If Chrome runs on a different machine than the coding agent host where the
+bridge is running, `127.0.0.1` points Chrome at the browser machine, not the
+agent host. Launch the bridge on a non-loopback interface:
+
+```bash
+cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- serve \
+  --bind 0.0.0.0:17345 \
+  --actions extensions/chrome-overlay-runtime/actions/overlay.actions.json \
+  --storage-root ../actions.json.storage
+```
+
+Then configure the extension with the agent host's Tailscale address:
+
+```text
+ws://<agent-host-tailscale-ip>:17345/extension
+```
 
 Verify the bridge:
 
@@ -112,6 +127,17 @@ Verify the bridge:
 curl -s http://127.0.0.1:17345/health
 curl -s http://127.0.0.1:17345/mcp/tools/list
 ```
+
+For split-machine testing, also verify the Tailscale endpoint from the coding
+agent host before debugging runtime code:
+
+```bash
+curl -s http://<agent-host-tailscale-ip>:17345/mcp/tools/list
+ss -ltnp | rg ':17345'
+```
+
+If `127.0.0.1` works but the Tailscale IP returns `connection refused`, the
+bridge is listening only on loopback. Relaunch with `--bind 0.0.0.0:17345`.
 
 Connect the Chrome extension or bookmarklet runtime, then verify connected
 runtimes:

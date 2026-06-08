@@ -89,9 +89,10 @@ Debugger-backed tools are privileged. Use them to learn how a page works, then
 encode durable behavior as portable `actions.json` actions.
 
 Do not use report overlays for credential capture, deceptive UI, or persistent
-site modification. Agent-provided report overlays run in temporary Shadow DOM
-surfaces and strip scripts. The trusted `actions.json` menu is extension-owned
-UI.
+site modification. Inline agent-provided overlays are sanitized before render.
+Template/data overlays run in a sandboxed report frame so reviewed template
+JavaScript can render trusted JSON data without inheriting page CSS. The trusted
+`actions.json` menu is extension-owned UI.
 
 ## Runtime Tools
 
@@ -99,7 +100,8 @@ The extension manifest currently includes:
 
 - overlay tools: `overlay.open`, `overlay.register_launcher`, `overlay.close`;
 - session tools: `runtime.configure_pacing`, `runtime.session.log`;
-- browser tools: `browser.screenshot`, `browser.extract_elements`;
+- browser tools: `browser.screenshot`, `browser.extract_elements`,
+  `browser.claimed_tabs.list`, `browser.claimed_tabs.activate`;
 - storage tools: `storage.import_bundle`, `storage.list`, `storage.sync`;
 - DOM and locator tools: `dom.list_sections`, `locator.element_info`;
 - visible action tools: `viewport.scroll`, `pointer.click`;
