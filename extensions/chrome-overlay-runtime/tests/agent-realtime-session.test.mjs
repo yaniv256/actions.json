@@ -126,6 +126,14 @@ test("hosted realtime session starts gpt-realtime-2 with a fake transport and re
   assert.match(sentEvents[0].session.instructions, /overlay/i);
   assert.match(sentEvents[0].session.instructions, /overlay_open|overlay\.open/);
   assert.match(sentEvents[0].session.instructions, /Do not say you cannot directly open an overlay/i);
+  assert.match(sentEvents[0].session.instructions, /visually rich/i);
+  assert.match(sentEvents[0].session.instructions, /presentation-worthy/i);
+  assert.match(sentEvents[0].session.instructions, /designed artifact/i);
+  assert.match(sentEvents[0].session.instructions, /download or show/i);
+  assert.match(sentEvents[0].session.instructions, /scanned quickly/i);
+  assert.match(sentEvents[0].session.instructions, /self-contained HTML and CSS/i);
+  assert.match(sentEvents[0].session.instructions, /without scripts/i);
+  assert.match(sentEvents[0].session.instructions, /do not add your own download or upload buttons/i);
   assert.equal(sentEvents[0].session.tool_choice, "auto");
   assert.equal(sentEvents[1].type, "response.create");
   assert.match(sentEvents[1].response.instructions, /intro/i);
@@ -377,6 +385,8 @@ test("hosted realtime session sends injected realtime tool declarations", async 
   assert.match(sessionUpdate.session.instructions, /pointer\.click/);
   assert.match(sessionUpdate.session.instructions, /clickable_center/);
   assert.match(sessionUpdate.session.instructions, /overlay/i);
+  assert.match(sessionUpdate.session.instructions, /boring plain tables/i);
+  assert.match(sessionUpdate.session.instructions, /section cards|slide-like panels/i);
   assert.match(sessionUpdate.session.instructions, /Do not tell the user you cannot see/);
   const initialResponse = transportFactory.transports[0].events.find((event) => event.type === "response.create");
   assert.match(initialResponse.response.instructions, /visual overlay/i);

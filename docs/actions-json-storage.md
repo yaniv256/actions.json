@@ -196,6 +196,22 @@ Item indexes deduplicate observations into stable memory.
 
 Items answer: what do we remember across sessions?
 
+### Overlay Templates And Data
+
+Reusable overlays should separate layout from private results:
+
+```text
+scopes/public/sites/example.com/overlays/report/template.html
+scopes/private/sites/example.com/overlays/report/data.json
+```
+
+The template holds HTML, CSS, and rendering code. The data file holds the current
+scan result. This lets a hosted agent refresh the report by updating
+`data.json` without rewriting the template, and it lets users share templates
+without sharing private data.
+
+For the full workflow, see [Overlay Templates And Data](overlay-template-data.md).
+
 ### Runs
 
 Runs record what an agent did and what happened.

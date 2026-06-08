@@ -79,12 +79,34 @@ Common direct tools include:
 - `locator.element_info`: find element geometry and clickable centers;
 - `viewport.scroll`: scroll the viewport or a scoped scroll container;
 - `pointer.click`: click a viewport point;
+- `browser.claimed_tabs.list`: list tabs the user has authorized for
+  `actions.json` control;
+- `browser.claimed_tabs.activate`: switch to an already-authorized tab;
 - `browser.run_javascript`: run declared page-context JavaScript where allowed;
 - `debug.run_javascript`: authoring-only privileged fallback through the Chrome
   debugger.
 
 Agents should prefer stored actions. Primitives are for exploration, repair, or
 cases where no reviewed site action exists.
+
+## Claimed Tabs
+
+The extension can manage more than one user-authorized tab. This lets a hosted
+agent or external coding agent switch between pages the user has already taken
+control of without asking the user to reauthorize every tab.
+
+From the user's point of view:
+
+1. Open each tab you want the extension to operate.
+2. Use the extension popup and choose **Take control of this tab** on each one.
+3. Ask the agent to switch to the relevant authorized tab when needed.
+
+Agent-facing flow:
+
+1. Call `browser.claimed_tabs.list`.
+2. Choose the intended tab from the returned URL/title metadata.
+3. Call `browser.claimed_tabs.activate` with that tab id.
+4. Refresh current-site actions before operating the newly active page.
 
 ## Blocked Primitives And Site Policy
 

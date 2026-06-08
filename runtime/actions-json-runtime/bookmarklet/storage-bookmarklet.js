@@ -39,6 +39,14 @@
         input_schema: objectInputSchema,
       },
       {
+        name: "overlay.register_launcher",
+        input_schema: objectInputSchema,
+      },
+      {
+        name: "overlay.close",
+        input_schema: objectInputSchema,
+      },
+      {
         name: "storage.import_bundle",
         input_schema: objectInputSchema,
       },
@@ -120,30 +128,7 @@
       },
     ],
   };
-  const primitiveDictionaryMetadata = {
-    "version": 1,
-    "stage": 1,
-    "host": "embed",
-    "primitives": [
-      {"name":"browser.screenshot","support":"unsupported","reason":"capability_unavailable","capability_class":"privileged","portable":false},
-      {"name":"pointer.move","support":"supported","reason":null,"capability_class":"portable","portable":true},
-      {"name":"pointer.click","support":"supported","reason":null,"capability_class":"portable","portable":true},
-      {"name":"pointer.double_click","support":"supported","reason":null,"capability_class":"portable","portable":true},
-      {"name":"pointer.drag","support":"supported","reason":null,"capability_class":"portable","portable":true},
-      {"name":"viewport.scroll","support":"supported","reason":null,"capability_class":"portable","portable":true},
-      {"name":"text.insert","support":"supported","reason":null,"capability_class":"portable","portable":true},
-      {"name":"keyboard.press","support":"partial","reason":"trusted_key_events_unavailable","capability_class":"mixed","portable":false},
-      {"name":"runtime.session.name","support":"unsupported","reason":"capability_unavailable","capability_class":"privileged","portable":false},
-      {"name":"runtime.session.finalize_tabs","support":"unsupported","reason":"capability_unavailable","capability_class":"privileged","portable":false},
-      {"name":"page.info","support":"supported","reason":null,"capability_class":"portable","portable":true},
-      {"name":"dom.observe.visible","support":"supported","reason":null,"capability_class":"portable","portable":true},
-      {"name":"dom.snapshot_text","support":"supported","reason":null,"capability_class":"portable","portable":true},
-      {"name":"dom.list_sections","support":"supported","reason":null,"capability_class":"portable","portable":true},
-      {"name":"locator.element_info","support":"supported","reason":null,"capability_class":"portable","portable":true},
-      {"name":"locator.text_content","support":"supported","reason":null,"capability_class":"portable","portable":true},
-      {"name":"locator.wait_for","support":"supported","reason":null,"capability_class":"portable","portable":true}
-    ]
-  };
+  const primitiveDictionaryMetadata = { version: 1, stage: 1, host: "embed", primitives: [["browser.screenshot","unsupported","capability_unavailable","privileged",false],["browser.claimed_tabs.list","unsupported","capability_unavailable","privileged",false],["browser.claimed_tabs.activate","unsupported","capability_unavailable","privileged",false],["pointer.move","supported",null,"portable",true],["pointer.click","supported",null,"portable",true],["pointer.double_click","supported",null,"portable",true],["pointer.drag","supported",null,"portable",true],["viewport.scroll","supported",null,"portable",true],["text.insert","supported",null,"portable",true],["keyboard.press","partial","trusted_key_events_unavailable","mixed",false],["runtime.session.name","unsupported","capability_unavailable","privileged",false],["runtime.session.finalize_tabs","unsupported","capability_unavailable","privileged",false],["page.info","supported",null,"portable",true],["dom.observe.visible","supported",null,"portable",true],["dom.snapshot_text","supported",null,"portable",true],["dom.list_sections","supported",null,"portable",true],["locator.element_info","supported",null,"portable",true],["locator.text_content","supported",null,"portable",true],["locator.wait_for","supported",null,"portable",true],["overlay.open","supported",null,"privileged",false],["overlay.register_launcher","supported",null,"privileged",false],["overlay.close","supported",null,"privileged",false]].map(([name, support, reason, capability_class, portable]) => ({ name, support, reason, capability_class, portable })) };
 
   const existing = document.getElementById(ROOT_ID);
   if (existing) {
@@ -616,7 +601,8 @@
     const existing = overlayTabs.get(id);
     const button = existing?.button || document.createElement("button");
     const panelElement = existing?.panelElement || document.createElement("section");
-    const parsedContent = parseOverlayHtml(tab.html || tab.body || "");
+    const resolvedTab = resolveOverlayTab(tab);
+    const parsedContent = resolvedTab.templateDriven ? null : parseOverlayHtml(resolvedTab.html || resolvedTab.body || "");
 
     button.type = "button";
     button.className = "tab-button";
@@ -627,11 +613,24 @@
     panelElement.dataset.tabId = id;
     clearTabBlobUrl(panelElement);
     panelElement.replaceChildren();
-    const content = document.createElement("div");
-    content.className = "tab-content";
-    content.innerHTML = parsedContent.bodyHtml;
-    panelElement.appendChild(content);
-    setTabStyles(id, parsedContent.styles);
+    if (resolvedTab.templateDriven) {
+      const frame = document.createElement("iframe");
+      frame.className = "tab-frame";
+      frame.title = title;
+      frame.setAttribute("sandbox", "allow-scripts");
+      frame.srcdoc = buildTemplateDocumentHtml({
+        html: resolvedTab.html,
+        data: resolvedTab.dataValue,
+      });
+      panelElement.appendChild(frame);
+      setTabStyles(id, []);
+    } else {
+      const content = document.createElement("div");
+      content.className = "tab-content";
+      content.innerHTML = parsedContent.bodyHtml;
+      panelElement.appendChild(content);
+      setTabStyles(id, parsedContent.styles);
+    }
 
     if (!existing) {
       button.addEventListener("click", () => activateTab(id));
@@ -643,7 +642,12 @@
     activateTab(id);
     if (collapsed) toggleCollapsed();
     renderStatus(`Opened tab: ${title}`);
-    return { ok: true, tab_id: id };
+    return {
+      ok: true,
+      tab_id: id,
+      template: resolvedTab.templateDriven ? resolvedTab.template : null,
+      data: resolvedTab.templateDriven ? (resolvedTab.data || null) : null,
+    };
   }
 
   function registerExistingTab(id, title) {
@@ -663,6 +667,20 @@
     const tab = { button, panelElement, title };
     overlayTabs.set(id, tab);
     return tab;
+  }
+
+  function closeOverlayTabs() {
+    for (const tab of overlayTabs.values()) {
+      tab.button.remove();
+      clearTabBlobUrl(tab.panelElement);
+      tab.panelElement.remove();
+    }
+    overlayTabs.clear();
+    for (const style of shadow.querySelectorAll("style[data-actions-json-tab-style]")) {
+      style.remove();
+    }
+    renderStatus("Closed overlay tabs.");
+    return { ok: true };
   }
 
   function activateTab(id) {
@@ -864,6 +882,100 @@
       bodyHtml: bodyHtml.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ""),
       styles,
     };
+  }
+
+  function resolveOverlayTab(tab) {
+    const hasHtml = typeof tab.html === "string" && tab.html.length > 0;
+    const hasTemplate = tab.template && typeof tab.template === "object";
+    if (hasHtml && hasTemplate) {
+      throw new Error("overlay.open accepts either html or template, not both");
+    }
+    if (!hasHtml && !hasTemplate) {
+      throw new Error("overlay.open requires either a non-empty html string or a template storage reference");
+    }
+    if (hasHtml) return { ...tab, html: tab.html, templateDriven: false };
+
+    const templateAsset = resolveStorageAsset(tab.template, "Overlay template asset");
+    let dataAsset = null;
+    let dataValue = null;
+    if (tab.data) {
+      dataAsset = resolveStorageAsset(tab.data, "Overlay data asset");
+      try {
+        dataValue = JSON.parse(dataAsset.text || "null");
+      } catch (_error) {
+        throw new Error(`Overlay data asset is not valid JSON: ${dataAsset.path}`);
+      }
+    }
+    return {
+      ...tab,
+      html: templateAsset.text,
+      templateDriven: true,
+      template: tab.template,
+      data: tab.data || null,
+      dataValue,
+    };
+  }
+
+  function resolveStorageAsset(ref, label) {
+    const canonicalPath = canonicalPathFromStorageRef(ref);
+    const text = storageFileText(canonicalPath);
+    if (text === null || text === undefined) {
+      throw new Error(`${label} not found: ${canonicalPath}`);
+    }
+    return { path: canonicalPath, text };
+  }
+
+  function canonicalPathFromStorageRef(ref) {
+    if (!ref || typeof ref !== "object") {
+      throw new Error("Storage asset reference must be an object");
+    }
+    const rawPath = normalizeStorageRefPath(ref.path);
+    if (rawPath.startsWith("scopes/")) return rawPath;
+    const scope = normalizeStorageRefScope(ref.scope || BARE_SITE_FALLBACK_SCOPE);
+    if (scope.startsWith("shared:")) {
+      return `scopes/shared/${scope.slice("shared:".length)}/${rawPath}`;
+    }
+    return `scopes/${scope}/${rawPath}`;
+  }
+
+  function normalizeStorageRefScope(scope) {
+    const value = String(scope || BARE_SITE_FALLBACK_SCOPE).trim();
+    if (value === "private" || value === "public") return value;
+    const sharedMatch = value.match(/^shared[:/](.+)$/);
+    if (sharedMatch && /^[a-z0-9._-]+$/i.test(sharedMatch[1])) {
+      return `shared:${sharedMatch[1]}`;
+    }
+    throw new Error(`Unknown storage scope: ${value}`);
+  }
+
+  function normalizeStorageRefPath(path) {
+    const value = String(path || "").trim().replaceAll("\\", "/").replace(/^\/+/, "");
+    if (!value) throw new Error("Storage asset path is required");
+    const parts = value.split("/");
+    if (parts.some((part) => !part || part === "." || part === "..")) {
+      throw new Error(`Unsafe storage path: ${path}`);
+    }
+    return parts.join("/");
+  }
+
+  function buildTemplateDocumentHtml({ html, data }) {
+    const dataScript = `<script type="application/json" data-actions-json-overlay-data>${jsonForScriptText(data)}</script>`;
+    if (/<head[^>]*>/i.test(html)) {
+      return html.replace(/<head([^>]*)>/i, `<head$1>${dataScript}`);
+    }
+    if (/<html[^>]*>/i.test(html)) {
+      return html.replace(/<html([^>]*)>/i, `<html$1><head>${dataScript}</head>`);
+    }
+    return `<!doctype html><html><head>${dataScript}</head><body>${html}</body></html>`;
+  }
+
+  function jsonForScriptText(value) {
+    return JSON.stringify(value ?? null)
+      .replaceAll("<", "\\u003c")
+      .replaceAll(">", "\\u003e")
+      .replaceAll("&", "\\u0026")
+      .replaceAll("\u2028", "\\u2028")
+      .replaceAll("\u2029", "\\u2029");
   }
 
   function setTabStyles(tabId, styles) {
@@ -1176,6 +1288,10 @@
         output = importStorageSyncBundle(message.arguments || {});
       } else if (message.name === "overlay.open") {
         output = openTab(message.arguments || {});
+      } else if (message.name === "overlay.register_launcher") {
+        output = installLaunchers(message.arguments || {});
+      } else if (message.name === "overlay.close") {
+        output = closeOverlayTabs();
       } else if (message.name === "storage.list") {
         output = listStorageBundle();
       } else if (message.name === "runtime.configure_pacing") {

@@ -49,6 +49,40 @@
         }
       },
       {
+        "name": "browser.claimed_tabs.list",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "privileged",
+        "portable": false,
+        "summary": "List browser tabs already claimed by the actions.json extension.",
+        "input_schema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "browser.claimed_tabs.activate",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "privileged",
+        "portable": false,
+        "summary": "Focus an already-claimed browser tab and reconnect its actions.json runtime.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "tab_id"
+          ],
+          "properties": {
+            "tab_id": {
+              "type": "integer",
+              "description": "Chrome tab id from browser.claimed_tabs.list."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
         "name": "pointer.move",
         "support": "supported",
         "reason": null,
@@ -438,7 +472,43 @@
           "properties": {
             "html": {
               "type": "string",
-              "description": "HTML body or document markup to render inside the overlay."
+              "description": "Inline HTML body or document markup to render inside the overlay. Use either html or template, not both."
+            },
+            "template": {
+              "type": "object",
+              "description": "Storage reference for a reusable overlay template. The runtime resolves it from the uploaded actions.json.storage bundle.",
+              "required": [
+                "scope",
+                "path"
+              ],
+              "properties": {
+                "scope": {
+                  "type": "string",
+                  "description": "Storage scope, such as public, private, or shared/name."
+                },
+                "path": {
+                  "type": "string",
+                  "description": "Path inside the scope, such as sites/example.com/overlays/report/template.html."
+                }
+              },
+              "additionalProperties": false
+            },
+            "data": {
+              "type": "object",
+              "description": "Optional storage reference for JSON data injected into a template as [data-actions-json-overlay-data]. Commonly private data with a public template.",
+              "required": [
+                "scope",
+                "path"
+              ],
+              "properties": {
+                "scope": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
             },
             "title": {
               "type": "string",
@@ -520,9 +590,6 @@
               }
             }
           },
-          "required": [
-            "html"
-          ],
           "additionalProperties": false
         }
       },
@@ -538,7 +605,43 @@
           "properties": {
             "html": {
               "type": "string",
-              "description": "HTML body or document markup to render later when a registered launcher is clicked."
+              "description": "Inline HTML body or document markup to render later when a registered launcher is clicked. Use either html or template, not both."
+            },
+            "template": {
+              "type": "object",
+              "description": "Storage reference for a reusable overlay template. The runtime resolves it when the launcher opens.",
+              "required": [
+                "scope",
+                "path"
+              ],
+              "properties": {
+                "scope": {
+                  "type": "string",
+                  "description": "Storage scope, such as public, private, or shared/name."
+                },
+                "path": {
+                  "type": "string",
+                  "description": "Path inside the scope, such as sites/example.com/overlays/report/template.html."
+                }
+              },
+              "additionalProperties": false
+            },
+            "data": {
+              "type": "object",
+              "description": "Optional storage reference for JSON data injected into a template as [data-actions-json-overlay-data].",
+              "required": [
+                "scope",
+                "path"
+              ],
+              "properties": {
+                "scope": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
             },
             "title": {
               "type": "string",
@@ -621,7 +724,6 @@
             }
           },
           "required": [
-            "html",
             "launchers"
           ],
           "additionalProperties": false
@@ -644,7 +746,7 @@
   },
   "prompt": {
     "title": "Browser overlay runtime",
-    "instructions": "Use overlay.open to present an agent-created HTML document as a temporary draggable, resizable, minimizable overlay on the current page. Prefer supplying launchers that integrate visible reopen buttons into the relevant original DOM context. Launchers are conditional registrations: they may be declared before their target DOM is visible, then installed when URL and DOM predicates match. Do not use this action for credential capture, deceptive UI, or persistent page modification.",
+    "instructions": "Use overlay.open to present an agent-created HTML document as a temporary draggable, resizable, minimizable overlay on the current page. For reusable overlays, prefer a storage-backed template reference plus a JSON data reference so shared template code can stay separate from private user data. The template receives the parsed data through a script tag marked data-actions-json-overlay-data. Prefer supplying launchers that integrate visible reopen buttons into the relevant original DOM context. Launchers are conditional registrations: they may be declared before their target DOM is visible, then installed when URL and DOM predicates match. Do not use this action for credential capture, deceptive UI, or persistent page modification.",
     "source": {
       "files": [
         "src/content.js"
@@ -660,14 +762,50 @@
   "tools": [
     {
       "name": "overlay.open",
-      "description": "Render an HTML document in a draggable, resizable, and minimizable popup overlay on the authorized browser tab, optionally registering visible reopen buttons anchored to the original page DOM. Registered launchers can coexist and reattach independently when SPA navigation brings their matching context into view.",
+      "description": "Render an inline HTML document or a storage-backed template/data overlay in a draggable, resizable, and minimizable popup on the authorized browser tab. Use template plus data when the visual template should be reusable and the user data should remain in a separate private JSON file. Registered launchers can coexist and reattach independently when SPA navigation brings their matching context into view.",
       "input_schema": {
         "type": "object",
         "properties": {
-          "html": {
-            "type": "string",
-            "description": "HTML body or document markup to render inside the overlay."
-          },
+            "html": {
+              "type": "string",
+              "description": "Inline HTML body or document markup to render inside the overlay. Use either html or template, not both."
+            },
+            "template": {
+              "type": "object",
+              "description": "Storage reference for a reusable overlay template. The runtime resolves it from the uploaded actions.json.storage bundle.",
+              "required": [
+                "scope",
+                "path"
+              ],
+              "properties": {
+                "scope": {
+                  "type": "string",
+                  "description": "Storage scope, such as public, private, or shared/name."
+                },
+                "path": {
+                  "type": "string",
+                  "description": "Path inside the scope, such as sites/example.com/overlays/report/template.html."
+                }
+              },
+              "additionalProperties": false
+            },
+            "data": {
+              "type": "object",
+              "description": "Optional storage reference for JSON data injected into a template as [data-actions-json-overlay-data]. Commonly private data with a public template.",
+              "required": [
+                "scope",
+                "path"
+              ],
+              "properties": {
+                "scope": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
           "title": {
             "type": "string",
             "description": "Overlay title shown in the drag handle."
@@ -748,9 +886,6 @@
             }
           }
         },
-        "required": [
-          "html"
-        ],
         "additionalProperties": false
       },
       "x_actions": {
@@ -808,10 +943,46 @@
       "input_schema": {
         "type": "object",
         "properties": {
-          "html": {
-            "type": "string",
-            "description": "HTML body or document markup to render later when a registered launcher is clicked."
-          },
+            "html": {
+              "type": "string",
+              "description": "Inline HTML body or document markup to render later when a registered launcher is clicked. Use either html or template, not both."
+            },
+            "template": {
+              "type": "object",
+              "description": "Storage reference for a reusable overlay template. The runtime resolves it when the launcher opens.",
+              "required": [
+                "scope",
+                "path"
+              ],
+              "properties": {
+                "scope": {
+                  "type": "string",
+                  "description": "Storage scope, such as public, private, or shared/name."
+                },
+                "path": {
+                  "type": "string",
+                  "description": "Path inside the scope, such as sites/example.com/overlays/report/template.html."
+                }
+              },
+              "additionalProperties": false
+            },
+            "data": {
+              "type": "object",
+              "description": "Optional storage reference for JSON data injected into a template as [data-actions-json-overlay-data].",
+              "required": [
+                "scope",
+                "path"
+              ],
+              "properties": {
+                "scope": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
           "title": {
             "type": "string",
             "description": "Overlay title shown when the launcher opens the overlay."
@@ -893,7 +1064,6 @@
           }
         },
         "required": [
-          "html",
           "launchers"
         ],
         "additionalProperties": false
@@ -1000,6 +1170,32 @@
             "minimum": 1,
             "maximum": 2000,
             "default": 2000
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "browser.claimed_tabs.list",
+      "description": "List tabs already claimed by the actions.json Chrome extension, including their tab ids, URLs, titles, runtime keys, authorization ids, and active state. Use this before switching context among user-authorized tabs.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "browser.claimed_tabs.activate",
+      "description": "Focus an already-claimed tab and reconnect that tab's actions.json runtime to the bridge. Call browser.claimed_tabs.list first, then pass the selected tab_id. After a successful scheduled activation, refresh the runtime list before issuing page-specific actions.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "tab_id"
+        ],
+        "properties": {
+          "tab_id": {
+            "type": "integer",
+            "description": "Chrome tab id returned by browser.claimed_tabs.list."
           }
         },
         "additionalProperties": false

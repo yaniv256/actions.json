@@ -550,6 +550,85 @@ test("overlay.open action renders a tab in the bookmarklet overlay", async ({ pa
   expect(state.panelText).toContain("Rolling windows");
 });
 
+test("overlay.open action renders a storage template with private data in the bookmarklet overlay", async ({ page }) => {
+  await installFakeBookmarkletSocket(page);
+  await page.route("https://example.test/", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: "<!doctype html><html><body><main>Template overlay target</main></body></html>",
+    });
+  });
+  await page.goto("https://example.test/");
+  await page.addScriptTag({ content: bookmarkletSource });
+  await page.evaluate(() => window.__actionsJsonFakeSockets[0].emit("open"));
+
+  await page.evaluate(() => {
+    window.__actionsJsonFakeSockets[0].emit("message", {
+      data: JSON.stringify({
+        type: "action_call",
+        call_id: "template-storage-import-call",
+        name: "storage.import_bundle",
+        arguments: {
+          bundle: {
+            protocol: "actions.json.storage.bundle",
+            version: 1,
+            entries: [
+              {
+                path: "scopes/public/sites/example.test/overlays/radar/template.html",
+                content: `<!doctype html><html><body><h1 id="title"></h1><script>const data = JSON.parse(document.querySelector('[data-actions-json-overlay-data]').textContent); document.getElementById('title').textContent = data.title;</script></body></html>`,
+              },
+              {
+                path: "scopes/private/sites/example.test/overlays/radar/data.json",
+                content: JSON.stringify({ title: "Bookmarklet Private Data" }),
+              },
+            ],
+          },
+        },
+      }),
+    });
+  });
+  await readActionOutput(page, "template-storage-import-call");
+
+  await page.evaluate(() => {
+    window.__actionsJsonFakeSockets[0].emit("message", {
+      data: JSON.stringify({
+        type: "action_call",
+        call_id: "template-overlay-open-call",
+        name: "overlay.open",
+        arguments: {
+          id: "template-radar",
+          title: "Template Radar",
+          template: {
+            scope: "public",
+            path: "sites/example.test/overlays/radar/template.html",
+          },
+          data: {
+            scope: "private",
+            path: "sites/example.test/overlays/radar/data.json",
+          },
+        },
+      }),
+    });
+  });
+
+  const output = await readActionOutput(page, "template-overlay-open-call");
+  expect(output).toMatchObject({
+    ok: true,
+    tab_id: "template-radar",
+    template: {
+      scope: "public",
+      path: "sites/example.test/overlays/radar/template.html",
+    },
+    data: {
+      scope: "private",
+      path: "sites/example.test/overlays/radar/data.json",
+    },
+  });
+  await expect(page.frameLocator("#actions-json-storage-bookmarklet iframe.tab-frame").locator("h1")).toHaveText(
+    "Bookmarklet Private Data",
+  );
+});
+
 test("overlay.open action parses full HTML documents without showing CSS as text", async ({ page }) => {
   await installFakeBookmarkletSocket(page);
   await page.route("https://example.test/", async (route) => {

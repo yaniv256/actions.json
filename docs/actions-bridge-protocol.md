@@ -321,6 +321,12 @@ policy routing, and consistently coded `ambiguous_runtime` /
 `runtime_not_found` responses are part of the intended protocol but are not
 complete yet.
 
+When the selected runtime is the Chrome extension, a user-authorized tab can
+also expose `browser.claimed_tabs.list` and `browser.claimed_tabs.activate`.
+Those are runtime tools, not bridge routing selectors. Use them when the agent
+needs to switch the active authorized browser surface, then refresh runtime
+state before calling page-specific actions.
+
 ## Capability Rules
 
 Runtimes must advertise host capabilities. A runtime may reject an action if the

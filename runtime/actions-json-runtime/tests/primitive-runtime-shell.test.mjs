@@ -92,7 +92,7 @@ test("bookmarklet and extension manifests expose shared primitive dictionary met
     "utf8",
   );
   const bookmarkletMetadataMatch = bookmarkletSource.match(
-    /const primitiveDictionaryMetadata = (\{[\s\S]*?\n  \});/,
+    /(const objectInputSchema = \{ type: "object" \};[\s\S]*?const primitiveDictionaryMetadata = [\s\S]*?;)\n\n  const existing =/,
   );
 
   assert.deepEqual(
@@ -100,8 +100,9 @@ test("bookmarklet and extension manifests expose shared primitive dictionary met
     primitiveManifestMetadata(dictionary, "extension", { includeSchemas: true }),
   );
   assert.ok(bookmarkletMetadataMatch, "bookmarklet should declare primitiveDictionaryMetadata");
+  const bookmarkletMetadata = Function(`${bookmarkletMetadataMatch[1]}; return primitiveDictionaryMetadata;`)();
   assert.deepEqual(
-    JSON.parse(bookmarkletMetadataMatch[1]),
+    bookmarkletMetadata,
     primitiveManifestMetadata(dictionary, "embed"),
   );
   assert.match(bookmarkletSource, /primitive_dictionary: primitiveDictionaryMetadata/);

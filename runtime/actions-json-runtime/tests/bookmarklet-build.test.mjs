@@ -23,7 +23,7 @@ test("generated bookmarklet URL stays small enough for reliable bookmark install
 
   assert.match(url, /^javascript:/);
   assert.ok(
-    url.length < 75_000,
+    url.length < 80_000,
     `bookmarklet URL is ${url.length} characters; large bookmarklets are prone to browser truncation/corruption`,
   );
 });

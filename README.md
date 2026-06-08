@@ -158,6 +158,7 @@ Start here:
 - [Hosted Agent](docs/hosted-agent.md)
 - [Chrome Extension](docs/chrome-extension.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [0.1.84 Release Notes](docs/release-notes/0.1.84.md)
 
 Reference:
 

@@ -485,8 +485,8 @@ Common fields:
 - `source`
 - `revision`
 
-Keep provenance public-safe. Do not publish private account names, private repo
-paths, or sensitive source URLs in public maps.
+Keep provenance public-safe. Do not publish private account names, non-public
+repository paths, or sensitive source URLs in public maps.
 
 ## Safe Identifiers
 

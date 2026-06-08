@@ -39,6 +39,79 @@
       "conformance": { "fixture": null, "assertions": ["structured_result_or_capability_error"] }
     },
     {
+      "name": "browser.claimed_tabs.list",
+      "version": 1,
+      "stage": 1,
+      "summary": "List browser tabs already claimed by the actions.json extension.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["browser.tabs", "browser.claimed_tabs"],
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["tabs"],
+        "properties": {
+          "tabs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["tab_id", "url"],
+              "properties": {
+                "tab_id": { "type": "integer" },
+                "url": { "type": "string" },
+                "title": { "type": "string" },
+                "active": { "type": "boolean" },
+                "claimed_at": { "type": "string" }
+              },
+              "additionalProperties": true
+            }
+          }
+        }
+      },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "unsupported", "reason": "capability_unavailable" }
+      },
+      "errors": ["capability_unavailable"],
+      "conformance": { "fixture": null, "assertions": ["structured_result_or_capability_error"] }
+    },
+    {
+      "name": "browser.claimed_tabs.activate",
+      "version": 1,
+      "stage": 1,
+      "summary": "Focus an already-claimed browser tab and reconnect its actions.json runtime.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["browser.tabs", "browser.claimed_tabs"],
+      "input_schema": {
+        "type": "object",
+        "required": ["tab_id"],
+        "properties": {
+          "tab_id": { "type": "integer", "description": "Chrome tab id from browser.claimed_tabs.list." }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["ok"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "tab_id": { "type": "integer" },
+          "url": { "type": "string" }
+        }
+      },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "unsupported", "reason": "capability_unavailable" }
+      },
+      "errors": ["capability_unavailable", "target_not_found", "permission_denied"],
+      "conformance": { "fixture": null, "assertions": ["structured_result_or_capability_error"] }
+    },
+    {
       "name": "pointer.move",
       "version": 1,
       "stage": 1,
@@ -446,6 +519,190 @@
       },
       "errors": ["timeout", "target_not_found"],
       "conformance": { "fixture": "locator-fixture", "assertions": ["wait_condition_satisfied"] }
+    },
+    {
+      "name": "overlay.open",
+      "version": 1,
+      "stage": 1,
+      "summary": "Render an agent-created HTML document in the authorized page overlay.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["overlay.render", "overlay.template_data"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "html": {
+            "type": "string",
+            "description": "Inline HTML body or document markup to render inside the overlay. Use either html or template, not both."
+          },
+          "template": {
+            "type": "object",
+            "description": "Storage reference for a reusable overlay template. The runtime resolves it from the uploaded actions.json.storage bundle.",
+            "required": ["scope", "path"],
+            "properties": {
+              "scope": { "type": "string", "description": "Storage scope, such as public, private, or shared/name." },
+              "path": { "type": "string", "description": "Path inside the scope, such as sites/example.com/overlays/report/template.html." }
+            },
+            "additionalProperties": false
+          },
+          "data": {
+            "type": "object",
+            "description": "Optional storage reference for JSON data injected into a template as [data-actions-json-overlay-data]. Commonly private data with a public template.",
+            "required": ["scope", "path"],
+            "properties": {
+              "scope": { "type": "string" },
+              "path": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "title": { "type": "string", "description": "Overlay title shown in the drag handle." },
+          "width": { "type": "integer", "minimum": 420, "maximum": 1400 },
+          "height": { "type": "integer", "minimum": 320, "maximum": 1000 },
+          "launchers": {
+            "type": "array",
+            "description": "Optional visible-page buttons that reopen this overlay from a relevant DOM anchor.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string", "description": "Stable launcher id used to replace older buttons for the same overlay affordance." },
+                "label": { "type": "string", "description": "Button text shown in the original page DOM." },
+                "title": { "type": "string", "description": "Tooltip/title for the launcher button." },
+                "selector": { "type": "string", "description": "Single CSS selector hint for the element to place the button near." },
+                "selectors": { "type": "array", "items": { "type": "string" }, "description": "Ordered CSS selector hints for the element to place the button near." },
+                "text_contains": { "type": "string", "description": "Optional visible text filter for selected anchor candidates." },
+                "text_equals": { "type": "string", "description": "Optional exact visible text filter for selected anchor candidates." },
+                "url_contains": { "type": "string", "description": "Only install this launcher when the current page URL contains this string." },
+                "url_matches": { "type": "string", "description": "Only install this launcher when the current page URL matches this regular expression." },
+                "placement": { "type": "string", "enum": ["beforebegin", "afterbegin", "beforeend", "afterend"], "default": "afterend" },
+                "max_instances": { "type": "integer", "minimum": 1, "maximum": 10, "default": 3 }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["ok", "overlay_id"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "overlay_id": { "type": "string" },
+          "launchers": { "type": "array" }
+        }
+      },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["asset_not_found", "invalid_json", "unsafe_path", "render_failed"],
+      "conformance": { "fixture": "overlay-fixture", "assertions": ["overlay_rendered"] }
+    },
+    {
+      "name": "overlay.register_launcher",
+      "version": 1,
+      "stage": 1,
+      "summary": "Register visible-page launcher buttons that can reopen an overlay later.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["overlay.launcher"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "html": {
+            "type": "string",
+            "description": "Inline HTML body or document markup to render later when a registered launcher is clicked. Use either html or template, not both."
+          },
+          "template": {
+            "type": "object",
+            "description": "Storage reference for a reusable overlay template. The runtime resolves it when the launcher opens.",
+            "required": ["scope", "path"],
+            "properties": {
+              "scope": { "type": "string", "description": "Storage scope, such as public, private, or shared/name." },
+              "path": { "type": "string", "description": "Path inside the scope, such as sites/example.com/overlays/report/template.html." }
+            },
+            "additionalProperties": false
+          },
+          "data": {
+            "type": "object",
+            "description": "Optional storage reference for JSON data injected into a template as [data-actions-json-overlay-data].",
+            "required": ["scope", "path"],
+            "properties": {
+              "scope": { "type": "string" },
+              "path": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "title": { "type": "string", "description": "Overlay title shown when the launcher opens the overlay." },
+          "width": { "type": "integer", "minimum": 420, "maximum": 1400 },
+          "height": { "type": "integer", "minimum": 320, "maximum": 1000 },
+          "launchers": {
+            "type": "array",
+            "description": "Visible-page buttons that reopen this overlay from a relevant DOM anchor.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string", "description": "Stable launcher id used to replace older buttons for the same overlay affordance." },
+                "label": { "type": "string", "description": "Button text shown in the original page DOM." },
+                "title": { "type": "string", "description": "Tooltip/title for the launcher button." },
+                "selector": { "type": "string", "description": "Single CSS selector hint for the element to place the button near." },
+                "selectors": { "type": "array", "items": { "type": "string" }, "description": "Ordered CSS selector hints for the element to place the button near." },
+                "text_contains": { "type": "string", "description": "Optional visible text filter for selected anchor candidates." },
+                "text_equals": { "type": "string", "description": "Optional exact visible text filter for selected anchor candidates." },
+                "url_contains": { "type": "string", "description": "Only install this launcher when the current page URL contains this string." },
+                "url_matches": { "type": "string", "description": "Only install this launcher when the current page URL matches this regular expression." },
+                "placement": { "type": "string", "enum": ["beforebegin", "afterbegin", "beforeend", "afterend"], "default": "afterend" },
+                "max_instances": { "type": "integer", "minimum": 1, "maximum": 10, "default": 3 }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": ["launchers"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["ok", "overlay_id"],
+        "properties": {
+          "ok": { "type": "boolean" },
+          "overlay_id": { "type": "string" },
+          "launchers": { "type": "array" }
+        }
+      },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["asset_not_found", "invalid_json", "unsafe_path", "launcher_failed"],
+      "conformance": { "fixture": "overlay-fixture", "assertions": ["launcher_registered"] }
+    },
+    {
+      "name": "overlay.close",
+      "version": 1,
+      "stage": 1,
+      "summary": "Close the current actions.json overlay if one exists.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["overlay.close"],
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["ok"],
+        "properties": {
+          "ok": { "type": "boolean" }
+        }
+      },
+      "adapters": {
+        "extension": { "support": "supported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["close_failed"],
+      "conformance": { "fixture": "overlay-fixture", "assertions": ["overlay_closed"] }
     }
   ]
 }

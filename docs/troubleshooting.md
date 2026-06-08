@@ -185,5 +185,20 @@ Use `runtime.session.log` when you need evidence. A useful log includes:
 - storage upload/import events;
 - warnings and structured errors.
 
+The current bridge response wraps primitive output under `output.value`:
+
+```bash
+curl -sS http://<bridge-host>:17345/mcp/tools/call \
+  -H 'content-type: application/json' \
+  --data '{
+    "name": "runtime.session.log",
+    "target_runtime_id": "runtime-id-from-/runtimes",
+    "arguments": { "limit": 2000 }
+  }' | jq '.output.value'
+```
+
+Read `output.value.eventCount` and `output.value.events`. Do not infer failure
+from an `error` key unless it is non-null or top-level `ok` is false.
+
 If you are preparing a bug report, include the smallest log excerpt that shows
 the request, tool call, result or timeout, and visible symptom.

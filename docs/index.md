@@ -15,6 +15,7 @@ Use this page to choose what to read next.
 | See what tools the hosted agent can call | [Hosted Agent Tools](hosted-agent-tools.md) |
 | Author or review an action map | [actions.json Format](actions-json-format.md), then [Schema V1 Reference](schema-v1-proposal.md) |
 | Use local storage for site maps and context | [actions.json.storage](actions-json-storage.md) |
+| Reuse overlay templates without sharing private data | [Overlay Templates And Data](overlay-template-data.md) |
 | Connect an external coding agent | [Bridge Architecture](bridge-architecture.md), then [Actions Bridge Protocol](actions-bridge-protocol.md) |
 | Debug a broken setup | [Troubleshooting](troubleshooting.md) |
 | Contribute to the repo structure | [Repository Structure](repo-structure.md) |
@@ -47,6 +48,8 @@ Use this page to choose what to read next.
   maps, observations, item indexes, overlays, reports, and hosted-agent context.
 - [Storage Visibility Scopes](storage-visibility-scopes.md): private, shared,
   and public promotion rules.
+- [Overlay Templates And Data](overlay-template-data.md): reusable overlay
+  templates, private JSON data, standalone downloads, and private-scope uploads.
 
 ## Use The Bridge Or Runtime
 
@@ -68,6 +71,18 @@ Use this page to choose what to read next.
   hosted-agent, storage, bridge, bookmarklet, screenshot, and tool-call issues.
 - [0.1.74 Release Notes](release-notes/0.1.74.md): public release summary for
   the hosted agent, storage-backed tools, and durable session work.
+- [0.1.78 Release Notes](release-notes/0.1.78.md): trusted overlay
+  download/upload controls and visual overlay guidance.
+- [0.1.79 Release Notes](release-notes/0.1.79.md): background-owned bridge
+  WebSocket transport for HTTPS pages using insecure `ws:` bridge URLs.
+- [0.1.80 Release Notes](release-notes/0.1.80.md): corrected background bridge
+  handshake reporting for unreachable or failing WebSocket connections.
+- [0.1.81 Release Notes](release-notes/0.1.81.md): sandboxed report overlay
+  rendering so agent-authored full-document HTML and CSS display as intended.
+- [0.1.82 Release Notes](release-notes/0.1.82.md): template/data overlay
+  assets so reusable public templates can render private data bundles.
+- [0.1.84 Release Notes](release-notes/0.1.84.md): consolidated public release
+  summary for hosted-agent, bridge, storage, overlays, and claimed-tab work.
 
 ## UI Implementation Reference
 
