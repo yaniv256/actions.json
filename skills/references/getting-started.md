@@ -52,67 +52,46 @@ So you point the agent at the bridge once, and the develop-test loop just works.
 
 ### 2. Register the bridge with your coding agent
 
-The bridge runs with `npx` — no install, no toolchain. The
-`@actions-json/bridge` package downloads the matching prebuilt binary on first
-run and execs it.
+The bridge runs with `npx` — no install, no toolchain, no paths to fill in. On
+first run the `@actions-json/bridge` package downloads the prebuilt binary for
+your platform, bundles the browser-control tool catalog, and creates your
+storage at `~/.actions-json/storage`.
 
-**Claude Code** — one command:
+**Claude Code:**
 
 ```bash
-claude mcp add actions-json -- \
-  npx -y @actions-json/bridge mcp \
-  --bind 0.0.0.0:17345 \
-  --actions /abs/path/to/actions.json/extensions/chrome-overlay-runtime/actions/overlay.actions.json \
-  --storage-root /abs/path/to/actions.json.storage
+claude mcp add actions-json -- npx -y @actions-json/bridge mcp
 ```
 
-**Codex / other clients** — add an entry to the MCP servers config (Codex uses
-`~/.codex/config.toml`):
+**Codex:**
 
-```toml
-[mcp_servers.actions-json]
-command = "npx"
-args = [
-  "-y", "@actions-json/bridge", "mcp",
-  "--bind", "0.0.0.0:17345",
-  "--actions", "/abs/path/to/actions.json/extensions/chrome-overlay-runtime/actions/overlay.actions.json",
-  "--storage-root", "/abs/path/to/actions.json.storage",
-]
+```bash
+codex mcp add actions-json -- npx -y @actions-json/bridge mcp
 ```
 
-The equivalent generic `mcpServers` JSON block (Claude Desktop and most other
-clients):
+Other MCP clients (Claude Desktop, etc.) — add an `mcpServers` entry:
 
 ```json
 {
   "mcpServers": {
     "actions-json": {
       "command": "npx",
-      "args": [
-        "-y", "@actions-json/bridge", "mcp",
-        "--bind", "0.0.0.0:17345",
-        "--actions", "/abs/path/to/actions.json/extensions/chrome-overlay-runtime/actions/overlay.actions.json",
-        "--storage-root", "/abs/path/to/actions.json.storage"
-      ]
+      "args": ["-y", "@actions-json/bridge", "mcp"]
     }
   }
 }
 ```
 
-What the flags mean:
+Optional overrides (the defaults are skipped when you pass your own):
 
-| Flag | Meaning |
-|---|---|
-| `mcp` | Run as an MCP stdio server (the mode your coding agent talks to). |
-| `--bind 0.0.0.0:17345` | Where the browser connects. `0.0.0.0` accepts connections from another machine; use `127.0.0.1:17345` if Chrome and the bridge run on the same machine. |
-| `--actions <file>` | The browser-control primitive manifest. Read **once at launch** — restart the bridge after editing it. The repo's `extensions/chrome-overlay-runtime/actions/overlay.actions.json` is the standard one; pass its absolute path. |
-| `--storage-root <dir>` | Your `actions.json.storage` checkout. The bridge loads site maps and context from here and pushes them to the browser. |
+| Flag | Default | Override when… |
+|---|---|---|
+| `--bind <addr>` | `127.0.0.1:17345` | Chrome runs on a different machine — use `0.0.0.0:17345` and the bridge host's reachable address. |
+| `--storage-root <dir>` | `~/.actions-json/storage` | you want storage somewhere else (or set `ACTIONS_JSON_STORAGE`). |
+| `--actions <file>` | bundled | you have a custom primitive dictionary. |
 
-> **Prebuilt binaries are published for linux-x64, macos-x64, macos-arm64, and
-> win-x64** — `npx` picks the right one for your machine automatically. On any
-> other platform/arch it prints build-from-source instructions instead (clone
-> the repo and `cargo build --release --manifest-path mcp/actions-json-mcp/Cargo.toml`,
-> then point `command` at `mcp/actions-json-mcp/target/release/actions-json-mcp`).
+> Prebuilt binaries cover linux-x64, macos-x64, macos-arm64, and win-x64. On any
+> other platform/arch, `npx` prints build-from-source instructions instead.
 
 After registering, restart (or reconnect) your coding agent so it launches the
 server. Confirm it connected by listing MCP servers in your agent (e.g.
@@ -148,8 +127,9 @@ tries it on the live page.
 Use this when a collaborator has given you an `actions.json` and you just want to
 see what it does — no coding agent involved.
 
-**Prerequisite:** you have an `actions.json.storage` checkout (or a single map
-file) ready to upload. If you don't, you want Path 1.
+**Prerequisite:** you have a map to upload — an `actions.json.storage` folder (or
+a single site map) someone shared with you. If you don't have one yet, you want
+Path 1.
 
 ### 1. Install the Chrome extension
 
