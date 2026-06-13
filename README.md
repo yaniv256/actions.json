@@ -1,19 +1,48 @@
 # actions.json
 
-`actions.json` is a readable action map for websites.
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/yaniv256/actions.json?include_prereleases&sort=semver)](https://github.com/yaniv256/actions.json/releases)
+[![npm: @actions-json/bridge](https://img.shields.io/npm/v/@actions-json/bridge?label=%40actions-json%2Fbridge)](https://www.npmjs.com/package/@actions-json/bridge)
 
-It lets agents discover what a site can do, call declared actions, and reuse
-website knowledge instead of scraping, guessing, or rediscovering the same DOM
-every run.
+**A readable action map for websites — so AI agents operate a site through
+declared actions instead of scraping and guessing.**
 
-The category claim is simple: OpenAPI described servers. `actions.json`
-describes website actions.
+For **site owners** who want their site to work well with agents, and for
+**developers** whose coding agents (Claude Code, Codex) need to drive a browser
+reliably. `actions.json` lets an agent discover what a site can do, call
+declared actions, and reuse website knowledge instead of rediscovering the same
+DOM every run.
+
+It's **OpenAPI for website actions**: OpenAPI describes what a server can do;
+`actions.json` describes what a website can do.
 
 <p align="center">
   <a href="https://yaniv256.github.io/actions.json/decks/schema-v1-proposal-deck.html">
     <img src="docs/assets/schema-v1-teaching-deck-preview.gif" alt="Animated preview of the actions.json schema v1 teaching deck" width="960">
   </a>
 </p>
+
+## Quickstart
+
+Have a coding agent build and test an `actions.json` for a site — no toolchain,
+no clone. Register the bridge with [Claude Code](https://claude.ai/code):
+
+```bash
+claude mcp add actions-json -- \
+  npx -y @actions-json/bridge mcp \
+  --bind 0.0.0.0:17345 \
+  --actions /abs/path/to/overlay.actions.json \
+  --storage-root /abs/path/to/actions.json.storage
+```
+
+`npx` downloads the prebuilt bridge for your platform (linux-x64, macos-x64,
+macos-arm64, win-x64) and runs it. Then connect the
+[Chrome extension](https://github.com/yaniv256/actions.json/releases) to the
+bridge and take control of a tab — your agent loads the map and your OpenAI key
+into the browser for you.
+
+Full walkthrough, plus the standalone-extension path: **[Getting
+Started](https://yaniv256.github.io/actions.json/getting-started.html)**.
 
 ## What You Can Do Now
 
@@ -24,7 +53,8 @@ This repository contains the current public reference implementation for:
   your own OpenAI API key;
 - loading `actions.json.storage` so the hosted agent can use site-specific
   context and actions;
-- exposing actions to external coding agents through an MCP-shaped bridge;
+- exposing actions to external coding agents through a Model Context Protocol
+  (MCP) bridge;
 - testing the page-JavaScript/embed path through the bookmarklet runtime;
 - rendering in-page overlays, launchers, screenshots, and structured reports.
 
@@ -55,7 +85,7 @@ Read [Hosted Agent](https://yaniv256.github.io/actions.json/hosted-agent.html) a
 
 ### I Want My Coding Agent To Operate A Website
 
-Use the authoring skill and the MCP-shaped bridge. The coding agent explores a
+Use the authoring skill and the MCP bridge. The coding agent explores a
 site, writes or improves `actions.json`, syncs storage, asks `actions.site` what
 actions are available, and then calls stored actions instead of rediscovering
 the page. From the user's point of view, you ask the coding agent to inspect the
@@ -98,9 +128,10 @@ Current runtime hosts:
   fallback for authoring, and durable hosted voice sessions.
 - **Bookmarklet/runtime shell**: lightweight page-JavaScript runtime for
   bookmarklet and future embed-path testing.
-- **MCP-shaped bridge**: external-agent adapter that exposes stable HTTP
-  tool-list and tool-call endpoints and routes calls to connected browser
-  runtimes. It is not yet a fully conforming MCP server.
+- **MCP bridge**: an MCP server (stdio: `initialize`, `tools/list`,
+  `tools/call`, `resources/list`, `resources/read`) that a coding agent
+  registers and that routes calls to connected browser runtimes over a
+  WebSocket. Run it with `npx @actions-json/bridge mcp`.
 
 The hosted extension agent does not require the local bridge for its local tool
 catalog or uploaded storage-backed `actions.site` actions. External coding
@@ -108,10 +139,14 @@ agents still use the bridge.
 
 ## Install Or Try It
 
-For normal use, install release artifacts instead of building from source.
+For normal use you don't build anything. The bridge runs via
+`npx @actions-json/bridge` (see [Quickstart](#quickstart)); the Chrome extension
+installs from [Releases](https://github.com/yaniv256/actions.json/releases).
 Start with [Getting Started](https://yaniv256.github.io/actions.json/getting-started.html).
 
-For source development:
+### Building from source
+
+For runtime development:
 
 ```bash
 npm install
@@ -120,10 +155,12 @@ npm run test:overlay-runtime
 node scripts/validate-skills.mjs
 ```
 
-Run the bridge from source when you need an external coding agent to connect:
+To run the bridge from a source checkout instead of `npx`, use the `mcp`
+subcommand (the MCP server a coding agent connects to):
 
 ```bash
-cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- serve \
+cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- mcp \
+  --bind 0.0.0.0:17345 \
   --actions extensions/chrome-overlay-runtime/actions/overlay.actions.json \
   --storage-root ../actions.json.storage
 ```
@@ -133,11 +170,11 @@ cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- serve \
 ```text
 docs/                         Public documentation and schema references
 skills/SKILL.md               Canonical installable authoring skill
-skills/references/            Skill reference docs, symlinked to public docs
+skills/references/            Skill reference docs (the published docs/ mirror these)
 runtime/actions-json-runtime/ Shared runtime and bookmarklet code
 extensions/chrome-overlay-runtime/
                               Chrome extension runtime and hosted-agent UI
-mcp/actions-json-mcp/         MCP-shaped bridge for external agents
+mcp/actions-json-mcp/         MCP bridge for external agents
 examples/                     Public examples
 adapters/                     Packaging glue for agent ecosystems
 specs/                        Spec Kit feature work and task records
@@ -158,7 +195,7 @@ Start here:
 - [Hosted Agent](https://yaniv256.github.io/actions.json/hosted-agent.html)
 - [Chrome Extension](https://yaniv256.github.io/actions.json/chrome-extension.html)
 - [Troubleshooting](https://yaniv256.github.io/actions.json/troubleshooting.html)
-- [0.1.84 Release Notes](https://yaniv256.github.io/actions.json/release-notes/0.1.84.html)
+- [Releases](https://github.com/yaniv256/actions.json/releases)
 
 Reference:
 
