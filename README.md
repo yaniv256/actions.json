@@ -40,7 +40,7 @@ codex mcp add actions-json -- npx -y @actions-json/bridge mcp
 
 That's the whole setup. On first run, `npx` downloads the prebuilt bridge for
 your platform (linux-x64, macos-x64, macos-arm64, win-x64), bundles the
-browser-control tool catalog, and scaffolds your storage at
+browser-control tool catalog, and creates your storage at
 `~/.actions-json/storage` (scopes: `private` / `public` / `shared`) — nothing to
 configure. Override storage with `--storage-root <dir>` if you want it
 elsewhere.
