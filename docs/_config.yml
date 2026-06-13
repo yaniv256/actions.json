@@ -33,7 +33,8 @@ heading_anchors: true
 back_to_top: true
 back_to_top_text: "Back to top"
 
-# The release-notes folder is reference material, not primary nav.
-# Keep Jekyll from treating asset/deck folders as pages.
-exclude:
-  - decks/
+# Note: do NOT add `exclude: [decks/]`. Jekyll's `exclude` drops files from
+# the built site entirely (they 404), not just from the nav. The decks are
+# standalone HTML with no front-matter, so just-the-docs never lists them in
+# the sidebar anyway — they publish as plain static pages. To hide a real
+# Markdown page from the nav, use `nav_exclude: true` in its front-matter.
