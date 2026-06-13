@@ -323,6 +323,7 @@ embedding hidden executable code.
 Example (the shipped workflow shape — steps invoke named primitives from the
 dictionary):
 
+{% raw %}
 ```json
 {
   "name": "results.collect_visible",
@@ -348,6 +349,7 @@ dictionary):
   }
 }
 ```
+{% endraw %}
 
 This step interpreter is implemented and active: workflow steps call named
 primitives from the dictionary (not abstract step types), and the engine
