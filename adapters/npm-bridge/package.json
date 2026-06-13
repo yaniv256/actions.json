@@ -1,0 +1,30 @@
+{
+  "name": "@actions-json/bridge",
+  "version": "0.1.119",
+  "description": "Run the actions.json MCP bridge with npx — no Rust toolchain required. Downloads the prebuilt actions-json-mcp binary for your platform and runs it.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yaniv256/actions.json.git",
+    "directory": "adapters/npm-bridge"
+  },
+  "homepage": "https://yaniv256.github.io/actions.json/getting-started.html",
+  "bin": {
+    "actions-json-bridge": "bin/cli.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "actions.json",
+    "mcp",
+    "bridge",
+    "browser",
+    "agent"
+  ]
+}
