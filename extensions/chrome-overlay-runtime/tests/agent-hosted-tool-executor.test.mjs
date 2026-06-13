@@ -191,6 +191,78 @@ test("chrome hosted tool executor returns bridge response errors as structured t
   });
 });
 
+test("chrome hosted tool executor preserves JSON parse failures without reading a consumed body twice", async () => {
+  const chromeApi = createChromeApi();
+  const executor = createChromeHostedToolExecutor({
+    chromeApi,
+    fetchImpl: async () => ({
+      ok: false,
+      status: 502,
+      async json() {
+        throw new SyntaxError("Unexpected token < in JSON at position 0");
+      },
+      async text() {
+        return "<html>bad gateway</html>";
+      },
+    }),
+  });
+
+  const result = await executor.execute({
+    name: "page.info",
+    call_id: "call-parse-fails",
+    arguments: {},
+  });
+
+  assert.deepEqual(result, {
+    ok: false,
+    call_id: "call-parse-fails",
+    error: {
+      code: "bridge_tool_call_failed",
+      message: "Bridge returned 502.",
+      details: {
+        error: "Unable to parse bridge response as JSON.",
+        parse_error: "Unexpected token '<', \"<html>bad \"... is not valid JSON",
+      },
+    },
+  });
+});
+
+test("chrome hosted tool executor returns malformed successful bridge responses as structured errors", async () => {
+  const chromeApi = createChromeApi();
+  const executor = createChromeHostedToolExecutor({
+    chromeApi,
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      async json() {
+        throw new SyntaxError("Unexpected token < in JSON at position 0");
+      },
+      async text() {
+        return "<html>ok but not json</html>";
+      },
+    }),
+  });
+
+  const result = await executor.execute({
+    name: "browser.claimed_tabs.list",
+    call_id: "call-parse-fails-ok",
+    arguments: {},
+  });
+
+  assert.deepEqual(result, {
+    ok: false,
+    call_id: "call-parse-fails-ok",
+    error: {
+      code: "bridge_tool_call_failed",
+      message: "Bridge response was not valid JSON.",
+      details: {
+        error: "Unable to parse bridge response as JSON.",
+        parse_error: "Unexpected token '<', \"<html>ok b\"... is not valid JSON",
+      },
+    },
+  });
+});
+
 test("chrome hosted tool executor falls back to the default bridge URL when storage is empty", async () => {
   const fetchCalls = [];
   const chromeApi = createChromeApi({ bridgeUrl: null });
@@ -209,7 +281,7 @@ test("chrome hosted tool executor falls back to the default bridge URL when stor
     arguments: {},
   });
 
-  assert.deepEqual(fetchCalls.map((call) => call.url), ["http://127.0.0.1:17345/mcp/tools/call"]);
+  assert.deepEqual(fetchCalls.map((call) => call.url), ["http://100.99.150.49:17345/mcp/tools/call"]);
 });
 
 test("chrome hosted tool executor converts http bridge URLs without changing the origin", async () => {

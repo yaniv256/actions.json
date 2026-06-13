@@ -180,6 +180,25 @@ async function handleCommand(message) {
     }).catch(() => {});
     return { ok: true, state };
   }
+  if (message.type === "actions-json:agent-session-output-mute") {
+    const state = await session.setOutputMuted(message.muted !== false);
+    await chrome.runtime.sendMessage({
+      type: "actions-json:agent-session-event",
+      event: {
+        type: "actions_json.session.state",
+        status: state.status,
+        outputMuted: state.outputMuted,
+      },
+      state,
+    }).catch(() => {});
+    return { ok: true, state };
+  }
+  if (message.type === "actions-json:agent-session-user-message") {
+    const result = await session.sendUserMessage({
+      text: message.text,
+    });
+    return { ok: true, result, state: session.getState() };
+  }
   if (message.type === "actions-json:agent-session-state") {
     return { ok: true, state: session.getState() };
   }

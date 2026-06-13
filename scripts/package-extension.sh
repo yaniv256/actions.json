@@ -56,7 +56,13 @@ rm -f "$out_dir/$artifact_name" "$out_dir/SHA256SUMS.txt"
     src/agent/runtime-session-client.mjs \
     src/agent/realtime-webrtc-transport.mjs \
     src/agent/session-memory-store.mjs \
+    src/agent/site-action-args.mjs \
+    src/agent/state-projections.mjs \
+    src/agent/task-queue.mjs \
+    src/agent/transfer-buffer.mjs \
+    src/agent/vendor/jsonata.mjs \
     src/agent/voice-settings-store.mjs \
+    src/agent/workflow-actions.mjs \
     src/background.js \
     src/content.js \
     src/offscreen-agent.js \

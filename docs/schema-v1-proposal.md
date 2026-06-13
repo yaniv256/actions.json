@@ -305,57 +305,142 @@ Fields:
 - `convergence`: stop rules for repeated traversal.
 - `do_not_use`: known-bad approaches.
 
-### `execution`
+### `workflow` (implemented execution)
 
-Execution steps make a handler inspectable or provide a primitive plan.
-
-Implementation pending: the current bridge/runtime slice does not include a
-general step interpreter. The schema keeps this shape because it is the intended
-portable representation, but current executable maps should use implemented
-handlers, primitive tools, or the currently supported state-machine extraction
-path.
+The step interpreter is implemented and active: a tool entry carries a
+`workflow` object whose steps invoke named primitives from the primitive
+dictionary, with JSONata expression slots for data binding. This replaced the
+earlier draft of abstract step types (`inspect`, `click`, `type`, ...) — steps
+name concrete primitives instead.
 
 ```json
 {
-  "mode": "steps_first",
-  "steps": [
+  "workflow": {
+    "version": 1,
+    "expression_language": "jsonata",
+    "steps": [
+      {
+        "id": "findButton",
+        "primitive": "locator.element_info",
+        "args": {
+          "locator": { "selector": "button[type='submit']" }
+        }
+      },
+      {
+        "id": "clickButton",
+        "primitive": "pointer.click",
+        "args": {
+          "x": "{% steps.findButton.output.clickable_center.x %}",
+          "y": "{% steps.findButton.output.clickable_center.y %}"
+        },
+        "settle_after": {
+          "locator": { "selector": "[data-confirmation]" },
+          "state": "visible",
+          "timeout_ms": 8000
+        }
+      }
+    ],
+    "output": "{% {'clicked': true, 'button': steps.findButton.output} %}"
+  }
+}
+```
+
+Workflow root fields (all required except `output`): `version` (must be `1`),
+`expression_language` (must be `"jsonata"`), `steps`, `output`.
+
+Step fields — this set is closed; validation rejects anything else:
+
+- `id`: unique step id (referenced as `steps.<id>.output`).
+- `primitive`: a primitive name from the dictionary. When the runtime supplies
+  its dictionary at validation time, unknown names are rejected up front.
+- `args`: arguments object; optional for no-argument primitives. Any string
+  value that is a whole `{% ... %}` slot is evaluated as JSONata against
+  `input`, `steps`, `item`, and `index`. Partial embedded expressions are
+  rejected.
+- `when`: JSONata condition; the step is skipped when falsy. Test optional
+  paths with `$exists(...)` — comparing a missing path with `= null` is
+  silently false in both directions.
+- `for_each` + `max_items`: bounded iteration over a JSONata collection;
+  `item` and `index` are available inside.
+- `retry_until` + `max_attempts` + optional `after_each`: repeat the step until
+  the condition holds; `after_each` declares one primitive to run between
+  attempts (the scroll-until-visible pattern).
+- `settle_after`: after a successful step, wait for exactly one of `locator`
+  (with optional `state`, `timeout_ms`) or `delay_ms` before advancing. The
+  settle timeout is non-fatal — it is pacing, not a postcondition; add an
+  explicit verification step when success must be proven.
+- `on_error`: `"stop"` (default) or `"continue"`. Reserve `continue` for
+  genuinely optional steps; a precondition every later step depends on must
+  stop, or the workflow fails late with a misleading error.
+
+Validation is strict: unknown workflow keys and unknown step fields are
+rejected with an error naming the step and the field, so typos fail at
+validation time instead of silently changing behavior at run time. Runtime
+limits bound step count, loop items, and expression/output sizes.
+
+### `state_projections` (implemented)
+
+A site map can declare logical state projections next to its tools. A
+projection extracts safe DOM fields, transforms the records with a JSONata
+expression, and validates the result against a JSON Schema — giving agents
+compact application state for orientation, verification, and diffs instead of
+raw DOM reads or screenshots.
+
+```json
+{
+  "state_projections": [
     {
-      "id": "inspect_button",
-      "type": "inspect",
-      "target": { "selector": "button[type='submit']" },
-      "assert": { "visible": true, "enabled": true }
-    },
-    {
-      "id": "click_button",
-      "type": "click",
-      "target": { "selector": "button[type='submit']" }
+      "name": "site.board",
+      "description": "Logical board state: lists and their cards.",
+      "snapshot": {
+        "version": 1,
+        "source": "dom",
+        "extract": [
+          {
+            "id": "lists",
+            "selector": "[data-testid='list-wrapper']",
+            "many": true,
+            "fields": {
+              "name": {
+                "selector": "[data-testid='list-name']",
+                "property": "innerText",
+                "trim": true,
+                "required": true
+              }
+            }
+          }
+        ],
+        "projection": {
+          "language": "jsonata",
+          "expression": "{% {'board': {'lists': $append([], records.lists)}} %}"
+        },
+        "output_schema": {
+          "type": "object",
+          "required": ["board"],
+          "properties": { "board": { "type": "object" } }
+        }
+      },
+      "summaries": [
+        {
+          "name": "agent_context",
+          "max_bytes": 12000,
+          "expression": "{% {'list_count': $count(state.board.lists)} %}"
+        }
+      ]
     }
   ]
 }
 ```
 
-Execution modes:
-
-- `handler_first`: call the handler, then use steps for trace, checks, or
-  fallback.
-- `steps_first`: execute declared steps directly. Implementation pending.
-- `documentary`: steps are review/test guidance, not normal runtime authority.
-- `test_only`: steps may run inside checks but not normal action calls.
-
-Draft step types:
-
-- `inspect`
-- `click`
-- `type`
-- `scroll`
-- `wait`
-- `assert`
-- `extract`
-- `call`
-- `emit`
-
-Each runtime may support a subset. Unsupported steps must return structured
-capability errors.
+Projections are exercised through `actions.site` modes: `state_read` (full
+state), `state_summary` (a declared compact summary), and `state_diff` (JSON
+Patch operations against the previous snapshot, with semantic deltas). Results
+include `diagnostics.selector_counts` so authors can verify extraction counts
+against the visible page. Byte budgets are enforced on expression output, full
+state, and summaries; an oversized projection returns
+`state_payload_too_large` — narrow the selectors or use a summary rather than
+raising limits. Workflows may declare a `postcondition` naming a projection to
+re-check after a mutating action.
 
 ### `attachments`
 

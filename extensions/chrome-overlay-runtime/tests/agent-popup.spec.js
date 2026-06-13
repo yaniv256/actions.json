@@ -23,6 +23,11 @@ async function routeExtensionAssets(page) {
 
 async function installPopupHarness(page) {
   await routeExtensionAssets(page);
+  // Serve the embedded settings iframe as a stub so popup tests exercise
+  // popup.js in isolation; sidepanel behavior has its own spec.
+  await page.route("https://actions-json.test/sidepanel.html*", (route) =>
+    route.fulfill({ contentType: "text/html", body: "<!doctype html><title>settings stub</title>" }),
+  );
   await page.addInitScript(() => {
     window.__actionsJsonRuntimeMessages = [];
     window.__actionsJsonTabMessages = [];
@@ -131,16 +136,15 @@ test("popup opens the actions.json menu, removes close overlay, and closes itsel
   expect(await page.evaluate(() => window.__actionsJsonPopupClosed)).toBe(true);
 });
 
-test("popup opens storage tools in a top-level extension tab", async ({ page }) => {
+test("popup embeds the settings panel from the shared sidepanel config surface", async ({ page }) => {
   await installPopupHarness(page);
   await page.goto("https://actions-json.test/popup.html");
 
-  await page.locator("#openStorageTools").click();
-
-  await expect
-    .poll(() => page.evaluate(() => window.__actionsJsonCreatedTab))
-    .toEqual({ url: "https://actions-json.test/sidepanel.html?tab=config&surface=top-level" });
-  expect(await page.evaluate(() => window.__actionsJsonPopupClosed)).toBe(true);
+  await expect(page.locator(".settings iframe")).toHaveAttribute(
+    "src",
+    "sidepanel.html?tab=config&surface=popup",
+  );
+  await expect(page.locator("#openStorageTools")).toHaveCount(0);
 });
 
 test("popup exposes direct durable voice session controls", async ({ page }) => {
@@ -175,4 +179,28 @@ test("popup exposes direct durable voice session controls", async ({ page }) => 
   ]);
   expect(runtimeMessages[1]).toMatchObject({ textOnly: false });
   expect(runtimeMessages[2]).toMatchObject({ muted: true });
+});
+
+test("popup warns and disables take-control on a Chrome internal page", async ({ page }) => {
+  await installPopupHarness(page);
+  await page.addInitScript(() => {
+    window.chrome.tabs.query = async () => [
+      { id: 555, url: "chrome://extensions/" },
+    ];
+  });
+  await page.goto("https://actions-json.test/popup.html");
+
+  await expect(page.locator("#tabNotice")).toBeVisible();
+  await expect(page.locator("#tabNotice")).toContainText("internal page");
+  await expect(page.locator("#authorize")).toBeDisabled();
+  await expect(page.locator("#openMenu")).toBeDisabled();
+});
+
+test("popup keeps take-control enabled on an ordinary website tab", async ({ page }) => {
+  await installPopupHarness(page);
+  await page.goto("https://actions-json.test/popup.html");
+
+  await expect(page.locator("#tabNotice")).toBeHidden();
+  await expect(page.locator("#authorize")).toBeEnabled();
+  await expect(page.locator("#openMenu")).toBeEnabled();
 });

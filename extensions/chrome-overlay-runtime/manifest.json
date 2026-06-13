@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "actions.json Overlay Runtime",
-  "version": "0.1.84",
+  "version": "0.1.117",
   "description": "Experimental actions.json runtime that can render agent-provided HTML overlays on authorized tabs.",
   "action": {
     "default_popup": "popup.html",
@@ -15,7 +15,14 @@
   "host_permissions": ["<all_urls>"],
   "web_accessible_resources": [
     {
-      "resources": ["actions/overlay.actions.json", "sidepanel.html", "src/sidepanel.js", "src/agent/*.mjs"],
+      "resources": [
+        "actions/overlay.actions.json",
+        "sidepanel.html",
+        "src/sidepanel.js",
+        "src/storage-bundle.mjs",
+        "src/agent/*.mjs",
+        "src/agent/vendor/*.mjs"
+      ],
       "matches": ["<all_urls>"]
     }
   ]

@@ -1,4 +1,4 @@
-const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:17345/extension";
+const DEFAULT_BRIDGE_URL = "ws://100.99.150.49:17345/extension";
 const HOSTED_SCREENSHOT_DEFAULTS = {
   format: "jpeg",
   quality: 60,
@@ -38,12 +38,44 @@ function hostedToolArguments(call) {
 }
 
 async function readJsonResponse(response) {
+  let text = "";
   try {
-    return await response.json();
-  } catch (_error) {
-    const text = typeof response.text === "function" ? await response.text() : "";
-    return text ? { error: text } : {};
+    text = typeof response.text === "function" ? await response.text() : "";
+  } catch (error) {
+    return {
+      __invalidJson: true,
+      error: "Unable to read bridge response body.",
+      read_error: error.message || String(error),
+    };
   }
+  if (!text) {
+    return {};
+  }
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    return {
+      __invalidJson: true,
+      error: "Unable to parse bridge response as JSON.",
+      parse_error: error.message || String(error),
+    };
+  }
+}
+
+function publicBridgeResponseDetails(body) {
+  if (!body?.__invalidJson) {
+    return body;
+  }
+  const details = {
+    error: body.error,
+  };
+  if (body.parse_error) {
+    details.parse_error = body.parse_error;
+  }
+  if (body.read_error) {
+    details.read_error = body.read_error;
+  }
+  return details;
 }
 
 export function createChromeHostedToolExecutor({
@@ -89,7 +121,18 @@ export function createChromeHostedToolExecutor({
             error: {
               code: "bridge_tool_call_failed",
               message: `Bridge returned ${response.status}.`,
-              details: body,
+              details: publicBridgeResponseDetails(body),
+            },
+          };
+        }
+        if (body?.__invalidJson) {
+          return {
+            ok: false,
+            call_id: call.call_id,
+            error: {
+              code: "bridge_tool_call_failed",
+              message: "Bridge response was not valid JSON.",
+              details: publicBridgeResponseDetails(body),
             },
           };
         }
@@ -120,6 +163,9 @@ export async function fetchBridgeRealtimeToolCatalog({
   const body = await readJsonResponse(response);
   if (!response.ok) {
     throw new Error(`Bridge returned ${response.status} while loading tools.`);
+  }
+  if (body?.__invalidJson) {
+    throw new Error("Bridge returned invalid JSON while loading tools.");
   }
   const tools = Array.isArray(body?.tools) ? body.tools : [];
   return tools

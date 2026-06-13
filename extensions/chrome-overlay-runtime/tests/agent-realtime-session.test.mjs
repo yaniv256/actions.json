@@ -60,6 +60,32 @@ function createFakeTransportFactory() {
   };
 }
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((innerResolve, innerReject) => {
+    resolve = innerResolve;
+    reject = innerReject;
+  });
+  return { promise, resolve, reject };
+}
+
+function nextTimer() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function fallbackArgs(args = {}, overrides = {}) {
+  return {
+    ...args,
+    policy_exception_report: {
+      kind: overrides.kind || "generic",
+      intended_tool: overrides.intended_tool || overrides.tool || "unknown",
+      actions_json_path: overrides.actions_json_path || "none",
+      reason: overrides.reason || "Test fixture is exercising a direct fallback tool call.",
+    },
+  };
+}
+
 test("hosted realtime session fails closed when no OpenAI key is configured", async () => {
   const storage = createStorage();
   const transportFactory = createFakeTransportFactory();
@@ -72,7 +98,9 @@ test("hosted realtime session fails closed when no OpenAI key is configured", as
     status: "error",
     model: "gpt-realtime-2",
     error: "OpenAI API key is required",
-    inputMuted: false,
+    inputMuted: true,
+    outputMuted: true,
+    textOnly: true,
   });
 });
 
@@ -88,7 +116,9 @@ test("hosted realtime session starts gpt-realtime-2 with a fake transport and re
     status: "connected",
     model: "gpt-realtime-2",
     error: null,
-    inputMuted: false,
+    inputMuted: true,
+    outputMuted: true,
+    textOnly: true,
   });
   assert.equal(transportFactory.calls[0][0], "create");
   assert.equal(transportFactory.calls[0][1].model, "gpt-realtime-2");
@@ -99,7 +129,9 @@ test("hosted realtime session starts gpt-realtime-2 with a fake transport and re
     status: "connected",
     model: "gpt-realtime-2",
     error: null,
-    inputMuted: false,
+    inputMuted: true,
+    outputMuted: true,
+    textOnly: true,
     credential: {
       configured: true,
       redacted: "sk-proj...3456",
@@ -118,6 +150,9 @@ test("hosted realtime session starts gpt-realtime-2 with a fake transport and re
   assert.match(sentEvents[0].session.instructions, /navigate|navigation/i);
   assert.match(sentEvents[0].session.instructions, /do not narrate/i);
   assert.match(sentEvents[0].session.instructions, /before answering/i);
+  assert.match(sentEvents[0].session.instructions, /claimed tabs/i);
+  assert.match(sentEvents[0].session.instructions, /activate/i);
+  assert.match(sentEvents[0].session.instructions, /relevant tab/i);
   assert.match(sentEvents[0].session.instructions, /start of a session/i);
   assert.match(sentEvents[0].session.instructions, /mode=list/i);
   assert.match(sentEvents[0].session.instructions, /site role/i);
@@ -331,6 +366,8 @@ test("hosted realtime session stop closes the active transport and clears transi
     model: "gpt-realtime-2",
     error: null,
     inputMuted: false,
+    outputMuted: false,
+    textOnly: true,
   });
 });
 
@@ -388,9 +425,22 @@ test("hosted realtime session sends injected realtime tool declarations", async 
   assert.match(sessionUpdate.session.instructions, /boring plain tables/i);
   assert.match(sessionUpdate.session.instructions, /section cards|slide-like panels/i);
   assert.match(sessionUpdate.session.instructions, /Do not tell the user you cannot see/);
+  assert.match(sessionUpdate.session.instructions, /Capability alignment/i);
+  assert.match(sessionUpdate.session.instructions, /Do not say a capability is unavailable/i);
+  assert.match(sessionUpdate.session.instructions, /empty actions\.site result means the site map is not loaded/i);
+  assert.match(sessionUpdate.session.instructions, /wrong active tab/i);
+  assert.match(sessionUpdate.session.instructions, /browser_claimed_tabs_list|browser\.claimed_tabs\.list/i);
+  assert.match(sessionUpdate.session.instructions, /browser_claimed_tabs_activate|browser\.claimed_tabs\.activate/i);
+  assert.match(sessionUpdate.session.instructions, /page warning text/i);
+  assert.match(sessionUpdate.session.instructions, /actions\.json site actions are the first-choice operating layer/i);
+  assert.match(sessionUpdate.session.instructions, /Generic primitives are fallback tools/i);
+  assert.match(sessionUpdate.session.instructions, /policy violation/i);
+  assert.match(sessionUpdate.session.instructions, /policy_exception_report/i);
+  assert.match(sessionUpdate.session.instructions, /Do not narrate the report/i);
   const initialResponse = transportFactory.transports[0].events.find((event) => event.type === "response.create");
   assert.match(initialResponse.response.instructions, /visual overlay/i);
   assert.match(initialResponse.response.instructions, /navigation/i);
+  assert.match(initialResponse.response.instructions, /site-specific action before any generic DOM/i);
 });
 
 test("hosted realtime session logs raw and normalized session.update tool names", async () => {
@@ -437,9 +487,20 @@ test("hosted realtime session logs raw and normalized session.update tool names"
     },
     {
       name: "pointer_click",
-      required: ["x", "y"],
-      properties: ["x", "y"],
+      required: ["x", "y", "policy_exception_report"],
+      properties: ["x", "y", "policy_exception_report"],
     },
+  ]);
+  const sessionUpdate = transportFactory.transports[0].events.find((event) => event.type === "session.update");
+  const actionsSite = sessionUpdate.session.tools.find((tool) => tool.name === "actions_site");
+  const pointerClick = sessionUpdate.session.tools.find((tool) => tool.name === "pointer_click");
+  assert.equal(actionsSite.parameters.properties.policy_exception_report, undefined);
+  assert.equal(pointerClick.parameters.properties.policy_exception_report.type, "object");
+  assert.deepEqual(pointerClick.parameters.properties.policy_exception_report.required, [
+    "kind",
+    "intended_tool",
+    "actions_json_path",
+    "reason",
   ]);
   assert.equal(catalogEvent.output.has_actions_site, true);
   assert.equal(catalogEvent.output.has_pointer_click, true);
@@ -464,12 +525,9 @@ test("hosted realtime session can update realtime tool declarations before start
 
   const sessionUpdate = transportFactory.transports[0].events.find((event) => event.type === "session.update");
   assert.deepEqual(returnedTools, tools);
-  assert.deepEqual(sessionUpdate.session.tools, [
-    {
-      ...tools[0],
-      name: "browser_screenshot",
-    },
-  ]);
+  assert.equal(sessionUpdate.session.tools[0].name, "browser_screenshot");
+  assert.equal(sessionUpdate.session.tools[0].parameters.properties.policy_exception_report.type, "object");
+  assert.deepEqual(sessionUpdate.session.tools[0].parameters.required, ["policy_exception_report"]);
 });
 
 test("hosted realtime session maps safe OpenAI tool names back to bridge names", async () => {
@@ -506,11 +564,12 @@ test("hosted realtime session maps safe OpenAI tool names back to bridge names",
           type: "function_call",
           name: "browser_screenshot",
           call_id: "call-safe-screenshot",
-          arguments: "{}",
+          arguments: JSON.stringify(fallbackArgs({}, { tool: "browser.screenshot" })),
         },
       ],
     },
   });
+  await manager.waitForToolJobsIdle();
 
   assert.deepEqual(toolCalls, [
     {
@@ -559,11 +618,12 @@ test("hosted realtime session maps pointer_click arguments to pointer.click exec
           type: "function_call",
           name: "pointer_click",
           call_id: "call-pointer-click",
-          arguments: JSON.stringify({ x: 759.96484375, y: 34 }),
+          arguments: JSON.stringify(fallbackArgs({ x: 759.96484375, y: 34 }, { tool: "pointer.click" })),
         },
       ],
     },
   });
+  await manager.waitForToolJobsIdle();
 
   assert.deepEqual(toolCalls, [
     {
@@ -599,11 +659,12 @@ test("hosted realtime session executes response.done function calls and asks the
           type: "function_call",
           name: "page.info",
           call_id: "call-page-info",
-          arguments: "{}",
+          arguments: JSON.stringify(fallbackArgs({}, { tool: "page.info" })),
         },
       ],
     },
   });
+  await manager.waitForToolJobsIdle();
 
   assert.deepEqual(toolCalls, [
     {
@@ -643,6 +704,115 @@ test("hosted realtime session executes response.done function calls and asks the
       value: { title: "Fixture" },
     },
   });
+});
+
+test("hosted realtime session queues function calls without blocking the realtime event handler", async () => {
+  const storage = createStorage();
+  await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
+  const transportFactory = createFakeTransportFactory();
+  const releaseTool = deferred();
+  let executeStarted = false;
+  const manager = new HostedRealtimeSessionManager({
+    storage,
+    transportFactory,
+    toolExecutor: {
+      async execute() {
+        executeStarted = true;
+        await releaseTool.promise;
+        return { ok: true, output: { done: true } };
+      },
+    },
+  });
+
+  await manager.start({ textOnly: true });
+  const result = await manager.handleRealtimeEvent({
+    type: "response.done",
+    response: {
+      output: [
+        {
+          type: "function_call",
+          name: "page.info",
+          call_id: "call-slow-page-info",
+          arguments: JSON.stringify(fallbackArgs({}, { tool: "page.info" })),
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(result, { handled: true, toolCalls: 1, queued: true });
+  assert.equal(executeStarted, false);
+  assert.equal(
+    transportFactory.transports[0].events.some((event) => event.item?.call_id === "call-slow-page-info"),
+    false,
+  );
+
+  releaseTool.resolve();
+  await manager.waitForToolJobsIdle();
+
+  assert.equal(
+    transportFactory.transports[0].events.some((event) => event.item?.call_id === "call-slow-page-info"),
+    true,
+  );
+});
+
+test("hosted realtime session serializes queued tool calls for the same runtime", async () => {
+  const storage = createStorage();
+  await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
+  const transportFactory = createFakeTransportFactory();
+  const firstRelease = deferred();
+  const order = [];
+  const manager = new HostedRealtimeSessionManager({
+    storage,
+    transportFactory,
+    toolExecutor: {
+      async execute(call) {
+        order.push(`start:${call.call_id}`);
+        if (call.call_id === "call-first-mutation") {
+          await firstRelease.promise;
+        }
+        order.push(`finish:${call.call_id}`);
+        return { ok: true, output: { call_id: call.call_id } };
+      },
+    },
+  });
+
+  await manager.start({ textOnly: true });
+  await manager.handleRealtimeEvent({
+    type: "response.done",
+    response: {
+      output: [
+        {
+          type: "function_call",
+          name: "pointer.click",
+          call_id: "call-first-mutation",
+          arguments: JSON.stringify(
+            fallbackArgs({ target_runtime_id: "runtime-1", x: 10, y: 10 }, { tool: "pointer.click" }),
+          ),
+        },
+        {
+          type: "function_call",
+          name: "pointer.click",
+          call_id: "call-second-mutation",
+          arguments: JSON.stringify(
+            fallbackArgs({ target_runtime_id: "runtime-1", x: 20, y: 20 }, { tool: "pointer.click" }),
+          ),
+        },
+      ],
+    },
+  });
+
+  await nextTimer();
+  assert.deepEqual(order, ["start:call-first-mutation"]);
+
+  firstRelease.resolve();
+  await manager.waitForToolJobsIdle();
+
+  assert.deepEqual(order, [
+    "start:call-first-mutation",
+    "finish:call-first-mutation",
+    "start:call-second-mutation",
+    "finish:call-second-mutation",
+  ]);
 });
 
 test("hosted realtime session log preserves compact tool arguments and results", async () => {
@@ -690,16 +860,22 @@ test("hosted realtime session log preserves compact tool arguments and results",
           type: "function_call",
           name: "locator.element_info",
           call_id: "call-genspec-locator",
-          arguments: JSON.stringify({
-            locator: {
-              selector: "a[href*='genspec.dev']",
-              text_contains: "genspec.dev",
-            },
-          }),
+          arguments: JSON.stringify(
+            fallbackArgs(
+              {
+                locator: {
+                  selector: "a[href*='genspec.dev']",
+                  text_contains: "genspec.dev",
+                },
+              },
+              { tool: "locator.element_info", actions_json_path: "pragmaworks.links.genspec.geometry" },
+            ),
+          ),
         },
       ],
     },
   });
+  await manager.waitForToolJobsIdle();
 
   const event = (await getAgentSessionLog(storage)).events.at(-1);
   assert.equal(event.name, "locator.element_info");
@@ -737,6 +913,134 @@ test("hosted realtime session log preserves compact tool arguments and results",
   assert.equal(JSON.stringify(event).includes("should-not-be-stored"), false);
 });
 
+test("hosted realtime session records and strips mandatory policy exception reports", async () => {
+  const storage = createStorage();
+  await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
+  const transportFactory = createFakeTransportFactory();
+  const executed = [];
+  const manager = new HostedRealtimeSessionManager({
+    storage,
+    transportFactory,
+    tools: [
+      {
+        type: "function",
+        name: "pointer.click",
+        description: "Click a viewport point.",
+        parameters: {
+          type: "object",
+          required: ["x", "y"],
+          properties: { x: { type: "number" }, y: { type: "number" } },
+          additionalProperties: false,
+        },
+      },
+    ],
+    toolExecutor: {
+      async execute(call) {
+        executed.push(call);
+        return { ok: true, output: { primitive: "pointer.click", value: { clicked: true } } };
+      },
+    },
+  });
+
+  await manager.start({ textOnly: true });
+  await manager.handleRealtimeEvent({
+    type: "response.done",
+    response: {
+      output: [
+        {
+          type: "function_call",
+          name: "pointer_click",
+          call_id: "call-policy-report",
+          arguments: JSON.stringify({
+            x: 12,
+            y: 34,
+            policy_exception_report: {
+              kind: "generic",
+              intended_tool: "pointer.click",
+              actions_json_path: "trello.board.add_card_buttons.candidates",
+              reason: "The click follows geometry returned by the Trello add-card candidate action.",
+            },
+          }),
+        },
+      ],
+    },
+  });
+  await manager.waitForToolJobsIdle();
+
+  assert.deepEqual(executed, [
+    {
+      name: "pointer.click",
+      call_id: "call-policy-report",
+      arguments: { x: 12, y: 34 },
+    },
+  ]);
+  const log = await getAgentSessionLog(storage);
+  const policyEvent = log.events.find((event) => event.type === "policy_exception");
+  assert.deepEqual(policyEvent, {
+    id: policyEvent.id,
+    type: "policy_exception",
+    timestamp: policyEvent.timestamp,
+    kind: "generic",
+    tool: "pointer.click",
+    call_id: "call-policy-report",
+    intended_tool: "pointer.click",
+    actions_json_path: "trello.board.add_card_buttons.candidates",
+    reason: "The click follows geometry returned by the Trello add-card candidate action.",
+  });
+  const toolEvent = log.events.find((event) => event.type === "tool" && event.name === "pointer.click");
+  assert.equal(toolEvent.ok, true);
+  assert.deepEqual(toolEvent.input.arguments, { x: 12, y: 34 });
+});
+
+test("hosted realtime session rejects direct fallback tools without policy exception reports", async () => {
+  const storage = createStorage();
+  await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
+  const transportFactory = createFakeTransportFactory();
+  const executed = [];
+  const manager = new HostedRealtimeSessionManager({
+    storage,
+    transportFactory,
+    tools: [
+      {
+        type: "function",
+        name: "browser.screenshot",
+        description: "Capture the visible browser tab.",
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+      },
+    ],
+    toolExecutor: {
+      async execute(call) {
+        executed.push(call);
+        return { ok: true };
+      },
+    },
+  });
+
+  await manager.start({ textOnly: true });
+  await manager.handleRealtimeEvent({
+    type: "response.done",
+    response: {
+      output: [
+        {
+          type: "function_call",
+          name: "browser_screenshot",
+          call_id: "call-missing-policy-report",
+          arguments: "{}",
+        },
+      ],
+    },
+  });
+  await manager.waitForToolJobsIdle();
+
+  assert.deepEqual(executed, []);
+  const toolEvent = (await getAgentSessionLog(storage)).events.find(
+    (event) => event.type === "tool" && event.name === "browser.screenshot",
+  );
+  assert.equal(toolEvent.ok, false);
+  assert.equal(toolEvent.output.error.code, "policy_exception_report_required");
+  assert.equal(toolEvent.output.error.recoverable, true);
+});
+
 test("hosted realtime session notifies observers when tool calls start and finish", async () => {
   const storage = createStorage();
   await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
@@ -766,11 +1070,12 @@ test("hosted realtime session notifies observers when tool calls start and finis
           type: "function_call",
           name: "browser.screenshot",
           call_id: "call-tool-observer",
-          arguments: "{}",
+          arguments: JSON.stringify(fallbackArgs({}, { tool: "browser.screenshot" })),
         },
       ],
     },
   });
+  await manager.waitForToolJobsIdle();
 
   assert.deepEqual(observed, [
     {
@@ -817,11 +1122,12 @@ test("hosted realtime session log preserves tool failures and realtime errors", 
           type: "function_call",
           name: "browser.screenshot",
           call_id: "call-failed-screenshot",
-          arguments: "{}",
+          arguments: JSON.stringify(fallbackArgs({}, { tool: "browser.screenshot" })),
         },
       ],
     },
   });
+  await manager.waitForToolJobsIdle();
   await manager.handleRealtimeEvent({
     type: "error",
     error: {
@@ -861,6 +1167,96 @@ test("hosted realtime session log preserves tool failures and realtime errors", 
   );
 });
 
+test("hosted realtime session records delivery failure and skips follow-up response when function output cannot be sent", async () => {
+  const storage = createStorage();
+  await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
+  const transportFactory = createFakeTransportFactory();
+  const manager = new HostedRealtimeSessionManager({
+    storage,
+    transportFactory,
+    toolExecutor: {
+      async execute() {
+        return { ok: true, output: { value: "completed locally" } };
+      },
+    },
+  });
+
+  await manager.start({ textOnly: true });
+  const transport = transportFactory.transports[0];
+  const originalSendEvent = transport.sendEvent.bind(transport);
+  transport.sendEvent = async (event) => {
+    if (event?.item?.type === "function_call_output") {
+      const error = new Error("Realtime data channel is not open: closed");
+      error.code = "realtime_data_channel_not_open";
+      error.dataChannelState = "closed";
+      throw error;
+    }
+    return originalSendEvent(event);
+  };
+
+  await manager.handleRealtimeEvent({
+    type: "response.done",
+    response: {
+      output: [
+        {
+          type: "function_call",
+          name: "page.info",
+          call_id: "call-delivery-fails",
+          arguments: JSON.stringify(fallbackArgs({}, { tool: "page.info" })),
+        },
+      ],
+    },
+  });
+  await manager.waitForToolJobsIdle();
+
+  assert.deepEqual(manager.getState(), {
+    status: "error",
+    model: "gpt-realtime-2",
+    error: "Realtime data channel is not open: closed",
+    inputMuted: true,
+    outputMuted: true,
+    textOnly: true,
+  });
+  assert.equal(
+    transport.events.slice(2).some((event) => event.type === "response.create"),
+    false,
+  );
+  const log = await getAgentSessionLog(storage);
+  const failure = log.events.find((event) => event.name === "realtime.data_channel.send_failed");
+  assert.deepEqual({
+    type: failure.type,
+    name: failure.name,
+    ok: failure.ok,
+    summary: failure.summary,
+    input: failure.input,
+    output: failure.output,
+  }, {
+    type: "realtime",
+    name: "realtime.data_channel.send_failed",
+    ok: false,
+    summary: "Failed to send function_call_output for page.info.",
+    input: {
+      call_id: "call-delivery-fails",
+      tool_name: "page.info",
+      outgoing_item_type: "function_call_output",
+      sequence_key: "default",
+    },
+    output: {
+      delivered_to_model: false,
+      browser_tool_output: { value: "completed locally" },
+      error: {
+        code: "realtime_data_channel_not_open",
+        message: "Realtime data channel is not open: closed",
+        data_channel_state: "closed",
+        peer_connection_state: null,
+        ice_connection_state: null,
+        signaling_state: null,
+        data_channel_buffered_amount: null,
+      },
+    },
+  });
+});
+
 test("hosted realtime session de-duplicates repeated realtime function call ids", async () => {
   const storage = createStorage();
   await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
@@ -884,7 +1280,7 @@ test("hosted realtime session de-duplicates repeated realtime function call ids"
           type: "function_call",
           name: "page.info",
           call_id: "same-call",
-          arguments: "{}",
+          arguments: JSON.stringify(fallbackArgs({}, { tool: "page.info" })),
         },
       ],
     },
@@ -893,6 +1289,7 @@ test("hosted realtime session de-duplicates repeated realtime function call ids"
   await manager.start({ textOnly: true });
   await manager.handleRealtimeEvent(event);
   await manager.handleRealtimeEvent(event);
+  await manager.waitForToolJobsIdle();
 
   assert.equal(count, 1);
   assert.equal(
@@ -1110,6 +1507,178 @@ test("hosted realtime session stores completed user transcripts from nested cont
   assert.match(storage.data.ACTIONS_JSON_AGENT_MEMORY_V1.events.at(-1).text, /What website am I on/);
 });
 
+test("hosted realtime session injects developer text prompts as text-only responses", async () => {
+  const storage = createStorage();
+  await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
+  const transportFactory = createFakeTransportFactory();
+  const observed = [];
+  const manager = new HostedRealtimeSessionManager({
+    storage,
+    transportFactory,
+    developerTextResponseTimeoutMs: 1000,
+    eventObserver(event) {
+      observed.push(event);
+    },
+  });
+
+  await manager.start({ textOnly: false });
+  const resultPromise = manager.sendUserMessage({
+    text: "Open the Trello card called Get Trello control to be demo ready.",
+  });
+  await nextTimer();
+
+  const sentEvents = transportFactory.transports[0].events;
+  assert.deepEqual(sentEvents.at(-2), {
+    type: "conversation.item.create",
+    item: {
+      type: "message",
+      role: "user",
+      content: [
+        {
+          type: "input_text",
+          text: "Open the Trello card called Get Trello control to be demo ready.",
+        },
+      ],
+    },
+  });
+  assert.deepEqual(sentEvents.at(-1), {
+    type: "response.create",
+    response: {
+      output_modalities: ["text"],
+      instructions: "Respond to this developer-injected test prompt with text only. Do not produce audio.",
+    },
+  });
+
+  await transportFactory.transports[0].onEvent({
+    type: "response.created",
+    response: { id: "resp_dev_text" },
+  });
+  await transportFactory.transports[0].onEvent({
+    type: "response.output_text.done",
+    response_id: "resp_dev_text",
+    text: "I found two matching card candidates.",
+  });
+  const result = await resultPromise;
+
+  assert.equal(result.ok, true);
+  assert.equal(result.request_id.startsWith("developer-text-"), true);
+  assert.equal(result.response_mode, "text_only_transcript");
+  assert.equal(result.response_text, "I found two matching card candidates.");
+  assert.equal(result.response_id, "resp_dev_text");
+  assert.equal(
+    observed.some(
+      (event) =>
+        event.type === "actions_json.transcript" &&
+        event.role === "user" &&
+        event.source === "mcp" &&
+        event.request_id === result.request_id &&
+        event.text === "Open the Trello card called Get Trello control to be demo ready.",
+    ),
+    true,
+  );
+  assert.equal(
+    observed.some(
+      (event) =>
+        event.type === "actions_json.transcript" &&
+        event.role === "assistant" &&
+        event.source === "mcp" &&
+        event.request_id === result.request_id &&
+        event.text === "I found two matching card candidates.",
+    ),
+    true,
+  );
+  const log = await getAgentSessionLog(storage);
+  assert.equal(
+    log.events.some((event) => event.type === "transcript" && event.role === "user" && /Open the Trello card/.test(event.text)),
+    true,
+  );
+  assert.equal(
+    log.events.some((event) => event.type === "transcript" && event.role === "assistant" && /two matching card candidates/.test(event.text)),
+    true,
+  );
+  assert.equal(
+    log.events.some((event) => event.type === "tool" && event.name === "runtime.agent.user_message" && event.ok === true),
+    true,
+  );
+});
+
+test("hosted realtime session resolves developer text prompts from response.done output content", async () => {
+  const storage = createStorage();
+  await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
+  const transportFactory = createFakeTransportFactory();
+  const observed = [];
+  const manager = new HostedRealtimeSessionManager({
+    storage,
+    transportFactory,
+    developerTextResponseTimeoutMs: 1000,
+    eventObserver(event) {
+      observed.push(event);
+    },
+  });
+
+  await manager.start({ textOnly: true });
+  const resultPromise = manager.sendUserMessage({
+    text: "Find the Trello demo card.",
+  });
+  await nextTimer();
+
+  await transportFactory.transports[0].onEvent({
+    type: "response.created",
+    response: { id: "resp_done_text" },
+  });
+  await transportFactory.transports[0].onEvent({
+    type: "response.done",
+    response: {
+      id: "resp_done_text",
+      output: [
+        {
+          type: "message",
+          content: [
+            {
+              type: "output_text",
+              text: "Found the demo card in In Progress.",
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  const result = await resultPromise;
+
+  assert.equal(result.ok, true);
+  assert.equal(result.response_mode, "text_only_transcript");
+  assert.equal(result.response_text, "Found the demo card in In Progress.");
+  assert.equal(result.response_id, "resp_done_text");
+  assert.equal(
+    observed.some(
+      (event) =>
+        event.type === "actions_json.transcript" &&
+        event.role === "user" &&
+        event.source === "mcp" &&
+        event.request_id === result.request_id &&
+        event.text === "Find the Trello demo card.",
+    ),
+    true,
+  );
+  assert.equal(
+    observed.some(
+      (event) =>
+        event.type === "actions_json.transcript" &&
+        event.role === "assistant" &&
+        event.source === "mcp" &&
+        event.request_id === result.request_id &&
+        event.text === "Found the demo card in In Progress.",
+    ),
+    true,
+  );
+  const log = await getAgentSessionLog(storage);
+  assert.equal(
+    log.events.some((event) => event.type === "transcript" && event.role === "assistant" && /Found the demo card/.test(event.text)),
+    true,
+  );
+});
+
 test("hosted realtime session sends screenshot tool results as image input without base64 in function output", async () => {
   const storage = createStorage();
   await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
@@ -1144,11 +1713,12 @@ test("hosted realtime session sends screenshot tool results as image input witho
           type: "function_call",
           name: "browser.screenshot",
           call_id: "call-screenshot",
-          arguments: "{\"purpose\":\"inspect current page\"}",
+          arguments: JSON.stringify(fallbackArgs({ purpose: "inspect current page" }, { tool: "browser.screenshot" })),
         },
       ],
     },
   });
+  await manager.waitForToolJobsIdle();
 
   const sentEvents = transportFactory.transports[0].events;
   const functionOutput = JSON.parse(sentEvents.at(-3).item.output);
@@ -1211,11 +1781,12 @@ test("hosted realtime session omits oversized screenshot image input", async () 
           type: "function_call",
           name: "browser.screenshot",
           call_id: "call-large-screenshot",
-          arguments: "{}",
+          arguments: JSON.stringify(fallbackArgs({}, { tool: "browser.screenshot" })),
         },
       ],
     },
   });
+  await manager.waitForToolJobsIdle();
 
   const sentEvents = transportFactory.transports[0].events;
   const toolEvents = sentEvents.slice(2);
@@ -1261,15 +1832,67 @@ test("hosted realtime session subscribes transport events to the function-call l
           type: "function_call",
           name: "page.info",
           call_id: "subscribed-call",
-          arguments: "{}",
+          arguments: JSON.stringify(fallbackArgs({}, { tool: "page.info" })),
         },
       ],
     },
   });
+  await manager.waitForToolJobsIdle();
 
   assert.equal(executed, true);
   assert.equal(
     transportFactory.transports[0].events.some((event) => event.type === "response.create"),
     true,
   );
+});
+
+test("hosted realtime session logs forensic state when the data channel closes unexpectedly", async () => {
+  const storage = createStorage();
+  await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
+  const transportFactory = createFakeTransportFactory();
+  const manager = new HostedRealtimeSessionManager({ storage, transportFactory });
+
+  await manager.start({ textOnly: true });
+  await manager.handleTransportStatusEvent({
+    type: "realtime.data_channel.close",
+    data_channel_state: "closed",
+    closed_by_client: false,
+    close_code: 1006,
+    close_reason: "abnormal closure",
+    close_was_clean: false,
+    peer_connection_state: "failed",
+    ice_connection_state: "disconnected",
+    ice_gathering_state: "complete",
+    signaling_state: "stable",
+    data_channel_buffered_amount: 4096,
+    error_message: null,
+    last_outbound_event_type: "response.create",
+    last_inbound_event_type: "response.done",
+  });
+
+  const log = await getAgentSessionLog(storage);
+  const closeEvent = log.events.find((event) => event.name === "realtime.data_channel.close");
+  assert.deepEqual(closeEvent.output, {
+    data_channel_state: "closed",
+    closed_by_client: false,
+    close_code: 1006,
+    close_reason: "abnormal closure",
+    close_was_clean: false,
+    peer_connection_state: "failed",
+    ice_connection_state: "disconnected",
+    ice_gathering_state: "complete",
+    signaling_state: "stable",
+    data_channel_buffered_amount: 4096,
+    error_message: null,
+    last_outbound_event_type: "response.create",
+    last_inbound_event_type: "response.done",
+    manager_status: "connected",
+    text_only: true,
+    input_muted: true,
+    output_muted: true,
+    pending_developer_text_requests: 0,
+    developer_text_responses_waiting: 0,
+    queued_or_running_tool_jobs: 0,
+    tool_sequence_queues: 0,
+  });
 });

@@ -4,12 +4,13 @@ const ACTIONS_SITE_PARAMETERS = {
   properties: {
     mode: {
       type: "string",
-      enum: ["list", "call"],
-      description: "Use list to inspect current-site actions; use call to execute one named current-site action.",
+      enum: ["list", "call", "state_read", "state_summary", "state_diff"],
+      description: "Use list to inspect current-site actions and state projections; use call to execute one named current-site action; use state_read/state_summary to read mapped logical state; use state_diff to compare with the last snapshot.",
     },
     action: {
       type: "string",
-      description: "Required when mode is call. The action name returned by actions.site list.",
+      description:
+        "Required when mode is call. The site action name returned by actions.site list. Pass it in THIS parameter — there is no 'name' parameter, and it does not go inside 'arguments'.",
     },
     arguments: {
       type: "object",
@@ -19,6 +20,19 @@ const ACTIONS_SITE_PARAMETERS = {
     target_runtime_id: {
       type: "string",
       description: "Optional runtime id when the agent needs to target a specific authorized browser runtime.",
+    },
+    projection_name: {
+      type: "string",
+      description: "Required for state_read and state_summary. The state projection name returned by actions.site list.",
+    },
+    summary_name: {
+      type: "string",
+      description: "Optional for state_summary. The projection summary name returned by actions.site list.",
+    },
+    max_bytes: {
+      type: "integer",
+      minimum: 1,
+      description: "Optional payload budget for state_read.",
     },
   },
   additionalProperties: false,
@@ -84,6 +98,7 @@ export function buildRealtimeToolCatalog({ dictionary, host = "extension", block
       description: [
         "List or call actions.json actions available for the current website.",
         "Do not assume site-specific actions are globally available; call mode=list for the active page first.",
+        "For mode=call, put the site action name in the 'action' parameter and its inputs in 'arguments', for example {\"mode\": \"call\", \"action\": \"site.do.thing\", \"arguments\": {}}.",
       ].join(" "),
       parameters: ACTIONS_SITE_PARAMETERS,
     }),

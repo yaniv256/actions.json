@@ -68,11 +68,14 @@ skills/
 operational guidance in the skill, longer references linked from
 `skills/references/`.
 
-`skills/references/getting-started.md` is a symlink to
-`docs/getting-started.md`. The public docs and the skill share one source for
-setup guidance.
+The real reference files live inside the skill:
+`skills/references/getting-started.md` and `skills/references/docs/*.md` are
+regular files, and the matching entries under `docs/` are symlinks pointing
+into them. The public docs and the skill share one source for setup guidance —
+the skill side is the source because skill installation copies files but
+silently skips symlinks, so the installable skill must carry the real content.
 
-`skills/references/docs/` exposes public docs as skill references. Agents should
+`skills/references/docs/` is the skill's view of the public docs. Agents should
 read those references only when the current task needs them.
 
 ## `runtime/`

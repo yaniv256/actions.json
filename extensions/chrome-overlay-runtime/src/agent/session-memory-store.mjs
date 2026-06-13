@@ -113,6 +113,37 @@ function sanitizeMemoryEvent(event = {}) {
     return realtimeEvent;
   }
 
+  if (event.type === "policy_exception") {
+    return {
+      ...base,
+      kind: normalizeText(event.kind, 40) || "generic",
+      tool: normalizeText(event.tool, 120) || "unknown",
+      call_id: normalizeText(event.call_id, 160),
+      intended_tool: normalizeText(event.intended_tool, 120),
+      actions_json_path: normalizeText(event.actions_json_path, 240),
+      reason: normalizeText(event.reason, 1000) || "No reason provided",
+    };
+  }
+
+  if (event.type === "workflow") {
+    const workflowEvent = {
+      ...base,
+      name: normalizeText(event.name, 160) || "unknown",
+      ok: event.ok !== false,
+      summary: normalizeText(event.summary),
+    };
+    if (event.input && typeof event.input === "object") {
+      workflowEvent.input = compactValue(event.input);
+    }
+    if (event.output && typeof event.output === "object") {
+      workflowEvent.output = compactValue(event.output);
+    }
+    if (Array.isArray(event.steps)) {
+      workflowEvent.steps = event.steps.slice(0, 50).map((step) => compactValue(step));
+    }
+    return workflowEvent;
+  }
+
   if (event.type === "error") {
     return {
       ...base,

@@ -320,33 +320,42 @@ not be marked portable for those adapters.
 An `actions.json` tool should reference primitive capabilities rather than
 embedding hidden executable code.
 
-Example:
+Example (the shipped workflow shape — steps invoke named primitives from the
+dictionary):
 
 ```json
 {
   "name": "results.collect_visible",
   "description": "Collect visible result titles and URLs.",
-  "requires": ["dom.observe.visible", "locator.element_info"],
-  "x_actions": {
-    "execution": {
-      "mode": "steps_first",
-      "steps": [
-        {
-          "id": "read_results",
-          "type": "extract",
-          "target": { "selectors": ["[data-result]", "article"] },
-          "fields": ["text", "href"]
+  "input_schema": { "type": "object", "additionalProperties": false },
+  "workflow": {
+    "version": 1,
+    "expression_language": "jsonata",
+    "steps": [
+      {
+        "id": "readResults",
+        "primitive": "browser.extract_elements",
+        "args": {
+          "item_selector": "[data-result], article",
+          "fields": [
+            { "name": "title", "selector": "a", "attributes": ["aria-label", "text"] },
+            { "name": "url", "selector": "a", "attribute": "href" }
+          ]
         }
-      ]
-    }
+      }
+    ],
+    "output": "{% steps.readResults.output %}"
   }
 }
 ```
 
-Implementation pending: this `steps_first` shape is the intended portable
-schema direction. The current bridge/runtime slice does not include a general
-step interpreter; stored actions should route to implemented primitive handlers
-or to the currently supported state-machine extraction path.
+This step interpreter is implemented and active: workflow steps call named
+primitives from the dictionary (not abstract step types), and the engine
+validates strictly — unknown workflow or step fields are rejected, and when the
+runtime supplies its primitive dictionary, a step naming an unknown primitive
+is rejected at validation time rather than failing mid-run. See the format and
+schema docs for the full step field set (`when`, `for_each`, `retry_until`,
+`settle_after`, `on_error`).
 
 If a tool requires privileged capability, say so:
 

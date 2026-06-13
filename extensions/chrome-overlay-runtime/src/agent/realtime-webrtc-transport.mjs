@@ -44,6 +44,25 @@ function waitForDataChannelOpen(dataChannel, timeoutMs = 10_000) {
   });
 }
 
+function statusEventForTransport({ type, transport, event = null, error = null }) {
+  const dataChannel = transport.dataChannel;
+  const peerConnection = transport.peerConnection;
+  return {
+    type,
+    data_channel_state: dataChannel?.readyState || (type === "realtime.data_channel.close" ? "closed" : "unknown"),
+    closed_by_client: transport.closed,
+    close_code: Number.isFinite(event?.code) ? event.code : null,
+    close_reason: typeof event?.reason === "string" ? event.reason : null,
+    close_was_clean: typeof event?.wasClean === "boolean" ? event.wasClean : null,
+    peer_connection_state: peerConnection?.connectionState || null,
+    ice_connection_state: peerConnection?.iceConnectionState || null,
+    ice_gathering_state: peerConnection?.iceGatheringState || null,
+    signaling_state: peerConnection?.signalingState || null,
+    data_channel_buffered_amount: Number.isFinite(dataChannel?.bufferedAmount) ? dataChannel.bufferedAmount : null,
+    error_message: error?.message || event?.error?.message || null,
+  };
+}
+
 export class RealtimeWebRtcTransportFactory {
   constructor({
     fetchImpl = globalThis.fetch?.bind(globalThis),
@@ -100,6 +119,7 @@ class RealtimeWebRtcTransport {
     this.localStream = null;
     this.remoteAudio = null;
     this.closed = false;
+    this.onStatusEvent = null;
   }
 
   async connect() {
@@ -111,6 +131,21 @@ class RealtimeWebRtcTransport {
     this.dataChannel.addEventListener?.("message", (event) => {
       if (!this.onEvent) return;
       this.onEvent(JSON.parse(event.data));
+    });
+    this.dataChannel.addEventListener?.("close", (event) => {
+      this.onStatusEvent?.(statusEventForTransport({
+        type: "realtime.data_channel.close",
+        transport: this,
+        event,
+      }));
+    });
+    this.dataChannel.addEventListener?.("error", (event) => {
+      this.onStatusEvent?.(statusEventForTransport({
+        type: "realtime.data_channel.error",
+        transport: this,
+        event,
+        error: event?.error,
+      }));
     });
 
     if (this.textOnly) {
@@ -191,6 +226,18 @@ class RealtimeWebRtcTransport {
     if (!this.dataChannel) {
       throw new Error("Realtime data channel is not connected");
     }
+    if (this.dataChannel.readyState && this.dataChannel.readyState !== "open") {
+      const error = new Error(`Realtime data channel is not open: ${this.dataChannel.readyState}`);
+      error.code = "realtime_data_channel_not_open";
+      error.dataChannelState = this.dataChannel.readyState;
+      error.peerConnectionState = this.peerConnection?.connectionState || null;
+      error.iceConnectionState = this.peerConnection?.iceConnectionState || null;
+      error.signalingState = this.peerConnection?.signalingState || null;
+      error.dataChannelBufferedAmount = Number.isFinite(this.dataChannel.bufferedAmount)
+        ? this.dataChannel.bufferedAmount
+        : null;
+      throw error;
+    }
     this.dataChannel.send(JSON.stringify(event));
   }
 
@@ -202,6 +249,12 @@ class RealtimeWebRtcTransport {
     const tracks = audioTracks?.length ? audioTracks : this.localStream.getTracks();
     for (const track of tracks) {
       track.enabled = !muted;
+    }
+  }
+
+  async setOutputMuted(muted) {
+    if (this.remoteAudio) {
+      this.remoteAudio.muted = Boolean(muted);
     }
   }
 

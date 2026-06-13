@@ -88,7 +88,7 @@ test("side panel saves a redacted key and controls a mocked hosted session", asy
   await expect(page.locator("#startAgent")).toBeDisabled();
 
   await openConfigTab(page);
-  await expect(page.locator("#bridgeUrl")).toHaveValue("ws://127.0.0.1:17345/extension");
+  await expect(page.locator("#bridgeUrl")).toHaveValue("ws://100.99.150.49:17345/extension");
   await expect(page.locator("#configPanel")).toHaveAttribute("aria-label", "Settings");
   await expect(page.locator("#voiceSelect")).toHaveValue("cedar");
   await page.locator("#voiceSelect").selectOption("cedar");
@@ -124,7 +124,7 @@ test("side panel saves a redacted key and controls a mocked hosted session", asy
   await page.locator("#startAgent").click();
   await expect(page.locator("#agentState")).toHaveText("Live");
   await expect(page.locator("#startAgent")).toHaveAttribute("data-voice-state", "live");
-  await expect(page.locator("#voiceLauncherLabel")).toHaveText("Voice live");
+  await expect(page.locator("#voiceLauncherLabel")).toHaveText("Session live");
   await expect(page.locator("#targetSummary")).toContainText("gpt-realtime-2 voice session connected");
   await expect(page.locator("#transcript")).toContainText("Voice session started");
   await expect(page.locator("#memoryStatus")).toHaveText("Memory: 3 events.");
@@ -281,6 +281,21 @@ test("side panel loads hosted realtime tools from the bridge before starting voi
         return {
           ok: true,
           status: 200,
+          async text() {
+            return JSON.stringify({
+              tools: [
+                {
+                  name: "browser.screenshot",
+                  description: "Capture the visible tab through the bridge.",
+                  input_schema: {
+                    type: "object",
+                    properties: { format: { type: "string", enum: ["png", "jpeg"] } },
+                    additionalProperties: false,
+                  },
+                },
+              ],
+            });
+          },
           async json() {
             return {
               tools: [
@@ -302,6 +317,18 @@ test("side panel loads hosted realtime tools from the bridge before starting voi
         return {
           ok: true,
           status: 200,
+          async text() {
+            return JSON.stringify({
+              ok: true,
+              call_id: "bridge-screenshot-call",
+              output: {
+                ok: true,
+                primitive: "browser.screenshot",
+                data_url: "data:image/png;base64,abc123",
+                mime_type: "image/png",
+              },
+            });
+          },
           async json() {
             return {
               ok: true,
@@ -370,19 +397,19 @@ test("side panel loads hosted realtime tools from the bridge before starting voi
       (event) => event.type === "session.update",
     ),
   );
-  expect(sessionUpdate.session.tools).toEqual([
-    {
-      type: "function",
-      name: "browser_screenshot",
-      description: "Capture the visible tab through the bridge.",
-      parameters: {
-        type: "object",
-        properties: { format: { type: "string", enum: ["png", "jpeg"] } },
-        additionalProperties: false,
-      },
-    },
-  ]);
-  await expect(page.locator("#transcript")).toContainText("Bridge tools loaded: browser.screenshot.");
+  expect(sessionUpdate.session.tools).toHaveLength(1);
+  expect(sessionUpdate.session.tools[0]).toMatchObject({
+    type: "function",
+    name: "browser_screenshot",
+  });
+  expect(sessionUpdate.session.tools[0].description).toContain(
+    "Capture the visible tab through the bridge.",
+  );
+  expect(sessionUpdate.session.tools[0].parameters.properties.format).toEqual({
+    type: "string",
+    enum: ["png", "jpeg"],
+  });
+  await expect(page.locator("#transcript")).toContainText("Bridge tools loaded: 1.");
 
   await page.evaluate(async () => {
     const transport = window.__ACTIONS_JSON_FAKE_REALTIME_FACTORY.transports[0];
@@ -394,14 +421,27 @@ test("side panel loads hosted realtime tools from the bridge before starting voi
             type: "function_call",
             name: "browser.screenshot",
             call_id: "call-screenshot",
-            arguments: JSON.stringify({ format: "png" }),
+            arguments: JSON.stringify({
+              format: "png",
+              policy_exception_report: {
+                kind: "generic",
+                intended_tool: "browser.screenshot",
+                actions_json_path: "none",
+                reason: "Characterization test exercises the direct bridge tool path.",
+              },
+            }),
           },
         ],
       },
     });
   });
-  await expect(page.locator("#transcript")).toContainText("Tool: browser.screenshot started.");
-  await expect(page.locator("#transcript")).toContainText("Tool: browser.screenshot completed.");
+  await expect
+    .poll(() => page.evaluate(() =>
+      window.__actionsJsonBridgeFetches
+        .filter((call) => call.url === "http://127.0.0.1:17345/mcp/tools/call").length,
+    ))
+    .toBeGreaterThan(0);
+  await expect(page.locator("#transcript")).not.toContainText("Tool:");
 
   const bridgeCall = await page.evaluate(() =>
     window.__actionsJsonBridgeFetches
@@ -553,7 +593,7 @@ test("side panel describes local tool fallback without failure wording when brid
   await page.goto("https://actions-json.test/sidepanel.html?tab=agent");
   await page.locator("#startAgent").click();
 
-  await expect(page.locator("#transcript")).toContainText("Using extension-local tools");
+  await expect(page.locator("#transcript")).toContainText("extension-local tools");
   await expect(page.locator("#transcript")).not.toContainText("Bridge tools unavailable");
   await expect(page.locator("#transcript")).not.toContainText("Failed to fetch");
 });
@@ -590,6 +630,15 @@ test("side panel suppresses browser.run_javascript from hosted tools when the cu
         return {
           ok: true,
           status: 200,
+          async text() {
+            return JSON.stringify({
+              tools: [
+                { name: "browser.screenshot", description: "Screenshot", input_schema: { type: "object" } },
+                { name: "browser.run_javascript", description: "Page eval", input_schema: { type: "object" } },
+                { name: "debug.run_javascript", description: "Debugger eval", input_schema: { type: "object" } },
+              ],
+            });
+          },
           async json() {
             return {
               tools: [
@@ -657,7 +706,7 @@ test("side panel suppresses browser.run_javascript from hosted tools when the cu
   const toolNames = sessionUpdate.session.tools.map((tool) => tool.name);
   expect(toolNames).toEqual(["browser_screenshot", "debug_run_javascript"]);
   await expect(page.locator("#transcript")).toContainText(
-    "Bridge tools loaded: browser.screenshot, debug.run_javascript.",
+    "Bridge tools loaded: 2.",
   );
 });
 
@@ -675,6 +724,17 @@ test("side panel starts production voice through the durable extension session h
         return {
           ok: true,
           status: 200,
+          async text() {
+            return JSON.stringify({
+              tools: [
+                {
+                  name: "actions.site",
+                  description: "List or call current-site actions.",
+                  input_schema: { type: "object", additionalProperties: false },
+                },
+              ],
+            });
+          },
           async json() {
             return {
               tools: [
@@ -820,7 +880,7 @@ test("side panel refreshes durable session state on load so stop stays available
           if (message.type === "actions-json:agent-session-state") {
             return {
               ok: true,
-              state: { status: "connected", model: "gpt-realtime-2", error: null, inputMuted: false },
+              state: { status: "connected", model: "gpt-realtime-2", error: null, inputMuted: true, outputMuted: true },
             };
           }
           return { ok: true };
@@ -863,8 +923,92 @@ test("side panel refreshes durable session state on load so stop stays available
   await expect(page.locator("#agentState")).toHaveText("Live");
   await expect(page.locator("#startAgent")).toBeDisabled();
   await expect(page.locator("#stopAgent")).toBeEnabled();
-  await expect(page.locator("#voiceLauncherLabel")).toHaveText("Voice live");
+  await expect(page.locator("#voiceLauncherLabel")).toHaveText("Session live");
+  await expect(page.locator("#muteMic")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#muteSpeaker")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#muteMic")).toHaveClass(/is-muted/);
+  await expect(page.locator("#muteSpeaker")).toHaveClass(/is-muted/);
+  await expect(page.locator("#muteMic")).toHaveCSS("color", "rgb(182, 64, 64)");
+  await expect(page.locator("#muteSpeaker")).toHaveCSS("color", "rgb(182, 64, 64)");
   await expect(page.locator("#targetSummary")).toContainText("gpt-realtime-2 voice session connected");
+});
+
+test("side panel sends typed agent prompts through the transcript composer", async ({ page }) => {
+  await routeExtensionAssets(page);
+  await page.addInitScript(() => {
+    window.__ACTIONS_JSON_USE_FAKE_REALTIME = true;
+    window.__ACTIONS_JSON_EXPOSE_FAKE_REALTIME_FACTORY = true;
+    window.__actionsJsonStorage = {
+      ACTIONS_JSON_OPENAI_API_KEY: "sk-proj-sidepanel-secret-value-123456",
+    };
+    window.chrome = {
+      storage: {
+        local: {
+          async get(key) {
+            if (typeof key === "string") {
+              return { [key]: window.__actionsJsonStorage[key] };
+            }
+            return { ...window.__actionsJsonStorage };
+          },
+          async set(values) {
+            Object.assign(window.__actionsJsonStorage, values);
+          },
+          async remove(key) {
+            delete window.__actionsJsonStorage[key];
+          },
+        },
+        onChanged: {
+          addListener() {},
+        },
+      },
+      tabs: {
+        async query() {
+          return [];
+        },
+        async sendMessage() {
+          return { ok: true };
+        },
+      },
+    };
+  });
+
+  await page.goto("https://actions-json.test/sidepanel.html?tab=agent");
+  await page.locator("#startAgent").click();
+  await expect(page.locator("#agentState")).toHaveText("Live");
+
+  await page.locator("#agentTextInput").fill("Find the Trello demo card");
+  await page.locator("#sendAgentText").click();
+  await expect(page.locator("#transcript")).toContainText("User: Find the Trello demo card");
+
+  await page.evaluate(async () => {
+    const transport = window.__ACTIONS_JSON_FAKE_REALTIME_FACTORY.transports[0];
+    const responseCreate = transport.events.filter((event) => event.type === "response.create").at(-1);
+    await transport.onEvent({
+      type: "response.created",
+      response: { id: "resp_text_input" },
+    });
+    await transport.onEvent({
+      type: "response.output_text.done",
+      response_id: "resp_text_input",
+      text: "Found the Trello demo card in In Progress.",
+    });
+    window.__lastTextResponseCreate = responseCreate;
+  });
+
+  await expect(page.locator("#transcript")).toContainText("Agent: Found the Trello demo card in In Progress.");
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        Array.from(document.querySelectorAll("#transcript > div"))
+          .map((line) => line.textContent)
+          .filter((text) => text === "Agent: Found the Trello demo card in In Progress.").length
+      )
+    )
+    .toBe(1);
+  await expect(page.locator("#agentTextInput")).toHaveValue("");
+  await expect
+    .poll(() => page.evaluate(() => window.__lastTextResponseCreate?.response?.output_modalities))
+    .toEqual(["text"]);
 });
 
 test("side panel streams assistant deltas into one live transcript line", async ({ page }) => {

@@ -19,6 +19,15 @@ fn fixture_path(path: &str) -> PathBuf {
         .join(path)
 }
 
+fn policy_exception_report(tool: &str, reason: &str) -> Value {
+    json!({
+        "kind": if tool.starts_with("debug.") { "debugger" } else { "generic" },
+        "intended_tool": tool,
+        "actions_json_path": "none",
+        "reason": reason
+    })
+}
+
 async fn list_tool_names(app: axum::Router) -> Vec<String> {
     let response = app
         .oneshot(
@@ -356,7 +365,12 @@ async fn url_routing_failure_reports_candidate_rejection_trace() {
                     json!({
                         "name": "browser.screenshot",
                         "target_url_contains": "https://genspec.dev/",
-                        "arguments": {},
+                        "arguments": {
+                            "policy_exception_report": policy_exception_report(
+                                "browser.screenshot",
+                                "Route rejection test needs to reach runtime selection for a direct screenshot primitive."
+                            )
+                        },
                         "timeout_ms": 1
                     })
                     .to_string(),
@@ -626,6 +640,103 @@ async fn storage_sync_reloads_map_tools_before_dispatch() {
 }
 
 #[tokio::test]
+async fn runtime_ready_proactively_imports_storage_bundle() {
+    let storage_root = tempfile::tempdir().unwrap();
+    let site_dir = storage_root
+        .path()
+        .join("scopes/private/sites/trello.com/board");
+    std::fs::create_dir_all(&site_dir).unwrap();
+    std::fs::write(
+        site_dir.join("actions.json"),
+        json!({
+            "protocol": "actions.json",
+            "tools": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(site_dir.join("SKILL.md"), "# Trello skill\n").unwrap();
+
+    let app = app_from_manifest_map_paths_and_storage_root(
+        json!({
+            "tools": [
+                {
+                    "name": "storage.import_bundle",
+                    "description": "Import storage",
+                    "input_schema": { "type": "object" }
+                }
+            ]
+        }),
+        Vec::new(),
+        Some(storage_root.path().to_path_buf()),
+    )
+    .await
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, server_app).await.unwrap();
+    });
+    let (mut socket, _) = connect_async(format!("ws://{address}/extension"))
+        .await
+        .unwrap();
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "runtime_ready",
+                "runtime_id": "runtime-trello",
+                "runtime_key": "chrome-tab:1",
+                "url": "https://trello.com/b/example/actionsjson",
+                "extension_version": "0.1.97"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let hydration_call = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let Some(message) = socket.next().await else {
+                panic!("extension socket closed before hydration call");
+            };
+            let message = message.unwrap();
+            if let Message::Text(text) = message {
+                let payload: Value = serde_json::from_str(&text).unwrap();
+                if payload["type"].as_str() == Some("action_call")
+                    && payload["name"].as_str() == Some("storage.import_bundle")
+                {
+                    return payload;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        hydration_call["runtime_id"].as_str(),
+        Some("runtime-trello")
+    );
+    assert_eq!(
+        hydration_call["arguments"]["bundle"]["protocol"].as_str(),
+        Some("actions.json.storage.bundle")
+    );
+    assert_eq!(
+        hydration_call["arguments"]["bundle"]["x_actions_json_bridge_hydration"].as_bool(),
+        Some(true)
+    );
+    assert!(hydration_call["arguments"]["bundle"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["path"].as_str()
+            == Some("scopes/private/sites/trello.com/board/SKILL.md")));
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn storage_root_discovers_site_maps_without_explicit_map_flags() {
     let storage_root = tempfile::tempdir().unwrap();
     let amazon_map = storage_root
@@ -834,7 +945,9 @@ async fn actions_site_call_dispatches_site_action_handler_from_base_manifest() {
         loop {
             let message = socket.next().await.unwrap().unwrap();
             let item: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
-            if item["type"].as_str() == Some("action_call") {
+            if item["type"].as_str() == Some("action_call")
+                && item["name"].as_str() == Some("dom.list_sections")
+            {
                 break item;
             }
         }
@@ -931,6 +1044,160 @@ async fn actions_site_call_returns_static_storage_output_without_runtime() {
     assert_eq!(payload["ok"], true);
     assert_eq!(payload["output"]["ok"], true);
     assert_eq!(payload["output"]["pages"][0]["path"], "/forge");
+}
+
+#[tokio::test]
+async fn actions_site_list_includes_storage_files_and_skill_front_matter_from_storage_root() {
+    let storage_root = tempfile::tempdir().unwrap();
+    let site_dir = storage_root
+        .path()
+        .join("scopes/shared/youtube/sites/youtube.com/watch");
+    std::fs::create_dir_all(&site_dir).unwrap();
+    std::fs::write(
+        site_dir.join("SKILL.md"),
+        "---\nname: YouTube Tutorial Extraction\ndescription: Capture transcript-backed screenshots while handling ads.\n---\n# Skill\n",
+    )
+    .unwrap();
+    std::fs::write(
+        site_dir.join("actions.json"),
+        json!({
+            "protocol": "actions.json",
+            "x_actions": {
+                "files": [
+                    {
+                        "id": "youtube-tutorial-skill",
+                        "path": "SKILL.md",
+                        "kind": "skill",
+                        "title": "YouTube tutorial extraction skill",
+                        "description": "Read before extracting YouTube tutorial screenshots.",
+                        "read_when": "Before extracting key moments, screenshots, or tutorials from a YouTube video."
+                    }
+                ]
+            },
+            "tools": [
+                {
+                    "name": "youtube.video.info",
+                    "description": "Return video context.",
+                    "input_schema": { "type": "object" },
+                    "x_actions": { "static_output": { "ok": true } }
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let app = app_from_manifest_map_paths_and_storage_root(
+        json!({ "tools": [] }),
+        Vec::new(),
+        Some(storage_root.path().to_path_buf()),
+    )
+    .await
+    .unwrap();
+
+    let (status, payload) = call_tool(
+        app,
+        json!({
+            "name": "actions.site",
+            "arguments": {
+                "mode": "list",
+                "target_url_contains": "youtube.com"
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["ok"], true);
+    assert_eq!(
+        payload["output"]["files"][0]["id"],
+        "youtube-tutorial-skill"
+    );
+    assert_eq!(
+        payload["output"]["files"][0]["path"],
+        "scopes/shared/youtube/sites/youtube.com/watch/SKILL.md"
+    );
+    assert_eq!(
+        payload["output"]["skills"][0]["front_matter"]["name"],
+        "YouTube Tutorial Extraction"
+    );
+    assert_eq!(
+        payload["output"]["skills"][0]["read_when"],
+        "Before extracting key moments, screenshots, or tutorials from a YouTube video."
+    );
+}
+
+#[tokio::test]
+async fn storage_read_file_reads_declared_markdown_from_storage_root() {
+    let storage_root = tempfile::tempdir().unwrap();
+    let site_dir = storage_root
+        .path()
+        .join("scopes/private/trello/sites/trello.com/board");
+    std::fs::create_dir_all(&site_dir).unwrap();
+    std::fs::write(
+        site_dir.join("SKILL.md"),
+        "---\nname: Trello Board Operations\ndescription: Human-like board editing with cards, labels, dates, checklists, and movement.\n---\n# Trello Skill\nUse the UI like a human.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        site_dir.join("actions.json"),
+        json!({
+            "protocol": "actions.json",
+            "x_actions": {
+                "files": [
+                    {
+                        "id": "trello-board-skill",
+                        "path": "SKILL.md",
+                        "kind": "skill",
+                        "description": "Read before operating Trello boards."
+                    }
+                ]
+            },
+            "tools": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let app = app_from_manifest_map_paths_and_storage_root(
+        json!({ "tools": [] }),
+        Vec::new(),
+        Some(storage_root.path().to_path_buf()),
+    )
+    .await
+    .unwrap();
+
+    let (status, payload) = call_tool(
+        app,
+        json!({
+            "name": "storage.read_file",
+            "target_url_contains": "trello.com",
+            "arguments": {
+                "id": "trello-board-skill",
+                "policy_exception_report": policy_exception_report(
+                    "storage.read_file",
+                    "Storage file read test is directly exercising the storage primitive after site file discovery."
+                )
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["output"]["ok"], true);
+    assert_eq!(payload["output"]["primitive"], "storage.read_file");
+    assert_eq!(payload["output"]["adapter"], "bridge");
+    assert_eq!(payload["output"]["value"]["id"], "trello-board-skill");
+    assert_eq!(payload["output"]["value"]["mime_type"], "text/markdown");
+    assert_eq!(
+        payload["output"]["value"]["front_matter"]["name"],
+        "Trello Board Operations"
+    );
+    assert!(payload["output"]["value"]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Use the UI like a human."));
 }
 
 #[tokio::test]
@@ -2086,7 +2353,12 @@ async fn browser_screenshot_dispatches_to_runtime_without_open_browser_use_inter
                 .body(Body::from(
                     json!({
                         "name": "browser.screenshot",
-                        "arguments": {},
+                        "arguments": {
+                            "policy_exception_report": policy_exception_report(
+                                "browser.screenshot",
+                                "Dispatch failure test needs to reach runtime send for a direct screenshot primitive."
+                            )
+                        },
                         "target_runtime_id": "runtime-a",
                         "timeout_ms": 1
                     })
@@ -2105,4 +2377,721 @@ async fn browser_screenshot_dispatches_to_runtime_without_open_browser_use_inter
         Some("failed to send action to extension runtime")
     );
     assert_eq!(payload["runtime_id"].as_str(), Some("runtime-a"));
+}
+
+fn trello_state_projection_map() -> Value {
+    json!({
+        "protocol": "actions.json",
+        "tools": [],
+        "state_projections": [
+            {
+                "name": "trello.board",
+                "description": "Logical Trello board state: lists, cards, labels.",
+                "snapshot": {
+                    "version": 1,
+                    "source": "dom",
+                    "extract": [],
+                    "projection": { "language": "jsonata", "expression": "{% records %}" }
+                },
+                "summaries": [
+                    {
+                        "name": "agent_context",
+                        "description": "Compact board summary.",
+                        "max_bytes": 12000
+                    }
+                ]
+            }
+        ]
+    })
+}
+
+fn write_storage_map(root: &std::path::Path, relative: &str, map: &Value) {
+    let path = root.join(relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, map.to_string()).unwrap();
+}
+
+async fn state_projection_app(storage_root: &std::path::Path) -> axum::Router {
+    app_from_manifest_map_paths_and_storage_root(
+        json!({ "tools": [] }),
+        Vec::new(),
+        Some(storage_root.to_path_buf()),
+    )
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn actions_site_list_includes_state_projections() {
+    let storage_root = tempfile::tempdir().unwrap();
+    write_storage_map(
+        storage_root.path(),
+        "scopes/private/sites/trello.com/board/actions.json",
+        &trello_state_projection_map(),
+    );
+    let app = state_projection_app(storage_root.path()).await;
+
+    let (status, payload) = call_tool(
+        app,
+        json!({
+            "name": "actions.site",
+            "arguments": { "mode": "list", "target_url_contains": "trello.com" }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let projections = payload["output"]["state_projections"].as_array().unwrap();
+    assert_eq!(projections.len(), 1);
+    assert_eq!(projections[0]["name"].as_str(), Some("trello.board"));
+    assert_eq!(
+        projections[0]["summaries"][0]["name"].as_str(),
+        Some("agent_context")
+    );
+    assert_eq!(
+        projections[0]["map_path"].as_str(),
+        Some("scopes/private/sites/trello.com/board/actions.json")
+    );
+    assert!(projections[0].get("snapshot").is_none());
+}
+
+#[tokio::test]
+async fn actions_site_state_read_unknown_projection_fails_without_dispatch() {
+    let storage_root = tempfile::tempdir().unwrap();
+    write_storage_map(
+        storage_root.path(),
+        "scopes/private/sites/trello.com/board/actions.json",
+        &trello_state_projection_map(),
+    );
+    let app = state_projection_app(storage_root.path()).await;
+
+    let (status, payload) = call_tool(
+        app,
+        json!({
+            "name": "actions.site",
+            "arguments": {
+                "mode": "state_read",
+                "projection_name": "linear.workspace",
+                "target_url_contains": "trello.com"
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        payload["error"]["code"].as_str(),
+        Some("state_projection_not_found")
+    );
+    assert_eq!(
+        payload["error"]["evidence"]["known_projections"][0].as_str(),
+        Some("trello.board")
+    );
+}
+
+#[tokio::test]
+async fn actions_site_state_read_rejects_ambiguous_projection_names() {
+    let storage_root = tempfile::tempdir().unwrap();
+    write_storage_map(
+        storage_root.path(),
+        "scopes/private/sites/trello.com/board/actions.json",
+        &trello_state_projection_map(),
+    );
+    write_storage_map(
+        storage_root.path(),
+        "scopes/private/sites/trello.com/workspace/actions.json",
+        &trello_state_projection_map(),
+    );
+    let app = state_projection_app(storage_root.path()).await;
+
+    let (status, payload) = call_tool(
+        app,
+        json!({
+            "name": "actions.site",
+            "arguments": {
+                "mode": "state_read",
+                "projection_name": "trello.board",
+                "target_url_contains": "trello.com"
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        payload["error"]["code"].as_str(),
+        Some("state_projection_ambiguous")
+    );
+    assert_eq!(
+        payload["error"]["evidence"]["map_paths"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn actions_site_state_read_round_trips_through_runtime() {
+    let storage_root = tempfile::tempdir().unwrap();
+    write_storage_map(
+        storage_root.path(),
+        "scopes/private/sites/trello.com/board/actions.json",
+        &trello_state_projection_map(),
+    );
+    let app = state_projection_app(storage_root.path()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, server_app).await.unwrap();
+    });
+    let (mut socket, _) = connect_async(format!("ws://{address}/extension"))
+        .await
+        .unwrap();
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "runtime_ready",
+                "runtime_id": "runtime-trello",
+                "runtime_key": "chrome-tab:7",
+                "url": "https://trello.com/b/example/board",
+                "extension_version": "0.1.105"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    for _ in 0..20 {
+        if runtime_count(app.clone()).await == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(runtime_count(app.clone()).await, 1);
+
+    let call_app = app.clone();
+    let call_task = tokio::spawn(async move {
+        call_tool(
+            call_app,
+            json!({
+                "name": "actions.site",
+                "target_runtime_id": "runtime-trello",
+                "arguments": {
+                    "mode": "state_read",
+                    "projection_name": "trello.board",
+                    "target_url_contains": "trello.com"
+                },
+                "timeout_ms": 1000
+            }),
+        )
+        .await
+    });
+
+    let item = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            let item: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            if item["type"].as_str() == Some("state_projection_call") {
+                break item;
+            }
+        }
+    })
+    .await
+    .expect("runtime did not receive a state projection call");
+    assert_eq!(item["mode"].as_str(), Some("state_read"));
+    assert_eq!(item["projection_name"].as_str(), Some("trello.board"));
+    assert_eq!(
+        item["map_path"].as_str(),
+        Some("scopes/private/sites/trello.com/board/actions.json")
+    );
+    assert_eq!(item["projection"]["name"].as_str(), Some("trello.board"));
+    assert_eq!(
+        item["projection"]["snapshot"]["version"].as_u64(),
+        Some(1)
+    );
+
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "action_call_output",
+                "call_id": item["call_id"].as_str().unwrap(),
+                "runtime_id": "runtime-trello",
+                "output": {
+                    "ok": true,
+                    "projection": "trello.board",
+                    "state": { "board": { "lists": [] } },
+                    "state_hash": "sha256:test",
+                    "diagnostics": { "schema_valid": true }
+                }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let (status, payload) = call_task.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["ok"], true);
+    assert_eq!(
+        payload["output"]["state"]["board"]["lists"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(payload["output"]["state_hash"].as_str(), Some("sha256:test"));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn actions_site_state_read_passes_runtime_errors_through() {
+    let storage_root = tempfile::tempdir().unwrap();
+    write_storage_map(
+        storage_root.path(),
+        "scopes/private/sites/trello.com/board/actions.json",
+        &trello_state_projection_map(),
+    );
+    let app = state_projection_app(storage_root.path()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, server_app).await.unwrap();
+    });
+    let (mut socket, _) = connect_async(format!("ws://{address}/extension"))
+        .await
+        .unwrap();
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "runtime_ready",
+                "runtime_id": "runtime-trello",
+                "runtime_key": "chrome-tab:7",
+                "url": "https://trello.com/b/example/board",
+                "extension_version": "0.1.105"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    for _ in 0..20 {
+        if runtime_count(app.clone()).await == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    let call_app = app.clone();
+    let call_task = tokio::spawn(async move {
+        call_tool(
+            call_app,
+            json!({
+                "name": "actions.site",
+                "target_runtime_id": "runtime-trello",
+                "arguments": {
+                    "mode": "state_read",
+                    "projection_name": "trello.board",
+                    "target_url_contains": "trello.com"
+                },
+                "timeout_ms": 1000
+            }),
+        )
+        .await
+    });
+
+    let item = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            let item: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            if item["type"].as_str() == Some("state_projection_call") {
+                break item;
+            }
+        }
+    })
+    .await
+    .expect("runtime did not receive a state projection call");
+
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "action_error",
+                "call_id": item["call_id"].as_str().unwrap(),
+                "runtime_id": "runtime-trello",
+                "error": {
+                    "code": "state_payload_too_large",
+                    "message": "Full state exceeded the configured budget.",
+                    "recoverable": true,
+                    "available_summaries": ["agent_context"]
+                }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let (status, payload) = call_task.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["ok"], false);
+    assert_eq!(
+        payload["error"]["code"].as_str(),
+        Some("state_payload_too_large")
+    );
+    assert_eq!(
+        payload["error"]["available_summaries"][0].as_str(),
+        Some("agent_context")
+    );
+
+    server.abort();
+}
+
+fn trello_workflow_map() -> Value {
+    json!({
+        "protocol": "actions.json",
+        "tools": [{
+            "name": "trello.board.add_card.open_composer",
+            "description": "Open the add-card composer for a named list.",
+            "input_schema": {
+                "type": "object",
+                "required": ["list_name"],
+                "properties": { "list_name": { "type": "string" } },
+                "additionalProperties": false
+            },
+            "workflow": {
+                "version": 1,
+                "expression_language": "jsonata",
+                "steps": []
+            }
+        }]
+    })
+}
+
+#[tokio::test]
+async fn actions_site_workflow_call_round_trips_through_runtime() {
+    let storage_root = tempfile::tempdir().unwrap();
+    write_storage_map(
+        storage_root.path(),
+        "scopes/private/sites/trello.com/board/actions.json",
+        &trello_workflow_map(),
+    );
+    let app = state_projection_app(storage_root.path()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, server_app).await.unwrap();
+    });
+    let (mut socket, _) = connect_async(format!("ws://{address}/extension"))
+        .await
+        .unwrap();
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "runtime_ready",
+                "runtime_id": "runtime-trello",
+                "runtime_key": "chrome-tab:7",
+                "url": "https://trello.com/b/example/board",
+                "extension_version": "0.1.107"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    for _ in 0..20 {
+        if runtime_count(app.clone()).await == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(runtime_count(app.clone()).await, 1);
+
+    let call_app = app.clone();
+    let call_task = tokio::spawn(async move {
+        call_tool(
+            call_app,
+            json!({
+                "name": "actions.site",
+                "target_runtime_id": "runtime-trello",
+                "arguments": {
+                    "mode": "call",
+                    "action": "trello.board.add_card.open_composer",
+                    "arguments": { "list_name": "Backlog" },
+                    "target_url_contains": "trello.com"
+                },
+                "timeout_ms": 1000
+            }),
+        )
+        .await
+    });
+
+    let item = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            let item: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            if item["type"].as_str() == Some("site_action_call") {
+                break item;
+            }
+        }
+    })
+    .await
+    .expect("runtime did not receive a site action call");
+    assert_eq!(
+        item["action"].as_str(),
+        Some("trello.board.add_card.open_composer")
+    );
+    assert_eq!(item["arguments"]["list_name"].as_str(), Some("Backlog"));
+    assert_eq!(
+        item["map_path"].as_str(),
+        Some("scopes/private/sites/trello.com/board/actions.json")
+    );
+    assert_eq!(
+        item["map"]["tools"][0]["workflow"]["version"].as_u64(),
+        Some(1)
+    );
+
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "action_call_output",
+                "call_id": item["call_id"].as_str().unwrap(),
+                "runtime_id": "runtime-trello",
+                "output": {
+                    "ok": true,
+                    "opened": "Backlog",
+                    "steps": []
+                }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let (status, payload) = call_task.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["ok"], true);
+    assert_eq!(payload["output"]["opened"].as_str(), Some("Backlog"));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn actions_site_workflow_call_rejects_ambiguous_maps() {
+    let storage_root = tempfile::tempdir().unwrap();
+    write_storage_map(
+        storage_root.path(),
+        "scopes/private/sites/trello.com/board/actions.json",
+        &trello_workflow_map(),
+    );
+    write_storage_map(
+        storage_root.path(),
+        "scopes/private/sites/trello.com/calendar/actions.json",
+        &trello_workflow_map(),
+    );
+    let app = state_projection_app(storage_root.path()).await;
+
+    let (status, payload) = call_tool(
+        app,
+        json!({
+            "name": "actions.site",
+            "arguments": {
+                "mode": "call",
+                "action": "trello.board.add_card.open_composer",
+                "arguments": { "list_name": "Backlog" },
+                "target_url_contains": "trello.com"
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        payload["error"]["code"].as_str(),
+        Some("site_action_ambiguous")
+    );
+    let map_paths = payload["error"]["evidence"]["map_paths"].as_array().unwrap();
+    assert_eq!(map_paths.len(), 2);
+}
+
+#[tokio::test]
+async fn actions_site_workflow_call_without_storage_map_falls_back_to_action_call() {
+    let map_dir = tempfile::tempdir().unwrap();
+    let map_path = map_dir.path().join("trello-board.actions.json");
+    std::fs::write(&map_path, trello_workflow_map().to_string()).unwrap();
+    let app = app_from_manifest_and_map_paths(json!({ "tools": [] }), vec![map_path])
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, server_app).await.unwrap();
+    });
+    let (mut socket, _) = connect_async(format!("ws://{address}/extension"))
+        .await
+        .unwrap();
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "runtime_ready",
+                "runtime_id": "runtime-trello",
+                "runtime_key": "chrome-tab:7",
+                "url": "https://trello.com/b/example/board",
+                "extension_version": "0.1.107"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    for _ in 0..20 {
+        if runtime_count(app.clone()).await == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    let call_app = app.clone();
+    let call_task = tokio::spawn(async move {
+        call_tool(
+            call_app,
+            json!({
+                "name": "actions.site",
+                "target_runtime_id": "runtime-trello",
+                "arguments": {
+                    "mode": "call",
+                    "action": "trello.board.add_card.open_composer",
+                    "arguments": { "list_name": "Backlog" }
+                },
+                "timeout_ms": 1000
+            }),
+        )
+        .await
+    });
+
+    let item = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            let item: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            if item["type"].as_str() == Some("action_call") {
+                break item;
+            }
+        }
+    })
+    .await
+    .expect("runtime did not receive the legacy action call fallback");
+    assert_eq!(
+        item["name"].as_str(),
+        Some("trello.board.add_card.open_composer")
+    );
+
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "action_call_output",
+                "call_id": item["call_id"].as_str().unwrap(),
+                "runtime_id": "runtime-trello",
+                "output": { "ok": true }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let (status, payload) = call_task.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["ok"], true);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn actions_site_workflow_call_passes_runtime_errors_through() {
+    let storage_root = tempfile::tempdir().unwrap();
+    write_storage_map(
+        storage_root.path(),
+        "scopes/private/sites/trello.com/board/actions.json",
+        &trello_workflow_map(),
+    );
+    let app = state_projection_app(storage_root.path()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, server_app).await.unwrap();
+    });
+    let (mut socket, _) = connect_async(format!("ws://{address}/extension"))
+        .await
+        .unwrap();
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "runtime_ready",
+                "runtime_id": "runtime-trello",
+                "runtime_key": "chrome-tab:7",
+                "url": "https://trello.com/b/example/board",
+                "extension_version": "0.1.107"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    for _ in 0..20 {
+        if runtime_count(app.clone()).await == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    let call_app = app.clone();
+    let call_task = tokio::spawn(async move {
+        call_tool(
+            call_app,
+            json!({
+                "name": "actions.site",
+                "target_runtime_id": "runtime-trello",
+                "arguments": {
+                    "mode": "call",
+                    "action": "trello.board.add_card.open_composer",
+                    "arguments": { "list_name": "Backlog" },
+                    "target_url_contains": "trello.com"
+                },
+                "timeout_ms": 1000
+            }),
+        )
+        .await
+    });
+
+    let item = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            let item: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            if item["type"].as_str() == Some("site_action_call") {
+                break item;
+            }
+        }
+    })
+    .await
+    .expect("runtime did not receive a site action call");
+
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "action_error",
+                "call_id": item["call_id"].as_str().unwrap(),
+                "runtime_id": "runtime-trello",
+                "error": {
+                    "code": "workflow_step_failed",
+                    "message": "Step findList failed: list not visible.",
+                    "recoverable": true
+                }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let (status, payload) = call_task.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["ok"], false);
+    assert_eq!(
+        payload["error"]["code"].as_str(),
+        Some("workflow_step_failed")
+    );
+
+    server.abort();
 }

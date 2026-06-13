@@ -5,101 +5,180 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>actions.json Overlay Runtime</title>
     <style>
+      :root {
+        --ink: #15171d;
+        --muted: #626b7a;
+        --line: #d9e0e9;
+        --panel: #f6f8fb;
+        --accent: #126b7d;
+        --danger: #b64040;
+        --ok: #24744a;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
       body {
-        width: 320px;
+        width: 360px;
         margin: 0;
-        padding: 14px;
-        color: #15171d;
-        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: var(--ink);
+        background: #ffffff;
+        font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      header {
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        padding: 12px 14px 10px;
       }
 
       h1 {
-        margin: 0 0 8px;
-        font-size: 16px;
+        margin: 0;
+        font-size: 15px;
         line-height: 1.2;
+        letter-spacing: -0.01em;
       }
 
-      p {
-        margin: 0 0 12px;
-        color: #5d6372;
+      .tag {
+        padding: 1px 7px;
+        border-radius: 999px;
+        background: var(--panel);
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .actions {
+        display: grid;
+        gap: 7px;
+        padding: 0 14px;
+      }
+
+      #tabNotice {
+        margin: 0 14px 10px;
+        padding: 9px 10px;
+        border: 1px solid #f0d9a8;
+        border-radius: 7px;
+        background: #fff8e8;
+        color: #7a5b13;
         font-size: 13px;
         line-height: 1.45;
       }
 
-      label {
-        display: block;
-        margin-bottom: 6px;
-        color: #5d6372;
-        font-size: 12px;
-        font-weight: 700;
-      }
-
-      input {
-        width: 100%;
-        box-sizing: border-box;
-        height: 34px;
-        padding: 0 10px;
-        border: 1px solid #dce1ea;
-        border-radius: 7px;
-        font: 13px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      #tabNotice[hidden] {
+        display: none;
       }
 
       button {
-        width: 100%;
         height: 36px;
-        margin-top: 12px;
+        padding: 0 10px;
         border: 0;
         border-radius: 7px;
-        background: #156c80;
-        color: white;
+        background: var(--accent);
+        color: #fff;
         font-size: 13px;
         font-weight: 800;
         cursor: pointer;
       }
 
       button.secondary {
-        background: #18202c;
+        background: #202836;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.52;
+      }
+
+      .session-card {
+        display: grid;
+        gap: 8px;
+        margin: 12px 14px 0;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+      }
+
+      .session-card strong {
+        font-size: 12px;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      #voiceState {
+        min-height: 18px;
+        font-size: 13px;
       }
 
       .voice-controls {
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 8px;
-        margin-top: 12px;
+        gap: 7px;
       }
 
       .voice-controls button {
-        margin-top: 0;
+        height: 32px;
       }
 
-      #voiceState {
-        min-height: 18px;
+      .settings {
         margin-top: 12px;
-        color: #5d6372;
+        border-top: 1px solid var(--line);
+      }
+
+      .settings-label {
+        display: block;
+        padding: 10px 14px 0;
+        color: var(--muted);
         font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+      }
+
+      .settings iframe {
+        display: block;
+        width: 100%;
+        height: 430px;
+        border: 0;
+        background: #fff;
       }
 
       #status {
         min-height: 18px;
-        margin-top: 12px;
-        color: #24744a;
+        padding: 8px 14px 12px;
+        color: var(--ok);
         font-size: 12px;
       }
     </style>
   </head>
   <body>
-    <h1>actions.json Overlay Runtime</h1>
-    <p>Authorize this tab to connect to a local actions.json bridge. The bridge can call declared overlay actions.</p>
-    <label for="bridgeUrl">Local bridge WebSocket URL</label>
-    <input id="bridgeUrl" value="ws://127.0.0.1:17345/extension" />
-    <button id="authorize">Take control of this tab</button>
-    <button id="openMenu" class="secondary">Open actions.json menu</button>
-    <button id="openStorageTools" class="secondary">Open storage tools</button>
-    <div id="voiceState">Voice session: checking...</div>
-    <div class="voice-controls" aria-label="Voice session controls">
-      <button id="startVoice" type="button">Play</button>
-      <button id="muteVoice" type="button" class="secondary">Mute</button>
-      <button id="stopVoice" type="button" class="secondary">Stop</button>
+    <header>
+      <h1>actions.json</h1>
+      <span class="tag">runtime</span>
+    </header>
+    <div id="tabNotice" role="alert" hidden></div>
+    <div class="actions">
+      <button id="authorize">Take control of this tab</button>
+      <button id="openMenu" class="secondary">Open agent overlay</button>
+    </div>
+    <div class="session-card" aria-label="Session controls">
+      <strong>Session</strong>
+      <div id="voiceState">Session: checking...</div>
+      <div class="voice-controls">
+        <button id="startVoice" type="button">Start</button>
+        <button id="muteVoice" type="button" class="secondary">Mute</button>
+        <button id="stopVoice" type="button" class="secondary">Stop</button>
+      </div>
+    </div>
+    <div class="settings">
+      <span class="settings-label">Settings</span>
+      <iframe title="actions.json settings" src="sidepanel.html?tab=config&surface=popup"></iframe>
     </div>
     <div id="status" role="status"></div>
     <script src="src/popup.js"></script>
