@@ -38,25 +38,22 @@ Then register the bridge with your coding agent, from inside the repo.
 
 ```bash
 claude mcp add actions-json -- \
-  npx -y @actions-json/bridge mcp \
-  --actions "$(pwd)/extensions/chrome-overlay-runtime/actions/overlay.actions.json" \
-  --storage-root "$(pwd)/.storage"
+  npx -y @actions-json/bridge mcp --storage-root "$(pwd)/.storage"
 ```
 
 **[Codex](https://openai.com/codex):**
 
 ```bash
 codex mcp add actions-json -- \
-  npx -y @actions-json/bridge mcp \
-  --actions "$(pwd)/extensions/chrome-overlay-runtime/actions/overlay.actions.json" \
-  --storage-root "$(pwd)/.storage"
+  npx -y @actions-json/bridge mcp --storage-root "$(pwd)/.storage"
 ```
 
 `init-storage.sh` creates `.storage/` inside the checkout — your own scoped
 storage (`private` / `public` / `shared`), gitignored so it never enters the
-code repo. The `$(pwd)/...` paths fill themselves in from the clone — nothing to
-edit. `npx` downloads the prebuilt bridge for your platform (linux-x64,
-macos-x64, macos-arm64, win-x64).
+code repo. `$(pwd)/.storage` fills itself in from the clone — nothing to edit.
+`npx` downloads the prebuilt bridge for your platform (linux-x64, macos-x64,
+macos-arm64, win-x64) and bundles the browser-control tool catalog, so there's
+no `--actions` to specify.
 
 Then install the [Chrome extension](https://github.com/yaniv256/actions.json/releases),
 connect it to the bridge, and take control of a tab. Ask your agent to explore a
