@@ -45,8 +45,15 @@ browser-control tool catalog, and creates your storage at
 configure. Override storage with `--storage-root <dir>` if you want it
 elsewhere.
 
-Then install the [Chrome extension](https://github.com/yaniv256/actions.json/releases),
-connect it to the bridge, and take control of a tab. Ask your agent to explore a
+Then install the Chrome extension:
+
+1. Download `actions-json-overlay-runtime-*.zip` from the
+   [latest release](https://github.com/yaniv256/actions.json/releases) and unzip
+   it.
+2. Open `chrome://extensions` and turn on **Developer mode** (top-right toggle).
+3. Click **Load unpacked** and select the unzipped folder.
+
+Connect it to the bridge and take control of a tab. Ask your agent to explore a
 site and write an `actions.json` for it — the agent loads the map and your
 OpenAI key into the browser for you.
 
