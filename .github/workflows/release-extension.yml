@@ -1,4 +1,4 @@
-name: Release Chrome extension
+name: Release extension and bridge
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  package-extension:
+  package-runtime-artifacts:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -17,10 +17,14 @@ jobs:
       - name: Package extension
         run: bash scripts/package-extension.sh --version "${GITHUB_REF_NAME#extension-v}" --out-dir dist
 
+      - name: Package MCP bridge
+        run: bash scripts/package-mcp-bridge.sh --version "${GITHUB_REF_NAME#extension-v}" --out-dir dist
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           prerelease: true
           files: |
             dist/actions-json-overlay-runtime-*.zip
+            dist/actions-json-mcp-*.tar.gz
             dist/SHA256SUMS.txt
