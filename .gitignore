@@ -4,3 +4,7 @@ dist/
 
 test-results/
 playwright-report/
+
+# Local storage workspace — inside the checkout, but your data, not code.
+# Created by scripts/init-storage.sh from examples/storage-scaffold/.
+.storage/

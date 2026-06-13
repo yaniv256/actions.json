@@ -1,0 +1,33 @@
+{
+  "protocol": "actions.json.storage",
+  "version": "0.1.0",
+  "owner": {
+    "type": "person",
+    "id": "you"
+  },
+  "visibility": "root-private",
+  "default_mount": "private",
+  "mounts": {
+    "private": {
+      "path": "scopes/private",
+      "mount_type": "local",
+      "visibility": "private",
+      "default": true,
+      "description": "Your owner-only browsing memory, observations, overlays, run logs, item indexes, and unreviewed action maps. Stays on your machine unless you choose to version-control it."
+    },
+    "public": {
+      "path": "scopes/public",
+      "mount_type": "local",
+      "visibility": "public",
+      "description": "Reviewed, redacted maps you publish openly. Point this at your own public repo when you want to share."
+    }
+  },
+  "default_policy": {
+    "observations": "write_to_private_scope",
+    "item_indexes": "write_to_private_scope",
+    "runs": "write_to_private_scope",
+    "overlays": "write_to_private_scope",
+    "action_maps": "reviewed_change_in_scope",
+    "promotion": "review_required"
+  }
+}

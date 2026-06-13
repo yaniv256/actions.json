@@ -24,21 +24,25 @@ It's **OpenAPI for website actions**: OpenAPI describes what a server can do;
 
 ## Quickstart
 
-Clone the repo, then register the bridge with your coding agent
-([Claude Code](https://claude.ai/code)) from inside it:
+Clone the repo, create your local storage, then register the bridge with your
+coding agent ([Claude Code](https://claude.ai/code)) from inside it:
 
 ```bash
 git clone https://github.com/yaniv256/actions.json.git
 cd actions.json
+bash scripts/init-storage.sh
 
 claude mcp add actions-json -- \
   npx -y @actions-json/bridge mcp \
-  --actions "$(pwd)/extensions/chrome-overlay-runtime/actions/overlay.actions.json"
+  --actions "$(pwd)/extensions/chrome-overlay-runtime/actions/overlay.actions.json" \
+  --storage-root "$(pwd)/.storage"
 ```
 
-The `$(pwd)/...` fills in the path to the bundled action map from the repo you
-just cloned — nothing to edit. `npx` downloads the prebuilt bridge for your
-platform (linux-x64, macos-x64, macos-arm64, win-x64).
+`init-storage.sh` creates `.storage/` inside the checkout — your own scoped
+storage (`private` / `public` / `shared`), gitignored so it never enters the
+code repo. The `$(pwd)/...` paths fill themselves in from the clone — nothing to
+edit. `npx` downloads the prebuilt bridge for your platform (linux-x64,
+macos-x64, macos-arm64, win-x64).
 
 Then install the [Chrome extension](https://github.com/yaniv256/actions.json/releases),
 connect it to the bridge, and take control of a tab. Ask your agent to explore a
@@ -166,7 +170,7 @@ subcommand (the MCP server a coding agent connects to):
 cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- mcp \
   --bind 0.0.0.0:17345 \
   --actions extensions/chrome-overlay-runtime/actions/overlay.actions.json \
-  --storage-root ../actions.json.storage
+  --storage-root .storage
 ```
 
 ## Repository Map
