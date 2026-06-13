@@ -38,12 +38,11 @@ claude mcp add actions-json -- npx -y @actions-json/bridge mcp
 codex mcp add actions-json -- npx -y @actions-json/bridge mcp
 ```
 
-That's the whole setup. On first run, `npx` downloads the prebuilt bridge for
-your platform (linux-x64, macos-x64, macos-arm64, win-x64), bundles the
-browser-control tool catalog, and creates your storage at
-`~/.actions-json/storage` — nothing to configure.
+On first run, `npx` downloads the prebuilt bridge for your platform (linux-x64,
+macos-x64, macos-arm64, win-x64), bundles the browser-control tool catalog, and
+creates your storage at `~/.actions-json/storage` — nothing to configure.
 
-Then install the Chrome extension:
+The bridge drives a browser through the Chrome extension, so install that next:
 
 1. Download `actions-json-overlay-runtime-*.zip` from the
    [latest release](https://github.com/yaniv256/actions.json/releases) and unzip
@@ -69,8 +68,10 @@ This repository contains the current public reference implementation for:
   context and actions;
 - exposing actions to external coding agents through a Model Context Protocol
   (MCP) bridge;
-- testing the page-JavaScript/embed path through the bookmarklet runtime;
 - rendering in-page overlays, launchers, screenshots, and structured reports.
+
+A bookmarklet/embed path (running from page JavaScript with no extension) is
+planned but **not yet operational**.
 
 The project is pre-1.0. The schema, primitive dictionary, bridge protocol, and
 runtime split are still active design surfaces. Current docs distinguish
@@ -80,8 +81,9 @@ implemented behavior from future direction.
 
 ### I Want An Agent On The Current Website
 
-Install the Chrome extension, authorize a tab, open the `actions.json` menu, add
-your OpenAI API key, and start the hosted agent from the Agent tab.
+Install the Chrome extension, add your OpenAI API key in the extension popup,
+click **Take control of this tab**, and press **Start** in the Session card. (No
+coding agent needed — but you supply your own key and storage.)
 
 The extension-hosted agent can:
 
@@ -99,15 +101,12 @@ Read [Hosted Agent](https://yaniv256.github.io/actions.json/hosted-agent.html) a
 
 ### I Want My Coding Agent To Operate A Website
 
-Use the authoring skill and the MCP bridge. The coding agent explores a
-site, writes or improves `actions.json`, syncs storage, asks `actions.site` what
-actions are available, and then calls stored actions instead of rediscovering
-the page. From the user's point of view, you ask the coding agent to inspect the
-site, write the map, test it, and save the reusable actions.
+This is the [Quickstart](#quickstart) path. Your coding agent explores a site,
+writes or improves `actions.json`, asks `actions.site` what actions are
+available, and calls stored actions instead of rediscovering the page.
 
-Read [Getting Started](https://yaniv256.github.io/actions.json/getting-started.html),
-[Bridge Architecture](https://yaniv256.github.io/actions.json/bridge-architecture.html), and the authoring skill at
-[skills/SKILL.md](skills/SKILL.md).
+Read [Bridge Architecture](https://yaniv256.github.io/actions.json/bridge-architecture.html)
+and the authoring skill at [skills/SKILL.md](skills/SKILL.md).
 
 ### I Want To Make My Website Agent-Ready
 
@@ -122,13 +121,11 @@ Read [actions.json Format](https://yaniv256.github.io/actions.json/actions-json-
 
 ### I Want To Test The Embed Path
 
-Use the bookmarklet/runtime shell to test what can be done from page
-JavaScript. This approximates a future first-party website embed, but it is less
-capable than the extension because host pages can block local transport, affect
-overlay styling, and require user consent for screenshots.
+A bookmarklet/runtime shell for running from page JavaScript (approximating a
+future first-party embed) is **planned but not yet operational** — it has fallen
+behind the extension and bridge runtimes. Use the Chrome extension for now.
 
-Read [Getting Started](https://yaniv256.github.io/actions.json/getting-started.html) and
-[Runtime README](runtime/actions-json-runtime/README.md).
+See the [Runtime README](runtime/actions-json-runtime/README.md).
 
 ## Runtime And Bridge Model
 
@@ -140,8 +137,8 @@ Current runtime hosts:
 - **Chrome extension**: preferred authoring and hosted-agent runtime. It has tab
   authorization, screenshots, storage upload/download, overlay UI, debugger
   fallback for authoring, and durable hosted voice sessions.
-- **Bookmarklet/runtime shell**: lightweight page-JavaScript runtime for
-  bookmarklet and future embed-path testing.
+- **Bookmarklet/runtime shell**: a lightweight page-JavaScript runtime for the
+  future embed path — **not yet operational**.
 - **MCP bridge**: an MCP server (stdio: `initialize`, `tools/list`,
   `tools/call`, `resources/list`, `resources/read`) that a coding agent
   registers and that routes calls to connected browser runtimes over a
@@ -151,16 +148,10 @@ The hosted extension agent does not require the local bridge for its local tool
 catalog or uploaded storage-backed `actions.site` actions. External coding
 agents still use the bridge.
 
-## Install Or Try It
+## Building From Source
 
-For normal use you don't build anything. The bridge runs via
-`npx @actions-json/bridge` (see [Quickstart](#quickstart)); the Chrome extension
-installs from [Releases](https://github.com/yaniv256/actions.json/releases).
-Start with [Getting Started](https://yaniv256.github.io/actions.json/getting-started.html).
-
-### Building from source
-
-For runtime development:
+For normal use you don't build anything — see the [Quickstart](#quickstart).
+Build only when developing the runtime:
 
 ```bash
 npm install
@@ -190,7 +181,7 @@ extensions/chrome-overlay-runtime/
                               Chrome extension runtime and hosted-agent UI
 mcp/actions-json-mcp/         MCP bridge for external agents
 examples/                     Public examples
-adapters/                     Packaging glue for agent ecosystems
+adapters/npm-bridge/          @actions-json/bridge — the npx wrapper for the MCP bridge
 specs/                        Spec Kit feature work and task records
 scripts/                      Packaging and validation scripts
 tests/                        Repository-level tests
