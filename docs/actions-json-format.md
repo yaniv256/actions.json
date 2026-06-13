@@ -47,6 +47,7 @@ useful maps declare one or more actions.
 
 ## A Small Action Example
 
+{% raw %}
 ```json
 {
   "protocol": "actions.json",
@@ -111,12 +112,13 @@ useful maps declare one or more actions.
   ]
 }
 ```
+{% endraw %}
 
 This example is intentionally small. Real maps can also declare context blocks,
 states, transitions, attachments, imports, signals, and checks.
 
 The `workflow` shape shown here is the implemented execution path: steps invoke
-named primitives, `{% ... %}` slots are JSONata expressions over `input` and
+named primitives, {% raw %}`{% ... %}`{% endraw %} slots are JSONata expressions over `input` and
 prior `steps.<id>.output`, and validation strictly rejects unknown workflow or
 step fields and (when the runtime supplies its primitive dictionary) unknown
 primitive names. Steps also support `when` conditions, bounded `for_each`

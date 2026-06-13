@@ -313,6 +313,7 @@ dictionary, with JSONata expression slots for data binding. This replaced the
 earlier draft of abstract step types (`inspect`, `click`, `type`, ...) — steps
 name concrete primitives instead.
 
+{% raw %}
 ```json
 {
   "workflow": {
@@ -344,6 +345,7 @@ name concrete primitives instead.
   }
 }
 ```
+{% endraw %}
 
 Workflow root fields (all required except `output`): `version` (must be `1`),
 `expression_language` (must be `"jsonata"`), `steps`, `output`.
@@ -354,7 +356,7 @@ Step fields — this set is closed; validation rejects anything else:
 - `primitive`: a primitive name from the dictionary. When the runtime supplies
   its dictionary at validation time, unknown names are rejected up front.
 - `args`: arguments object; optional for no-argument primitives. Any string
-  value that is a whole `{% ... %}` slot is evaluated as JSONata against
+  value that is a whole {% raw %}`{% ... %}`{% endraw %} slot is evaluated as JSONata against
   `input`, `steps`, `item`, and `index`. Partial embedded expressions are
   rejected.
 - `when`: JSONata condition; the step is skipped when falsy. Test optional
@@ -386,6 +388,7 @@ expression, and validates the result against a JSON Schema — giving agents
 compact application state for orientation, verification, and diffs instead of
 raw DOM reads or screenshots.
 
+{% raw %}
 ```json
 {
   "state_projections": [
@@ -431,6 +434,7 @@ raw DOM reads or screenshots.
   ]
 }
 ```
+{% endraw %}
 
 Projections are exercised through `actions.site` modes: `state_read` (full
 state), `state_summary` (a declared compact summary), and `state_diff` (JSON
