@@ -108,10 +108,11 @@ What the flags mean:
 | `--actions <file>` | The browser-control primitive manifest. Read **once at launch** — restart the bridge after editing it. The repo's `extensions/chrome-overlay-runtime/actions/overlay.actions.json` is the standard one; pass its absolute path. |
 | `--storage-root <dir>` | Your `actions.json.storage` checkout. The bridge loads site maps and context from here and pushes them to the browser. |
 
-> **Prebuilt binaries are published for linux-x64.** On other platforms, `npx`
-> prints build-from-source instructions instead (clone the repo and
-> `cargo build --release --manifest-path mcp/actions-json-mcp/Cargo.toml`, then
-> point `command` at `mcp/actions-json-mcp/target/release/actions-json-mcp`).
+> **Prebuilt binaries are published for linux-x64, macos-x64, macos-arm64, and
+> win-x64** — `npx` picks the right one for your machine automatically. On any
+> other platform/arch it prints build-from-source instructions instead (clone
+> the repo and `cargo build --release --manifest-path mcp/actions-json-mcp/Cargo.toml`,
+> then point `command` at `mcp/actions-json-mcp/target/release/actions-json-mcp`).
 
 After registering, restart (or reconnect) your coding agent so it launches the
 server. Confirm it connected by listing MCP servers in your agent (e.g.
