@@ -1,3 +1,9 @@
+---
+title: Hosted Agent
+nav_order: 3
+has_children: true
+---
+
 # Hosted Agent
 
 The Chrome extension can host a `gpt-realtime-2` voice/text agent directly in

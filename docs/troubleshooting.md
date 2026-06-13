@@ -1,3 +1,8 @@
+---
+title: Troubleshooting
+nav_order: 8
+---
+
 # Troubleshooting
 
 Use this guide when the extension, hosted agent, bridge, storage, or bookmarklet

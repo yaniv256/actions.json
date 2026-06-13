@@ -1,3 +1,9 @@
+---
+title: Hosted Agent Chat UI
+nav_order: 2
+parent: Hosted Agent
+---
+
 # Hosted Agent Chat UI
 
 This document describes the transcript pattern for the Chrome extension hosted

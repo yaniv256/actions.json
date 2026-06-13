@@ -1,3 +1,9 @@
+---
+title: Hosted Agent Tools
+nav_order: 1
+parent: Hosted Agent
+---
+
 # Hosted Agent Tools
 
 The extension-hosted Realtime agent receives a small stable tool surface.

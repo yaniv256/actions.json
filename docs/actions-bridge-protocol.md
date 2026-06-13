@@ -1,3 +1,9 @@
+---
+title: Actions Bridge Protocol
+nav_order: 1
+parent: Bridge Architecture
+---
+
 # Actions Bridge Protocol
 
 The Actions Bridge Protocol carries action calls, runtime status, page events,

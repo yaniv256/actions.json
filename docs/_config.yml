@@ -1,0 +1,39 @@
+# GitHub Pages (Jekyll) configuration for the actions.json docs site.
+#
+# Uses the just-the-docs remote theme to provide a left navigation sidebar,
+# search, and multi-page wayfinding. GitHub Pages builds the remote theme via
+# the jekyll-remote-theme plugin (on the Pages allowlist).
+#
+# Note on JSONata slots: docs contain actions.json `{% ... %}` workflow slots.
+# Those are wrapped in `{% raw %}` / `{% endraw %}` fences in the Markdown so
+# Liquid renders the braces literally. Do not rely on render_with_liquid here —
+# GitHub Pages does not honor it for these pages.
+
+title: actions.json
+description: A readable action map for websites — operate a site through declared actions instead of scraping.
+remote_theme: just-the-docs/just-the-docs
+
+# just-the-docs options
+search_enabled: true
+search:
+  heading_level: 2
+  previews: 3
+  preview_words_before: 5
+  preview_words_after: 10
+
+aux_links:
+  "actions.json on GitHub":
+    - "https://github.com/yaniv256/actions.json"
+aux_links_new_tab: true
+
+# Collapse long auto-generated heading anchors out of the nav
+heading_anchors: true
+
+# Footer
+back_to_top: true
+back_to_top_text: "Back to top"
+
+# The release-notes folder is reference material, not primary nav.
+# Keep Jekyll from treating asset/deck folders as pages.
+exclude:
+  - decks/

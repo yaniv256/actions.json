@@ -1,3 +1,9 @@
+---
+title: Storage
+nav_order: 6
+has_children: true
+---
+
 # actions.json.storage
 
 `actions.json.storage` is a user-owned file workspace for website operating

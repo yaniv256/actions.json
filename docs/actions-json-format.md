@@ -1,3 +1,9 @@
+---
+title: actions.json Format
+nav_order: 5
+has_children: true
+---
+
 # actions.json Format
 
 An `actions.json` file describes how an agent can operate one website, web app,

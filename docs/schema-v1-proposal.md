@@ -1,3 +1,9 @@
+---
+title: Schema V1 Reference
+nav_order: 1
+parent: actions.json Format
+---
+
 # actions.json Schema V1 Reference
 
 Status: draft public reference for schema version `1`.

@@ -1,3 +1,9 @@
+---
+title: Bridge Architecture
+nav_order: 7
+has_children: true
+---
+
 # Bridge Architecture
 
 The bridge lets an agent talk to a browser runtime that understands
