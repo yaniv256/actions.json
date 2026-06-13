@@ -1,3 +1,8 @@
+---
+title: Repository Structure
+nav_order: 9
+---
+
 # Repository Structure
 
 This repository is the public source tree for `actions.json` documentation,

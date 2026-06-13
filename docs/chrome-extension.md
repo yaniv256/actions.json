@@ -1,3 +1,8 @@
+---
+title: Chrome Extension
+nav_order: 4
+---
+
 # Chrome Extension
 
 The Chrome extension is the privileged browser runtime for `actions.json`.

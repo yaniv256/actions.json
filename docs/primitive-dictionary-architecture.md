@@ -1,3 +1,9 @@
+---
+title: Primitive Dictionary Architecture
+nav_order: 2
+parent: actions.json Format
+---
+
 # Primitive Dictionary Architecture
 
 The primitive dictionary defines the browser operations that `actions.json`

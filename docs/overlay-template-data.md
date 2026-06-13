@@ -1,3 +1,9 @@
+---
+title: Overlay Templates And Data
+nav_order: 2
+parent: Storage
+---
+
 # Overlay Templates And Data
 
 Overlays can be stored as two separate files:

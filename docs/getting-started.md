@@ -1,3 +1,8 @@
+---
+title: Getting Started
+nav_order: 2
+---
+
 # Getting Started
 
 This guide gets you from a release artifact or fresh checkout to a working

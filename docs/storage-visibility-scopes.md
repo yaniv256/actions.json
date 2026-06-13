@@ -1,3 +1,9 @@
+---
+title: Storage Visibility Scopes
+nav_order: 1
+parent: Storage
+---
+
 # Storage Visibility Scopes
 
 `actions.json.storage` separates artifacts by visibility:
