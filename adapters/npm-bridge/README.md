@@ -3,42 +3,33 @@
 Run the [actions.json](https://yaniv256.github.io/actions.json/) MCP bridge with
 `npx` — no Rust toolchain required. On first run this downloads the prebuilt
 `actions-json-mcp` binary for your platform from the GitHub release, caches it,
-and runs it with the arguments you pass.
+and runs it. The primitive dictionary (browser-control tool catalog) is bundled,
+so you don't pass `--actions`.
 
 ## Usage
 
 ```bash
-npx @actions-json/bridge mcp \
-  --bind 0.0.0.0:17345 \
-  --actions /abs/path/to/overlay.actions.json \
-  --storage-root /abs/path/to/actions.json.storage
+npx @actions-json/bridge mcp --storage-root /path/to/.storage
 ```
 
-Register it with a coding agent the same way — for Claude Code:
+Register it with a coding agent — for Claude Code:
 
 ```bash
 claude mcp add actions-json -- \
-  npx -y @actions-json/bridge mcp \
-  --bind 0.0.0.0:17345 \
-  --actions /abs/path/to/overlay.actions.json \
-  --storage-root /abs/path/to/actions.json.storage
+  npx -y @actions-json/bridge mcp --storage-root /path/to/.storage
 ```
 
-For Codex (`~/.codex/config.toml`):
+For Codex:
 
-```toml
-[mcp_servers.actions-json]
-command = "npx"
-args = [
-  "-y", "@actions-json/bridge", "mcp",
-  "--bind", "0.0.0.0:17345",
-  "--actions", "/abs/path/to/overlay.actions.json",
-  "--storage-root", "/abs/path/to/actions.json.storage",
-]
+```bash
+codex mcp add actions-json -- \
+  npx -y @actions-json/bridge mcp --storage-root /path/to/.storage
 ```
 
-All arguments after the binary are passed straight through to `actions-json-mcp`.
-See [Getting Started](https://yaniv256.github.io/actions.json/getting-started.html).
+All arguments after the binary pass straight through to `actions-json-mcp`. To
+use a custom primitive dictionary, pass your own `--actions <file>` and the
+bundled default is skipped. See
+[Getting Started](https://yaniv256.github.io/actions.json/getting-started.html).
 
 ## Platforms
 
