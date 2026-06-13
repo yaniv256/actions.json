@@ -5,197 +5,205 @@ nav_order: 2
 
 # Getting Started
 
-This guide gets you from a release artifact or fresh checkout to a working
-`actions.json` runtime.
+`actions.json` teaches a website to an AI agent. Instead of the agent scraping
+the page and guessing, it calls named actions a site map describes — so it can
+reliably search, click, fill, and read on a real site.
 
-You do not need every component for every workflow. Choose one path first.
+This guide gets you to a working setup. By the end, an agent will be operating a
+website in your browser through `actions.json`.
 
-## Choose A Path
+## Which Path Is Yours?
 
-| Path | Use When | Requires |
+There is one question that decides your path:
+
+**Are you _building_ an `actions.json`, or _trying one out_?**
+
+| You want to... | Path | Why |
 |---|---|---|
-| Chrome extension hosted agent | You want an agent on the current website, using your OpenAI key. | Chrome extension, OpenAI API key, tab authorization |
-| External coding agent through bridge | You want Codex, Claude Code, or another local agent to call browser actions. | MCP-shaped bridge, connected browser runtime |
-| Bookmarklet/embed test path | You want to test what page JavaScript can do without extension privileges. | Bookmarklet, compatible page policy |
+| Build or change an `actions.json` for a site | **[Develop with a coding agent](#path-1-develop-with-a-coding-agent-mcp)** | Your coding agent edits the map _and_ loads it into your browser to test it — you don't need a finished map first. **Start here.** |
+| Try out an `actions.json` a collaborator gave you | **[Explore a finished map](#path-2-explore-a-finished-map-standalone-extension)** | You already have a map file. Upload it to the extension and see what it can do. No coding agent needed. |
 
-The Chrome extension is the most capable runtime. It supports screenshots,
-stable tab identity, storage upload/download, extension overlays, debugger
-fallback for authoring, and the hosted voice/text agent.
+Most people arrive here to **build**, so Path 1 is the main path. If you are
+developing a map, the standalone extension path is _not_ for you — you would
+have nothing finished to upload yet (the exception is hand-writing the JSON with
+no agent at all).
 
-The bookmarklet is useful for embed-path testing, but sites can block it with
-Content Security Policy, mixed-content rules, or screenshot permission limits.
+## Path 1: Develop With A Coding Agent (MCP)
 
-## Path A: Chrome Extension Hosted Agent
+Use this when a coding agent (Codex, Claude Code, or similar) should build your
+`actions.json` and drive a browser to test it.
 
-Use this path when you want the browser extension to host a `gpt-realtime-2`
-agent directly.
+The coding agent connects to a small **bridge** process. Once connected, the
+bridge does the setup for you:
 
-### Install The Extension
+- it **loads your `actions.json` into the browser extension** as you edit it, so
+  you never upload a map by hand, and
+- it **loads your OpenAI key** into the extension.
 
-Performed by the user:
+So you point the agent at the bridge once, and the develop-test loop just works.
 
-1. Download the released Chrome extension artifact.
-2. Open `chrome://extensions`.
-3. Enable **Developer mode**.
-4. Choose **Load unpacked** for an unpacked release directory, or install the
-   packaged release according to the release instructions.
-5. Open a website.
-6. Click the extension icon.
-7. Choose **Take control of this tab**.
+### 1. Install the Chrome extension
 
-Expected result: the tab is authorized and may be placed into the
-`actions.json` tab group when grouping is available.
+1. Download the latest extension from the
+   [releases page](https://github.com/yaniv256/actions.json/releases)
+   (`actions-json-overlay-runtime-*.zip`) and unzip it.
+2. Open `chrome://extensions` and enable **Developer mode** (top-right toggle).
+3. Choose **Load unpacked** and select the unzipped extension folder.
 
-### Know Your Way Around The Popup
+### 2. Register the bridge with your coding agent
 
-All settings live in the extension popup. Click the extension icon to see,
-from top to bottom:
+The bridge runs with `npx` — no install, no toolchain. The
+`@actions-json/bridge` package downloads the matching prebuilt binary on first
+run and execs it.
+
+**Claude Code** — one command:
+
+```bash
+claude mcp add actions-json -- \
+  npx -y @actions-json/bridge mcp \
+  --bind 0.0.0.0:17345 \
+  --actions /abs/path/to/actions.json/extensions/chrome-overlay-runtime/actions/overlay.actions.json \
+  --storage-root /abs/path/to/actions.json.storage
+```
+
+**Codex / other clients** — add an entry to the MCP servers config (Codex uses
+`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.actions-json]
+command = "npx"
+args = [
+  "-y", "@actions-json/bridge", "mcp",
+  "--bind", "0.0.0.0:17345",
+  "--actions", "/abs/path/to/actions.json/extensions/chrome-overlay-runtime/actions/overlay.actions.json",
+  "--storage-root", "/abs/path/to/actions.json.storage",
+]
+```
+
+The equivalent generic `mcpServers` JSON block (Claude Desktop and most other
+clients):
+
+```json
+{
+  "mcpServers": {
+    "actions-json": {
+      "command": "npx",
+      "args": [
+        "-y", "@actions-json/bridge", "mcp",
+        "--bind", "0.0.0.0:17345",
+        "--actions", "/abs/path/to/actions.json/extensions/chrome-overlay-runtime/actions/overlay.actions.json",
+        "--storage-root", "/abs/path/to/actions.json.storage"
+      ]
+    }
+  }
+}
+```
+
+What the flags mean:
+
+| Flag | Meaning |
+|---|---|
+| `mcp` | Run as an MCP stdio server (the mode your coding agent talks to). |
+| `--bind 0.0.0.0:17345` | Where the browser connects. `0.0.0.0` accepts connections from another machine; use `127.0.0.1:17345` if Chrome and the bridge run on the same machine. |
+| `--actions <file>` | The browser-control primitive manifest. Read **once at launch** — restart the bridge after editing it. The repo's `extensions/chrome-overlay-runtime/actions/overlay.actions.json` is the standard one; pass its absolute path. |
+| `--storage-root <dir>` | Your `actions.json.storage` checkout. The bridge loads site maps and context from here and pushes them to the browser. |
+
+> **Prebuilt binaries are published for linux-x64.** On other platforms, `npx`
+> prints build-from-source instructions instead (clone the repo and
+> `cargo build --release --manifest-path mcp/actions-json-mcp/Cargo.toml`, then
+> point `command` at `mcp/actions-json-mcp/target/release/actions-json-mcp`).
+
+After registering, restart (or reconnect) your coding agent so it launches the
+server. Confirm it connected by listing MCP servers in your agent (e.g.
+`claude mcp list`). The agent should read `actions-json://bridge/launch` first —
+it returns the launch context the agent needs.
+
+### 3. Connect the extension to the bridge
+
+1. Open a website and click the extension icon.
+2. In the popup's **Bridge** section, enter the bridge URL and press **Connect**:
+
+   ```text
+   ws://<bridge-host>:17345/extension
+   ```
+
+3. Click **Take control of this tab**.
+
+Use `127.0.0.1` only when Chrome and the bridge run on the same machine. If they
+run on different machines, use the bridge host's reachable address (for example
+its Tailscale IP) — never `127.0.0.1`, which would point Chrome at itself. See
+[Bridge Architecture](bridge-architecture.md) for cross-machine setup, runtime
+selectors, and large-result handling.
+
+### 4. Verify
+
+Ask your coding agent to read `actions-json://bridge/runtimes`. It should list
+your connected browser with its tab info and extension version. You are now in
+the develop-test loop: the agent edits the map, loads it into the browser, and
+tries it on the live page.
+
+## Path 2: Explore A Finished Map (Standalone Extension)
+
+Use this when a collaborator has given you an `actions.json` and you just want to
+see what it does — no coding agent involved.
+
+**Prerequisite:** you have an `actions.json.storage` checkout (or a single map
+file) ready to upload. If you don't, you want Path 1.
+
+### 1. Install the Chrome extension
+
+Same as Path 1, step 1 — from the
+[releases page](https://github.com/yaniv256/actions.json/releases).
+
+### 2. Add your OpenAI key
+
+1. Click the extension icon. The **OpenAI API key** section is open by default.
+2. Paste your OpenAI API key and save it.
+
+The key is stored in Chrome extension storage and used only by this extension to
+connect to OpenAI. (This is the same key you would hand a coding agent in Path 1
+— here you give it to the extension directly.)
+
+### 3. Upload the map
+
+1. Expand the **Storage folder** section and choose **Upload**.
+2. Select the `actions.json.storage` root you were given, or a scope folder such
+   as `scopes/private`.
+
+The extension reads the files and stores a browser-local bundle.
+
+### 4. Take control and start
+
+1. Open the target website and click **Take control of this tab**.
+2. Press **Start** in the **Session** card and allow microphone access if asked.
+3. Ask the agent what it can do on this site.
+
+A successful site-action lookup appears in the logs as an `actions.site` list
+request. If no map matches the current site, the agent falls back to direct
+primitives (screenshots, section listing, locator info, scroll, click).
+
+If something is missing, see [Hosted Agent Tools](hosted-agent-tools.md) and
+[Troubleshooting](troubleshooting.md).
+
+## Know Your Way Around The Popup
+
+All settings live in the extension popup. Click the extension icon to see, top
+to bottom:
 
 - **Take control of this tab** and **Open agent overlay** buttons;
-- a **Session** card with **Start**, **Mute**, and **Stop** controls;
-- an embedded **Settings** area with collapsible sections: **OpenAI API key**
-  (open by default), **Voice**, **Turn detection**, **Bridge** (URL plus
-  **Connect**), **Storage folder** (**Upload**/**Download**), and **Memory**.
+- a **Session** card with **Start**, **Mute**, and **Stop**;
+- a **Settings** area with collapsible sections: **OpenAI API key** (open by
+  default), **Voice**, **Turn detection**, **Bridge**, **Storage folder**
+  (**Upload**/**Download**), and **Memory**.
 
-The page overlay opened by **Open agent overlay** is a single agent pane with
-the transcript and voice controls. There is no Settings tab inside the
-overlay; configure everything from the popup.
+**Open agent overlay** opens a single agent pane on the page with the transcript
+and voice controls. There is no Settings tab in the overlay — configure
+everything from the popup.
 
-### Add Your OpenAI Key
+## About Storage
 
-1. Click the extension icon.
-2. The **OpenAI API key** settings section is open by default.
-3. Paste your OpenAI API key.
-4. Save it.
-
-Expected result: the key state shows saved/ready with a redacted key summary.
-The key is stored in Chrome extension storage and used only by this extension to
-connect to OpenAI.
-
-### Upload actions.json.storage
-
-Storage is optional, but it is what makes the hosted agent site-aware.
-
-1. Click the extension icon.
-2. Expand the **Storage folder** settings section and choose **Upload**.
-3. Select your `actions.json.storage` root checkout, or a mounted scope
-   folder such as `scopes/private`.
-
-Expected result: the extension reads the selected storage files and stores a
-browser-local bundle. The hosted agent can then use those files when you ask
-what it can do on the current site.
-
-### Start Voice
-
-1. Press **Start** in the popup **Session** card, or use the voice control in
-   the agent overlay.
-2. Allow microphone permission if Chrome asks.
-
-Expected result: the transcript appears, the voice control changes to live, and
-the agent can use screenshots and tools available for the authorized page.
-
-If the prompt is dismissed or blocked, see [Troubleshooting](troubleshooting.md).
-
-## Path B: External Coding Agent Through The Bridge
-
-Use this path when an external coding agent should call browser actions through
-the MCP bridge.
-
-The bridge is one process with two faces: an MCP stdio server for the coding
-agent, and an HTTP/WebSocket listener for the browser runtime. Register it as
-an MCP server in your coding agent using the `mcp` subcommand:
-
-```bash
-actions-json-mcp mcp \
-  --bind 0.0.0.0:17345 \
-  --actions <path-to>/overlay.actions.json \
-  --storage-root <path-to>/actions.json.storage
-```
-
-Or run it from source:
-
-```bash
-cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- mcp \
-  --bind 0.0.0.0:17345 \
-  --actions extensions/chrome-overlay-runtime/actions/overlay.actions.json \
-  --storage-root ../actions.json.storage
-```
-
-The `--actions` manifest is read once at launch. There is no hot reload;
-`storage.sync` reloads site maps from the storage root, not the manifest.
-Restart the bridge after editing the manifest.
-
-The browser side connects to:
-
-```text
-ws://<bridge-host>:17345/extension
-```
-
-Set that URL in the extension popup's **Bridge** settings section and press
-**Connect**. The default bind is loopback (`127.0.0.1:17345`), which is
-correct only when Chrome and the bridge run on the same machine. If Chrome
-runs on a different machine, `127.0.0.1` points Chrome at the browser machine,
-not the bridge host. Launch the bridge with `--bind 0.0.0.0:17345` and use the
-bridge host's reachable IP (for example its Tailscale address) in the
-extension's Bridge URL — never `127.0.0.1`.
-
-The agent-facing surface is MCP: `initialize`, `tools/list`, and `tools/call`,
-plus these MCP resources:
-
-- `actions-json://bridge/launch`: launch context — read this first;
-- `actions-json://bridge/tools`: the current tool catalog;
-- `actions-json://bridge/runtimes`: connected browser runtimes with runtime
-  ids, tab info, extension version, timestamps, and URLs.
-
-Verify the setup by reading `actions-json://bridge/runtimes` from your coding
-agent after connecting the extension. If the extension cannot connect across
-machines, confirm the bridge is not listening only on loopback
-(`ss -ltnp | rg ':17345'`) and relaunch with `--bind 0.0.0.0:17345`.
-
-If more than one runtime is connected, ask your coding agent to target one
-runtime explicitly. The bridge supports selectors such as `target_runtime_id`
-and `target_url_contains`.
-
-Large tool results spill to disk instead of flooding the agent's context:
-results bigger than `inline_limit_bytes` are written to a file and returned as
-a compact envelope (`payload_path`, `payload_bytes`, `payload_hash`, and a
-`preview`). Read or grep the file at `payload_path`; adjust the threshold with
-the `bridge.payloads.configure` tool.
-
-## Path C: Bookmarklet Or Embed-Path Testing
-
-Use the bookmarklet when you need a lightweight install or want to test what a
-future first-party embed can do from page JavaScript.
-
-Performed by the user:
-
-1. Open the released bookmarklet install page.
-2. Drag the `actions.json` bookmarklet to the bookmarks bar, or manually create
-   a bookmark with the released `javascript:` URL.
-3. Open a target website.
-4. Click the `actions.json` bookmark.
-
-Expected result: the bookmarklet UI appears if the page allows it. If direct
-transport is blocked, it may show a bridge/relay status instead.
-
-Bookmarklet limits:
-
-- it cannot autonomously capture a true rendered screenshot;
-- page CSS and security policy can affect overlays;
-- HTTPS pages can block insecure local HTTP or WebSocket calls;
-- some sites require the extension relay for bookmarklet transport testing.
-
-## Upload And Download Storage
-
-The **Storage folder** section in the popup settings includes **Upload** and
-**Download**. The same settings page can also be opened as a full top-level
-page when the popup is too small to work in.
-
-- **Upload** reads a local `actions.json.storage` checkout or scope repository
-  and stores a browser-local bundle.
-- **Download** writes browser-local storage files back to the selected folder.
-
-Use storage when site knowledge should survive the current page session:
+Storage is what makes the agent site-aware. Upload it once and the agent can use
+it whenever you ask what it can do on the current site. It holds:
 
 - site action maps;
 - page summaries and context actions;
@@ -203,22 +211,19 @@ Use storage when site knowledge should survive the current page session:
 - observations and item indexes;
 - generated overlays and reports.
 
-See [actions.json.storage](actions-json-storage.md).
+**Download** writes browser-local storage back to a folder. See
+[actions.json.storage](actions-json-storage.md).
 
-## Verify Hosted Tools
+## Bookmarklet (Not Yet Available)
 
-With the extension authorized and storage uploaded, ask the hosted agent what it
-can do on the current site. In the logs, a successful site-action lookup appears
-as an `actions.site` list request. If no site map matches, the agent can still
-use direct primitives such as screenshots, section listing, locator information,
-scroll, and click where available.
-
-If tools are missing, see [Hosted Agent Tools](hosted-agent-tools.md) and
-[Troubleshooting](troubleshooting.md).
+A bookmarklet/embed path — running `actions.json` from page JavaScript with no
+extension install — is planned but **currently non-operational**; it has fallen
+behind the rest of the runtime. **TODO:** bring the bookmarklet path back in
+line with the extension and bridge runtimes before documenting it as usable.
 
 ## Developer Builds
 
-Use developer builds only when changing runtime code.
+Only needed when changing runtime code:
 
 ```bash
 npm install
