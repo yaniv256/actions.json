@@ -61,7 +61,7 @@ PWSH="${PWSH:-/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe}"
 
 GIT_URL="https://github.com/${repo}.git"
 
-log() { printf '\n=== %s ===\n' "$*"; }
+log() { printf '\n=== %s ===\n' "$*" >&2; }
 
 # Package a built binary into dist/ using the existing packaging conventions.
 # Args: <slug> <path-to-binary>
@@ -83,7 +83,7 @@ package() {
 
 build_linux() {
   log "linux-x64 (this host)"
-  ( cd "$repo_root/mcp/actions-json-mcp" && cargo build --release --locked )
+  ( cd "$repo_root/mcp/actions-json-mcp" && cargo build --release --locked ) >&2
   package "linux-x64" "$repo_root/mcp/actions-json-mcp/target/release/actions-json-mcp"
 }
 
@@ -93,9 +93,12 @@ build_windows() {
   log "win-x64 (Windows host)"
   # Ensure a Windows-side checkout at the release tag, then build. git and cargo
   # are on the Windows PATH; PowerShell runs from a real Windows cwd.
-  win_ps "if (-not (Test-Path '$WIN_REPO_WIN')) { git clone '$GIT_URL' '$WIN_REPO_WIN' }" | tail -2 || true
-  win_ps "Set-Location '$WIN_REPO_WIN'; git fetch --tags --quiet; git checkout --quiet '$tag'" | tail -2
-  win_ps "Set-Location '$WIN_REPO_WIN\\mcp\\actions-json-mcp'; cargo build --release --locked" | tail -4
+  # All build chatter to stderr so $(build_windows) captures only the artifact.
+  {
+    win_ps "if (-not (Test-Path '$WIN_REPO_WIN')) { git clone '$GIT_URL' '$WIN_REPO_WIN' }" | tail -2 || true
+    win_ps "Set-Location '$WIN_REPO_WIN'; git fetch --tags --quiet; git checkout --quiet '$tag'" | tail -2
+    win_ps "Set-Location '$WIN_REPO_WIN\\mcp\\actions-json-mcp'; cargo build --release --locked" | tail -4
+  } >&2
   package "win-x64" "${WIN_REPO_WSL}/mcp/actions-json-mcp/target/release/actions-json-mcp.exe"
 }
 
@@ -112,11 +115,14 @@ mac_prepare() {
 build_mac() {
   local slug="$1" target="$2"
   log "$slug (Mac, $target)"
-  mac_ssh "$MAC_PATH_EXPORT; cd '$MAC_REPO/mcp/actions-json-mcp' && \
-    cargo build --release --locked --target $target" 2>&1 | tail -4
   local remote="$MAC_REPO/mcp/actions-json-mcp/target/$target/release/actions-json-mcp"
   local local_bin="$dist/.mac-$slug-actions-json-mcp"
-  scp -i "$MAC_KEY" -o IdentitiesOnly=yes "$MAC_HOST:$remote" "$local_bin" 2>&1 | tail -1
+  # Build + fetch chatter to stderr so the capture sees only the artifact path.
+  {
+    mac_ssh "$MAC_PATH_EXPORT; cd '$MAC_REPO/mcp/actions-json-mcp' && \
+      cargo build --release --locked --target $target" 2>&1 | tail -4
+    scp -i "$MAC_KEY" -o IdentitiesOnly=yes "$MAC_HOST:$remote" "$local_bin" 2>&1 | tail -1
+  } >&2
   package "$slug" "$local_bin"
   rm -f "$local_bin"
 }
