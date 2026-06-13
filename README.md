@@ -24,15 +24,29 @@ It's **OpenAPI for website actions**: OpenAPI describes what a server can do;
 
 ## Quickstart
 
-Clone the repo, create your local storage, then register the bridge with your
-coding agent ([Claude Code](https://claude.ai/code)) from inside it:
+Clone the repo and create your local storage:
 
 ```bash
 git clone https://github.com/yaniv256/actions.json.git
 cd actions.json
 bash scripts/init-storage.sh
+```
 
+Then register the bridge with your coding agent, from inside the repo.
+
+**[Claude Code](https://claude.ai/code):**
+
+```bash
 claude mcp add actions-json -- \
+  npx -y @actions-json/bridge mcp \
+  --actions "$(pwd)/extensions/chrome-overlay-runtime/actions/overlay.actions.json" \
+  --storage-root "$(pwd)/.storage"
+```
+
+**[Codex](https://openai.com/codex):**
+
+```bash
+codex mcp add actions-json -- \
   npx -y @actions-json/bridge mcp \
   --actions "$(pwd)/extensions/chrome-overlay-runtime/actions/overlay.actions.json" \
   --storage-root "$(pwd)/.storage"
