@@ -13,7 +13,7 @@
       "mount_type": "local",
       "visibility": "private",
       "default": true,
-      "description": "Your owner-only browsing memory, observations, overlays, run logs, item indexes, and unreviewed action maps. Stays on your machine unless you choose to version-control it."
+      "description": "Your owner-only browsing memory, observations, overlays, run logs, item indexes, and unreviewed action maps. Local by default; point it at your own private repo to sync the same memory across your machines and agents."
     },
     "public": {
       "path": "scopes/public",
