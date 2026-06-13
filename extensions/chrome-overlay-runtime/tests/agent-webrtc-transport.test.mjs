@@ -5,10 +5,14 @@ import { RealtimeWebRtcTransportFactory } from "../src/agent/realtime-webrtc-tra
 
 function createMockPeerConnection() {
   const dataChannel = new EventTarget();
+  dataChannel.readyState = "open";
+  dataChannel.bufferedAmount = 2048;
   dataChannel.sent = [];
   dataChannel.send = (raw) => dataChannel.sent.push(JSON.parse(raw));
   dataChannel.close = () => {
+    dataChannel.readyState = "closed";
     dataChannel.closed = true;
+    dataChannel.dispatchEvent(new Event("close"));
   };
   const pc = {
     dataChannel,
@@ -17,6 +21,10 @@ function createMockPeerConnection() {
     tracks: [],
     transceivers: [],
     closed: false,
+    connectionState: "connected",
+    iceConnectionState: "connected",
+    iceGatheringState: "complete",
+    signalingState: "stable",
     createDataChannel(name) {
       assert.equal(name, "oai-events");
       return dataChannel;
@@ -94,6 +102,94 @@ test("Realtime WebRTC transport creates a client secret, posts SDP, and sends da
   assert.deepEqual(pc.remoteDescription, { type: "answer", sdp: "mock-answer-sdp" });
   assert.deepEqual(pc.transceivers, [{ kind: "audio", options: { direction: "recvonly" } }]);
   assert.deepEqual(pc.dataChannel.sent, [{ type: "session.update", session: { model: "gpt-realtime-2" } }]);
+});
+
+test("Realtime WebRTC transport rejects sends when the data channel is not open", async () => {
+  const pc = createMockPeerConnection();
+  const factory = new RealtimeWebRtcTransportFactory({
+    fetchImpl: async (url) => ({
+      ok: true,
+      async json() {
+        return { value: "ek_mock_client_secret" };
+      },
+      async text() {
+        return "mock-answer-sdp";
+      },
+    }),
+    rtcPeerConnectionFactory: () => pc,
+  });
+  const transport = factory.create({
+    apiKey: "sk-proj-secret",
+    model: "gpt-realtime-2",
+    textOnly: true,
+  });
+
+  await transport.connect();
+  pc.dataChannel.readyState = "closing";
+
+  await assert.rejects(
+    () => transport.sendEvent({ type: "response.create" }),
+    /Realtime data channel is not open/,
+  );
+  assert.deepEqual(pc.dataChannel.sent, []);
+});
+
+test("Realtime WebRTC transport reports data-channel close and error events", async () => {
+  const pc = createMockPeerConnection();
+  const observed = [];
+  const factory = new RealtimeWebRtcTransportFactory({
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return { value: "ek_mock_client_secret" };
+      },
+      async text() {
+        return "mock-answer-sdp";
+      },
+    }),
+    rtcPeerConnectionFactory: () => pc,
+  });
+  const transport = factory.create({
+    apiKey: "sk-proj-secret",
+    model: "gpt-realtime-2",
+    textOnly: true,
+  });
+  transport.onStatusEvent = (event) => observed.push(event);
+
+  await transport.connect();
+  pc.dataChannel.dispatchEvent(new Event("error"));
+  await transport.close();
+
+  assert.deepEqual(observed, [
+    {
+      type: "realtime.data_channel.error",
+      data_channel_state: "open",
+      closed_by_client: false,
+      close_code: null,
+      close_reason: null,
+      close_was_clean: null,
+      peer_connection_state: "connected",
+      ice_connection_state: "connected",
+      ice_gathering_state: "complete",
+      signaling_state: "stable",
+      data_channel_buffered_amount: 2048,
+      error_message: null,
+    },
+    {
+      type: "realtime.data_channel.close",
+      data_channel_state: "closed",
+      closed_by_client: true,
+      close_code: null,
+      close_reason: null,
+      close_was_clean: null,
+      peer_connection_state: "connected",
+      ice_connection_state: "connected",
+      ice_gathering_state: "complete",
+      signaling_state: "stable",
+      data_channel_buffered_amount: 2048,
+      error_message: null,
+    },
+  ]);
 });
 
 test("Realtime WebRTC transport includes upstream SDP exchange error bodies", async () => {

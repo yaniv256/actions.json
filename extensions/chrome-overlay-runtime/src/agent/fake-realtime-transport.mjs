@@ -27,6 +27,9 @@ export class FakeRealtimeTransportFactory {
       async setInputMuted(muted) {
         this.inputMuted = Boolean(muted);
       },
+      async setOutputMuted(muted) {
+        this.outputMuted = Boolean(muted);
+      },
     };
     this.transports.push(transport);
     return transport;

@@ -89,6 +89,57 @@ Common direct tools include:
 Agents should prefer stored actions. Primitives are for exploration, repair, or
 cases where no reviewed site action exists.
 
+### Policy Exception Reports
+
+A direct generic primitive call from the hosted agent must include a
+`policy_exception_report` argument:
+
+```json
+{
+  "policy_exception_report": {
+    "kind": "generic",
+    "intended_tool": "pointer.click",
+    "actions_json_path": "none",
+    "reason": "No stored site action covers this control yet."
+  }
+}
+```
+
+`kind` is `generic` for ordinary primitives or `debugger` for privileged
+fallbacks. `intended_tool` names the primitive being called,
+`actions_json_path` names the closest stored action considered (or
+`none`/`missing`), and `reason` says why the stored surface was not enough.
+
+Calls without a valid report are rejected with
+`policy_exception_report_required` before they reach the bridge. The hosted
+tool catalog decorates every direct primitive's schema with this required
+parameter, so the model sees the requirement. Two paths are exempt:
+`actions.site` calls (the stored action *is* the site-specific operation) and
+internal primitive steps executed inside a stored workflow. The report is
+stripped before the primitive executes and recorded in the session log as
+diagnostic evidence — agents should not narrate it to the user.
+
+### Session Task Queue
+
+For multi-item jobs (bulk edits, batch rescheduling, audits) the runtime
+provides a session-scoped task queue: `task.add` (one `text` or a `tasks`
+array, FIFO), `task.next` (pull and mark in progress), `task.complete` (report
+`done` or `failed` with a `result` note), `task.list`, and `task.clear`. Seed
+the entire plan first, then loop next → work → complete; a pulled-but-never-
+completed task is returned again rather than skipped, and the empty-queue
+`task.next` response includes every task's status and result so the final
+report is grounded in recorded outcomes. State lives for the tab session.
+
+### Overlay Menu Control
+
+The agent can move its own overlay out of the way: `overlay.menu.collapse`,
+`overlay.menu.expand`, `overlay.menu.move` (corner or coordinates),
+`overlay.menu.hide`, and `overlay.menu.show`. The overlay is a real on-page
+element with a high z-index — a click on a page target it covers lands on the
+overlay instead. For click-heavy operations, hide the overlay first, operate,
+then show it again (stored site actions can encode this hide-operate-unhide
+sequence themselves).
+
 ## Claimed Tabs
 
 The extension can manage more than one user-authorized tab. This lets a hosted

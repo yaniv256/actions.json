@@ -9,34 +9,78 @@
       "summary": "Capture a true rendered screenshot where the host has browser-level authority.",
       "capability_class": "privileged",
       "portable": false,
-      "capabilities": ["browser.screenshot"],
+      "capabilities": [
+        "browser.screenshot"
+      ],
       "input_schema": {
         "type": "object",
         "properties": {
-          "format": { "type": "string", "enum": ["png", "jpeg"] },
-          "quality": { "type": "integer", "minimum": 1, "maximum": 100 },
-          "max_width": { "type": "integer", "minimum": 1 },
-          "max_height": { "type": "integer", "minimum": 1 },
-          "max_kilobytes": { "type": "integer", "minimum": 1 }
+          "format": {
+            "type": "string",
+            "enum": [
+              "png",
+              "jpeg"
+            ]
+          },
+          "quality": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "max_width": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "max_height": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "max_kilobytes": {
+            "type": "integer",
+            "minimum": 1
+          }
         },
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
-        "required": ["image"],
+        "required": [
+          "image"
+        ],
         "properties": {
-          "image": { "type": "string" },
-          "mime_type": { "type": "string" },
-          "width": { "type": "integer" },
-          "height": { "type": "integer" }
+          "image": {
+            "type": "string"
+          },
+          "mime_type": {
+            "type": "string"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          }
         }
       },
       "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "unsupported", "reason": "capability_unavailable" }
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
       },
-      "errors": ["capability_unavailable", "capture_failed"],
-      "conformance": { "fixture": null, "assertions": ["structured_result_or_capability_error"] }
+      "errors": [
+        "capability_unavailable",
+        "capture_failed"
+      ],
+      "conformance": {
+        "fixture": null,
+        "assertions": [
+          "structured_result_or_capability_error"
+        ]
+      }
     },
     {
       "name": "browser.claimed_tabs.list",
@@ -45,7 +89,10 @@
       "summary": "List browser tabs already claimed by the actions.json extension.",
       "capability_class": "privileged",
       "portable": false,
-      "capabilities": ["browser.tabs", "browser.claimed_tabs"],
+      "capabilities": [
+        "browser.tabs",
+        "browser.claimed_tabs"
+      ],
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -53,19 +100,34 @@
       },
       "output_schema": {
         "type": "object",
-        "required": ["tabs"],
+        "required": [
+          "tabs"
+        ],
         "properties": {
           "tabs": {
             "type": "array",
             "items": {
               "type": "object",
-              "required": ["tab_id", "url"],
+              "required": [
+                "tab_id",
+                "url"
+              ],
               "properties": {
-                "tab_id": { "type": "integer" },
-                "url": { "type": "string" },
-                "title": { "type": "string" },
-                "active": { "type": "boolean" },
-                "claimed_at": { "type": "string" }
+                "tab_id": {
+                  "type": "integer"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "active": {
+                  "type": "boolean"
+                },
+                "claimed_at": {
+                  "type": "string"
+                }
               },
               "additionalProperties": true
             }
@@ -73,11 +135,23 @@
         }
       },
       "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "unsupported", "reason": "capability_unavailable" }
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
       },
-      "errors": ["capability_unavailable"],
-      "conformance": { "fixture": null, "assertions": ["structured_result_or_capability_error"] }
+      "errors": [
+        "capability_unavailable"
+      ],
+      "conformance": {
+        "fixture": null,
+        "assertions": [
+          "structured_result_or_capability_error"
+        ]
+      }
     },
     {
       "name": "browser.claimed_tabs.activate",
@@ -86,30 +160,60 @@
       "summary": "Focus an already-claimed browser tab and reconnect its actions.json runtime.",
       "capability_class": "privileged",
       "portable": false,
-      "capabilities": ["browser.tabs", "browser.claimed_tabs"],
+      "capabilities": [
+        "browser.tabs",
+        "browser.claimed_tabs"
+      ],
       "input_schema": {
         "type": "object",
-        "required": ["tab_id"],
+        "required": [
+          "tab_id"
+        ],
         "properties": {
-          "tab_id": { "type": "integer", "description": "Chrome tab id from browser.claimed_tabs.list." }
+          "tab_id": {
+            "type": "integer",
+            "description": "Chrome tab id from browser.claimed_tabs.list."
+          }
         },
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
-        "required": ["ok"],
+        "required": [
+          "ok"
+        ],
         "properties": {
-          "ok": { "type": "boolean" },
-          "tab_id": { "type": "integer" },
-          "url": { "type": "string" }
+          "ok": {
+            "type": "boolean"
+          },
+          "tab_id": {
+            "type": "integer"
+          },
+          "url": {
+            "type": "string"
+          }
         }
       },
       "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "unsupported", "reason": "capability_unavailable" }
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
       },
-      "errors": ["capability_unavailable", "target_not_found", "permission_denied"],
-      "conformance": { "fixture": null, "assertions": ["structured_result_or_capability_error"] }
+      "errors": [
+        "capability_unavailable",
+        "target_not_found",
+        "permission_denied"
+      ],
+      "conformance": {
+        "fixture": null,
+        "assertions": [
+          "structured_result_or_capability_error"
+        ]
+      }
     },
     {
       "name": "pointer.move",
@@ -118,31 +222,62 @@
       "summary": "Move a visible pointer affordance to viewport coordinates.",
       "capability_class": "portable",
       "portable": true,
-      "capabilities": ["pointer.visible", "pointer.move"],
+      "capabilities": [
+        "pointer.visible",
+        "pointer.move"
+      ],
       "input_schema": {
         "type": "object",
-        "required": ["x", "y"],
+        "required": [
+          "x",
+          "y"
+        ],
         "properties": {
-          "x": { "type": "number" },
-          "y": { "type": "number" },
-          "duration_ms": { "type": "integer", "minimum": 0 }
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 0
+          }
         },
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
-        "required": ["x", "y"],
+        "required": [
+          "x",
+          "y"
+        ],
         "properties": {
-          "x": { "type": "number" },
-          "y": { "type": "number" }
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          }
         }
       },
       "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
       },
-      "errors": ["point_out_of_viewport"],
-      "conformance": { "fixture": "pointer-fixture", "assertions": ["visible_pointer_position"] }
+      "errors": [
+        "point_out_of_viewport"
+      ],
+      "conformance": {
+        "fixture": "pointer-fixture",
+        "assertions": [
+          "visible_pointer_position"
+        ]
+      }
     },
     {
       "name": "pointer.click",
@@ -151,24 +286,63 @@
       "summary": "Move visibly to viewport coordinates and perform a click.",
       "capability_class": "portable",
       "portable": true,
-      "capabilities": ["pointer.visible", "pointer.click"],
+      "capabilities": [
+        "pointer.visible",
+        "pointer.click"
+      ],
       "input_schema": {
         "type": "object",
-        "required": ["x", "y"],
+        "required": [
+          "x",
+          "y"
+        ],
         "properties": {
-          "x": { "type": "number" },
-          "y": { "type": "number" },
-          "button": { "type": "string", "enum": ["left", "middle", "right"] }
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "button": {
+            "type": "string",
+            "enum": [
+              "left",
+              "middle",
+              "right"
+            ]
+          }
         },
         "additionalProperties": false
       },
-      "output_schema": { "type": "object", "required": ["clicked"], "properties": { "clicked": { "type": "boolean" } } },
-      "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "clicked"
+        ],
+        "properties": {
+          "clicked": {
+            "type": "boolean"
+          }
+        }
       },
-      "errors": ["point_out_of_viewport", "target_not_found"],
-      "conformance": { "fixture": "pointer-fixture", "assertions": ["click_event_observed"] }
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
+      },
+      "errors": [
+        "point_out_of_viewport",
+        "target_not_found"
+      ],
+      "conformance": {
+        "fixture": "pointer-fixture",
+        "assertions": [
+          "click_event_observed"
+        ]
+      }
     },
     {
       "name": "pointer.double_click",
@@ -177,49 +351,176 @@
       "summary": "Move visibly to viewport coordinates and perform a double click.",
       "capability_class": "portable",
       "portable": true,
-      "capabilities": ["pointer.visible", "pointer.double_click"],
+      "capabilities": [
+        "pointer.visible",
+        "pointer.double_click"
+      ],
       "input_schema": {
         "type": "object",
-        "required": ["x", "y"],
+        "required": [
+          "x",
+          "y"
+        ],
         "properties": {
-          "x": { "type": "number" },
-          "y": { "type": "number" }
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          }
         },
         "additionalProperties": false
       },
-      "output_schema": { "type": "object", "required": ["double_clicked"], "properties": { "double_clicked": { "type": "boolean" } } },
-      "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "double_clicked"
+        ],
+        "properties": {
+          "double_clicked": {
+            "type": "boolean"
+          }
+        }
       },
-      "errors": ["point_out_of_viewport", "target_not_found"],
-      "conformance": { "fixture": "pointer-fixture", "assertions": ["double_click_event_observed"] }
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
+      },
+      "errors": [
+        "point_out_of_viewport",
+        "target_not_found"
+      ],
+      "conformance": {
+        "fixture": "pointer-fixture",
+        "assertions": [
+          "double_click_event_observed"
+        ]
+      }
     },
     {
       "name": "pointer.drag",
       "version": 1,
       "stage": 1,
-      "summary": "Move visibly from one viewport point to another while dragging.",
+      "summary": "Move visibly from one viewport point or locator to another while dragging.",
       "capability_class": "portable",
       "portable": true,
-      "capabilities": ["pointer.visible", "pointer.drag"],
+      "capabilities": [
+        "pointer.visible",
+        "pointer.drag"
+      ],
       "input_schema": {
         "type": "object",
-        "required": ["from", "to"],
+        "required": [
+          "from",
+          "to"
+        ],
         "properties": {
-          "from": { "type": "object", "required": ["x", "y"] },
-          "to": { "type": "object", "required": ["x", "y"] },
-          "duration_ms": { "type": "integer", "minimum": 0 }
+          "from": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "selector": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "text_contains": {
+                "type": "string"
+              },
+              "text_equals": {
+                "type": "string"
+              },
+              "locator": {
+                "type": "object"
+              }
+            },
+            "additionalProperties": true
+          },
+          "to": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "number"
+              },
+              "y": {
+                "type": "number"
+              },
+              "selector": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "text_contains": {
+                "type": "string"
+              },
+              "text_equals": {
+                "type": "string"
+              },
+              "locator": {
+                "type": "object"
+              }
+            },
+            "additionalProperties": true
+          },
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "steps": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 40
+          }
         },
         "additionalProperties": false
       },
-      "output_schema": { "type": "object", "required": ["dragged"], "properties": { "dragged": { "type": "boolean" } } },
-      "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "dragged"
+        ],
+        "properties": {
+          "dragged": {
+            "type": "boolean"
+          },
+          "steps": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "diagnostics": {
+            "type": "object"
+          }
+        }
       },
-      "errors": ["point_out_of_viewport", "drag_failed"],
-      "conformance": { "fixture": "pointer-fixture", "assertions": ["drag_event_observed"] }
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
+      },
+      "errors": [
+        "point_out_of_viewport",
+        "drag_failed"
+      ],
+      "conformance": {
+        "fixture": "pointer-fixture",
+        "assertions": [
+          "drag_event_observed"
+        ]
+      }
     },
     {
       "name": "viewport.scroll",
@@ -228,75 +529,687 @@
       "summary": "Scroll the current viewport by a visible delta.",
       "capability_class": "portable",
       "portable": true,
-      "capabilities": ["viewport.scroll"],
+      "capabilities": [
+        "viewport.scroll"
+      ],
       "input_schema": {
         "type": "object",
         "properties": {
-          "delta_x": { "type": "number" },
-          "delta_y": { "type": "number" }
+          "delta_x": {
+            "type": "number"
+          },
+          "delta_y": {
+            "type": "number"
+          }
         },
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "scroll_x": { "type": "number" },
-          "scroll_y": { "type": "number" }
+          "scroll_x": {
+            "type": "number"
+          },
+          "scroll_y": {
+            "type": "number"
+          }
         }
       },
       "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
       },
-      "errors": ["scroll_failed"],
-      "conformance": { "fixture": "scroll-fixture", "assertions": ["scroll_position_changed"] }
+      "errors": [
+        "scroll_failed"
+      ],
+      "conformance": {
+        "fixture": "scroll-fixture",
+        "assertions": [
+          "scroll_position_changed"
+        ]
+      }
+    },
+    {
+      "name": "storage.read_file",
+      "version": 1,
+      "stage": 1,
+      "summary": "Read a declared text file from the loaded actions.json storage bundle by path or file id.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": [
+        "storage.read_file"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Canonical storage path, such as scopes/shared/name/sites/example.com/path/SKILL.md."
+          },
+          "id": {
+            "type": "string",
+            "description": "Declared file id from actions.site mode=list files."
+          },
+          "max_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 256000,
+            "default": 64000
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "path",
+          "text"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "relative_path": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "mime_type": {
+            "type": "string"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "front_matter": {
+            "type": "object"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable",
+          "error": {
+            "code": "capability_unavailable",
+            "message": "The bookmarklet/embed host does not expose storage.read_file in this runtime slice."
+          }
+        }
+      },
+      "errors": [
+        "storage_file_not_found",
+        "storage_file_not_text",
+        "storage_file_too_large",
+        "storage_file_ambiguous_id",
+        "storage_file_path_unauthorized",
+        "invalid_input"
+      ],
+      "conformance": {
+        "fixture": "storage-text-file-fixture",
+        "assertions": [
+          "declared_file_read",
+          "skill_front_matter_parsed"
+        ]
+      }
     },
     {
       "name": "text.insert",
       "version": 1,
       "stage": 1,
-      "summary": "Insert text into the focused editable target.",
+      "summary": "Insert text into the focused editable target or a requested editable locator.",
       "capability_class": "portable",
       "portable": true,
-      "capabilities": ["text.insert"],
+      "capabilities": [
+        "text.insert"
+      ],
       "input_schema": {
         "type": "object",
-        "required": ["text"],
-        "properties": { "text": { "type": "string" } },
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "target": {
+            "type": "object",
+            "description": "Optional editable target locator. Omit to use the focused editable element."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "append",
+              "replace"
+            ],
+            "default": "append"
+          }
+        },
         "additionalProperties": false
       },
-      "output_schema": { "type": "object", "required": ["inserted"], "properties": { "inserted": { "type": "boolean" } } },
-      "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "inserted"
+        ],
+        "properties": {
+          "inserted": {
+            "type": "boolean"
+          },
+          "inserted_length": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
       },
-      "errors": ["target_not_editable", "insert_failed"],
-      "conformance": { "fixture": "input-fixture", "assertions": ["input_value_changed"] }
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
+      },
+      "errors": [
+        "target_not_editable",
+        "insert_failed"
+      ],
+      "conformance": {
+        "fixture": "input-fixture",
+        "assertions": [
+          "input_value_changed"
+        ]
+      }
     },
     {
       "name": "keyboard.press",
       "version": 1,
       "stage": 1,
-      "summary": "Press a keyboard key where the host can provide the requested fidelity.",
+      "summary": "Dispatch a page-level keyboard key or modifier chord to the focused element.",
       "capability_class": "mixed",
       "portable": false,
-      "capabilities": ["keyboard.press"],
+      "capabilities": [
+        "keyboard.press"
+      ],
       "input_schema": {
         "type": "object",
-        "required": ["key"],
+        "required": [
+          "key"
+        ],
         "properties": {
-          "key": { "type": "string" },
-          "modifiers": { "type": "array", "items": { "type": "string" } }
+          "key": {
+            "type": "string",
+            "description": "Key name, or a compact chord such as Meta+A, Control+A, or Shift+Enter."
+          },
+          "modifiers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "Alt",
+                "Control",
+                "Ctrl",
+                "Meta",
+                "Cmd",
+                "Command",
+                "Shift",
+                "Option"
+              ]
+            }
+          }
         },
         "additionalProperties": false
       },
-      "output_schema": { "type": "object", "required": ["pressed"], "properties": { "pressed": { "type": "boolean" } } },
-      "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "partial", "reason": "trusted_key_events_unavailable" }
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "pressed"
+        ],
+        "properties": {
+          "pressed": {
+            "type": "boolean"
+          },
+          "modifiers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fidelity": {
+            "type": "string"
+          }
+        }
       },
-      "errors": ["capability_unavailable", "key_not_supported"],
-      "conformance": { "fixture": "input-fixture", "assertions": ["supported_key_effect_or_capability_error"] }
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "partial",
+          "reason": "trusted_key_events_unavailable"
+        }
+      },
+      "errors": [
+        "invalid_key"
+      ],
+      "conformance": {
+        "fixture": "input-fixture",
+        "assertions": [
+          "supported_key_effect_or_capability_error"
+        ]
+      }
+    },
+    {
+      "name": "transfer.insert",
+      "version": 1,
+      "stage": 1,
+      "summary": "Render a stored transfer item and insert it into a target editable element without resending the full payload through the model.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": [
+        "transfer.insert",
+        "text.insert",
+        "cross_tab.transfer"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "target": {
+            "type": "object"
+          },
+          "item_selector": {
+            "type": "object"
+          },
+          "render": {
+            "type": "object"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "replace",
+              "append"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "inserted": {
+            "type": "boolean"
+          },
+          "inserted_bytes": {
+            "type": "integer"
+          },
+          "label": {
+            "type": "string"
+          }
+        }
+      },
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
+      },
+      "errors": [
+        "transfer_label_not_found",
+        "transfer_expired",
+        "destination_tab_unauthorized",
+        "target_not_editable",
+        "target_not_found"
+      ],
+      "conformance": {
+        "fixture": "transfer-fixture",
+        "assertions": [
+          "transfer_item_inserted"
+        ]
+      }
+    },
+    {
+      "name": "transfer.clear",
+      "version": 1,
+      "stage": 1,
+      "summary": "Clear one transfer item or all transfer items in the current session.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": [
+        "transfer.clear",
+        "cross_tab.transfer"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "session"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "cleared_count": {
+            "type": "integer"
+          }
+        }
+      },
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
+      },
+      "errors": [
+        "transfer_label_not_found"
+      ],
+      "conformance": {
+        "fixture": "transfer-fixture",
+        "assertions": [
+          "transfer_item_cleared"
+        ]
+      }
+    },
+    {
+      "name": "transfer.read",
+      "version": 1,
+      "stage": 1,
+      "summary": "Read transfer-buffer metadata or payload by label or id.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": [
+        "transfer.read",
+        "cross_tab.transfer"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "include_value": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          },
+          "value": {},
+          "size_bytes": {
+            "type": "integer"
+          }
+        }
+      },
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
+      },
+      "errors": [
+        "transfer_label_not_found",
+        "transfer_expired"
+      ],
+      "conformance": {
+        "fixture": "transfer-fixture",
+        "assertions": [
+          "transfer_item_read"
+        ]
+      }
+    },
+    {
+      "name": "transfer.write",
+      "version": 1,
+      "stage": 1,
+      "summary": "Store text or structured JSON in the extension-local transfer buffer for cross-tab workflows.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": [
+        "transfer.write",
+        "cross_tab.transfer"
+      ],
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "label",
+          "format",
+          "value"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "text/plain",
+              "application/json",
+              "text/uri-list"
+            ]
+          },
+          "value": {},
+          "metadata": {
+            "type": "object"
+          },
+          "ttl_seconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "replace",
+              "append"
+            ]
+          },
+          "redaction": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "format": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer"
+          },
+          "expires_at": {
+            "type": "string"
+          }
+        }
+      },
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
+      },
+      "errors": [
+        "transfer_payload_too_large",
+        "transfer_format_unsupported",
+        "transfer_append_incompatible",
+        "source_tab_unauthorized"
+      ],
+      "conformance": {
+        "fixture": "transfer-fixture",
+        "assertions": [
+          "transfer_item_written"
+        ]
+      }
+    },
+    {
+      "name": "clipboard.write",
+      "version": 1,
+      "stage": 1,
+      "summary": "Write text to the extension-approved clipboard or transfer surface when permission is available.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": [
+        "clipboard.write"
+      ],
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "written": {
+            "type": "boolean"
+          },
+          "textLength": {
+            "type": "integer"
+          }
+        }
+      },
+      "adapters": {
+        "extension": {
+          "support": "unsupported",
+          "reason": "transfer_buffer_preferred",
+          "error": {
+            "code": "capability_unavailable",
+            "message": "Clipboard primitives are not exposed in this runtime slice. Use transfer.write/read/insert for approved cross-tab transfer."
+          }
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
+      },
+      "errors": [
+        "clipboard_permission_denied",
+        "capability_unsupported"
+      ],
+      "conformance": {
+        "fixture": "clipboard-fixture",
+        "assertions": [
+          "clipboard_text_written_or_permission_error"
+        ]
+      }
+    },
+    {
+      "name": "clipboard.read",
+      "version": 1,
+      "stage": 1,
+      "summary": "Read text from the extension-approved clipboard or transfer surface when permission is available.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": [
+        "clipboard.read"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "adapters": {
+        "extension": {
+          "support": "unsupported",
+          "reason": "transfer_buffer_preferred",
+          "error": {
+            "code": "capability_unavailable",
+            "message": "Clipboard primitives are not exposed in this runtime slice. Use transfer.write/read/insert for approved cross-tab transfer."
+          }
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
+      },
+      "errors": [
+        "clipboard_permission_denied",
+        "capability_unsupported"
+      ],
+      "conformance": {
+        "fixture": "clipboard-fixture",
+        "assertions": [
+          "clipboard_text_returned_or_permission_error"
+        ]
+      }
     },
     {
       "name": "runtime.session.name",
@@ -305,20 +1218,55 @@
       "summary": "Name the current browser-control session for user-visible transparency.",
       "capability_class": "privileged",
       "portable": false,
-      "capabilities": ["runtime.session"],
+      "capabilities": [
+        "runtime.session"
+      ],
       "input_schema": {
         "type": "object",
-        "required": ["name"],
-        "properties": { "name": { "type": "string" } },
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
         "additionalProperties": false
       },
-      "output_schema": { "type": "object", "required": ["named"], "properties": { "named": { "type": "boolean" } } },
-      "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "unsupported", "reason": "capability_unavailable" }
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "named"
+        ],
+        "properties": {
+          "named": {
+            "type": "boolean"
+          }
+        }
       },
-      "errors": ["capability_unavailable"],
-      "conformance": { "fixture": null, "assertions": ["structured_result_or_capability_error"] }
+      "adapters": {
+        "extension": {
+          "support": "unsupported",
+          "reason": "handler_unavailable",
+          "error": {
+            "code": "capability_unavailable",
+            "message": "runtime.session.name is not exposed by this runtime slice."
+          }
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
+      },
+      "errors": [
+        "capability_unavailable"
+      ],
+      "conformance": {
+        "fixture": null,
+        "assertions": [
+          "structured_result_or_capability_error"
+        ]
+      }
     },
     {
       "name": "runtime.session.finalize_tabs",
@@ -327,15 +1275,48 @@
       "summary": "Finalize browser tabs controlled during an authoring session.",
       "capability_class": "privileged",
       "portable": false,
-      "capabilities": ["runtime.session"],
-      "input_schema": { "type": "object", "properties": {}, "additionalProperties": false },
-      "output_schema": { "type": "object", "required": ["finalized"], "properties": { "finalized": { "type": "boolean" } } },
-      "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "unsupported", "reason": "capability_unavailable" }
+      "capabilities": [
+        "runtime.session"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
       },
-      "errors": ["capability_unavailable"],
-      "conformance": { "fixture": null, "assertions": ["structured_result_or_capability_error"] }
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "finalized"
+        ],
+        "properties": {
+          "finalized": {
+            "type": "boolean"
+          }
+        }
+      },
+      "adapters": {
+        "extension": {
+          "support": "unsupported",
+          "reason": "handler_unavailable",
+          "error": {
+            "code": "capability_unavailable",
+            "message": "runtime.session.finalize_tabs is not exposed by this runtime slice."
+          }
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
+      },
+      "errors": [
+        "capability_unavailable"
+      ],
+      "conformance": {
+        "fixture": null,
+        "assertions": [
+          "structured_result_or_capability_error"
+        ]
+      }
     },
     {
       "name": "page.info",
@@ -344,21 +1325,40 @@
       "summary": "Return basic information about the current page.",
       "capability_class": "portable",
       "portable": true,
-      "capabilities": ["page.info"],
-      "input_schema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "capabilities": [
+        "page.info"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
       "output_schema": {
         "type": "object",
         "properties": {
-          "url": { "type": "string" },
-          "title": { "type": "string" }
+          "url": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
         }
       },
       "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
       },
       "errors": [],
-      "conformance": { "fixture": "page-fixture", "assertions": ["url_and_title_returned"] }
+      "conformance": {
+        "fixture": "page-fixture",
+        "assertions": [
+          "url_and_title_returned"
+        ]
+      }
     },
     {
       "name": "dom.observe.visible",
@@ -367,22 +1367,46 @@
       "summary": "Observe visible DOM candidates that match a selector or text query.",
       "capability_class": "portable",
       "portable": true,
-      "capabilities": ["dom.observe"],
+      "capabilities": [
+        "dom.observe"
+      ],
       "input_schema": {
         "type": "object",
         "properties": {
-          "selector": { "type": "string" },
-          "text_contains": { "type": "string" }
+          "selector": {
+            "type": "string"
+          },
+          "text_contains": {
+            "type": "string"
+          }
         },
         "additionalProperties": false
       },
-      "output_schema": { "type": "object", "properties": { "matches": { "type": "array" } } },
-      "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "matches": {
+            "type": "array"
+          }
+        }
       },
-      "errors": ["invalid_selector"],
-      "conformance": { "fixture": "locator-fixture", "assertions": ["visible_matches_returned"] }
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
+      },
+      "errors": [
+        "invalid_selector"
+      ],
+      "conformance": {
+        "fixture": "locator-fixture",
+        "assertions": [
+          "visible_matches_returned"
+        ]
+      }
     },
     {
       "name": "dom.snapshot_text",
@@ -391,22 +1415,47 @@
       "summary": "Return a text snapshot of visible page content.",
       "capability_class": "portable",
       "portable": true,
-      "capabilities": ["dom.snapshot_text"],
+      "capabilities": [
+        "dom.snapshot_text"
+      ],
       "input_schema": {
         "type": "object",
         "properties": {
-          "selector": { "type": "string" },
-          "max_chars": { "type": "integer", "minimum": 1 }
+          "selector": {
+            "type": "string"
+          },
+          "max_chars": {
+            "type": "integer",
+            "minimum": 1
+          }
         },
         "additionalProperties": false
       },
-      "output_schema": { "type": "object", "properties": { "text": { "type": "string" } } },
-      "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        }
       },
-      "errors": ["invalid_selector"],
-      "conformance": { "fixture": "text-fixture", "assertions": ["visible_text_returned"] }
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
+      },
+      "errors": [
+        "invalid_selector"
+      ],
+      "conformance": {
+        "fixture": "text-fixture",
+        "assertions": [
+          "visible_text_returned"
+        ]
+      }
     },
     {
       "name": "dom.list_sections",
@@ -415,34 +1464,71 @@
       "summary": "List rendered page sections with inferred headings, document offsets, viewport visibility, and optional item counts.",
       "capability_class": "portable",
       "portable": true,
-      "capabilities": ["dom.query", "geometry.document", "section.heading"],
+      "capabilities": [
+        "dom.query",
+        "geometry.document",
+        "section.heading"
+      ],
       "input_schema": {
         "type": "object",
         "properties": {
-          "selector": { "type": "string" },
-          "heading_selector": { "type": "string" },
-          "item_selector": { "type": "string" },
-          "text_contains": { "type": "string" },
-          "max_sections": { "type": "integer", "minimum": 1 },
-          "max_heading_length": { "type": "integer", "minimum": 12 }
+          "selector": {
+            "type": "string"
+          },
+          "heading_selector": {
+            "type": "string"
+          },
+          "item_selector": {
+            "type": "string"
+          },
+          "text_contains": {
+            "type": "string"
+          },
+          "max_sections": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "max_heading_length": {
+            "type": "integer",
+            "minimum": 12
+          }
         },
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "sections": { "type": "array" },
-          "section_count": { "type": "integer" },
-          "scroll_y": { "type": "number" },
-          "viewport_height": { "type": "number" }
+          "sections": {
+            "type": "array"
+          },
+          "section_count": {
+            "type": "integer"
+          },
+          "scroll_y": {
+            "type": "number"
+          },
+          "viewport_height": {
+            "type": "number"
+          }
         }
       },
       "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
       },
-      "errors": ["invalid_selector"],
-      "conformance": { "fixture": "section-fixture", "assertions": ["headings_offsets_and_visibility_returned"] }
+      "errors": [
+        "invalid_selector"
+      ],
+      "conformance": {
+        "fixture": "section-fixture",
+        "assertions": [
+          "headings_offsets_and_visibility_returned"
+        ]
+      }
     },
     {
       "name": "locator.element_info",
@@ -451,26 +1537,52 @@
       "summary": "Resolve a locator to visible element geometry and a recommended clickable center.",
       "capability_class": "portable",
       "portable": true,
-      "capabilities": ["locator.resolve", "geometry.viewport"],
+      "capabilities": [
+        "locator.resolve",
+        "geometry.viewport"
+      ],
       "input_schema": {
         "type": "object",
-        "required": ["locator"],
-        "properties": { "locator": { "type": "object" } },
+        "required": [
+          "locator"
+        ],
+        "properties": {
+          "locator": {
+            "type": "object"
+          }
+        },
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
         "properties": {
-          "bounding_box": { "type": "object" },
-          "clickable_center": { "type": "object" }
+          "bounding_box": {
+            "type": "object"
+          },
+          "clickable_center": {
+            "type": "object"
+          }
         }
       },
       "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
       },
-      "errors": ["target_not_found", "multiple_targets", "target_not_visible"],
-      "conformance": { "fixture": "locator-fixture", "assertions": ["bounding_box_and_center_returned"] }
+      "errors": [
+        "target_not_found",
+        "multiple_targets",
+        "target_not_visible"
+      ],
+      "conformance": {
+        "fixture": "locator-fixture",
+        "assertions": [
+          "bounding_box_and_center_returned"
+        ]
+      }
     },
     {
       "name": "locator.text_content",
@@ -479,20 +1591,48 @@
       "summary": "Resolve a locator and return its visible text content.",
       "capability_class": "portable",
       "portable": true,
-      "capabilities": ["locator.resolve", "text.read"],
+      "capabilities": [
+        "locator.resolve",
+        "text.read"
+      ],
       "input_schema": {
         "type": "object",
-        "required": ["locator"],
-        "properties": { "locator": { "type": "object" } },
+        "required": [
+          "locator"
+        ],
+        "properties": {
+          "locator": {
+            "type": "object"
+          }
+        },
         "additionalProperties": false
       },
-      "output_schema": { "type": "object", "properties": { "text": { "type": "string" } } },
-      "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        }
       },
-      "errors": ["target_not_found", "multiple_targets"],
-      "conformance": { "fixture": "locator-fixture", "assertions": ["text_content_returned"] }
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
+      },
+      "errors": [
+        "target_not_found",
+        "multiple_targets"
+      ],
+      "conformance": {
+        "fixture": "locator-fixture",
+        "assertions": [
+          "text_content_returned"
+        ]
+      }
     },
     {
       "name": "locator.wait_for",
@@ -501,24 +1641,59 @@
       "summary": "Wait for a locator to satisfy a visible or attached state.",
       "capability_class": "portable",
       "portable": true,
-      "capabilities": ["locator.resolve", "wait"],
+      "capabilities": [
+        "locator.resolve",
+        "wait"
+      ],
       "input_schema": {
         "type": "object",
-        "required": ["locator"],
+        "required": [
+          "locator"
+        ],
         "properties": {
-          "locator": { "type": "object" },
-          "state": { "type": "string", "enum": ["attached", "visible"] },
-          "timeout_ms": { "type": "integer", "minimum": 0 }
+          "locator": {
+            "type": "object"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "attached",
+              "visible"
+            ]
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 0
+          }
         },
         "additionalProperties": false
       },
-      "output_schema": { "type": "object", "properties": { "matched": { "type": "boolean" } } },
-      "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "matched": {
+            "type": "boolean"
+          }
+        }
       },
-      "errors": ["timeout", "target_not_found"],
-      "conformance": { "fixture": "locator-fixture", "assertions": ["wait_condition_satisfied"] }
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
+      },
+      "errors": [
+        "timeout",
+        "target_not_found"
+      ],
+      "conformance": {
+        "fixture": "locator-fixture",
+        "assertions": [
+          "wait_condition_satisfied"
+        ]
+      }
     },
     {
       "name": "overlay.open",
@@ -527,7 +1702,10 @@
       "summary": "Render an agent-created HTML document in the authorized page overlay.",
       "capability_class": "privileged",
       "portable": false,
-      "capabilities": ["overlay.render", "overlay.template_data"],
+      "capabilities": [
+        "overlay.render",
+        "overlay.template_data"
+      ],
       "input_schema": {
         "type": "object",
         "properties": {
@@ -538,43 +1716,114 @@
           "template": {
             "type": "object",
             "description": "Storage reference for a reusable overlay template. The runtime resolves it from the uploaded actions.json.storage bundle.",
-            "required": ["scope", "path"],
+            "required": [
+              "scope",
+              "path"
+            ],
             "properties": {
-              "scope": { "type": "string", "description": "Storage scope, such as public, private, or shared/name." },
-              "path": { "type": "string", "description": "Path inside the scope, such as sites/example.com/overlays/report/template.html." }
+              "scope": {
+                "type": "string",
+                "description": "Storage scope, such as public, private, or shared/name."
+              },
+              "path": {
+                "type": "string",
+                "description": "Path inside the scope, such as sites/example.com/overlays/report/template.html."
+              }
             },
             "additionalProperties": false
           },
           "data": {
             "type": "object",
             "description": "Optional storage reference for JSON data injected into a template as [data-actions-json-overlay-data]. Commonly private data with a public template.",
-            "required": ["scope", "path"],
+            "required": [
+              "scope",
+              "path"
+            ],
             "properties": {
-              "scope": { "type": "string" },
-              "path": { "type": "string" }
+              "scope": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
             },
             "additionalProperties": false
           },
-          "title": { "type": "string", "description": "Overlay title shown in the drag handle." },
-          "width": { "type": "integer", "minimum": 420, "maximum": 1400 },
-          "height": { "type": "integer", "minimum": 320, "maximum": 1000 },
+          "title": {
+            "type": "string",
+            "description": "Overlay title shown in the drag handle."
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 420,
+            "maximum": 1400
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 320,
+            "maximum": 1000
+          },
           "launchers": {
             "type": "array",
             "description": "Optional visible-page buttons that reopen this overlay from a relevant DOM anchor.",
             "items": {
               "type": "object",
               "properties": {
-                "id": { "type": "string", "description": "Stable launcher id used to replace older buttons for the same overlay affordance." },
-                "label": { "type": "string", "description": "Button text shown in the original page DOM." },
-                "title": { "type": "string", "description": "Tooltip/title for the launcher button." },
-                "selector": { "type": "string", "description": "Single CSS selector hint for the element to place the button near." },
-                "selectors": { "type": "array", "items": { "type": "string" }, "description": "Ordered CSS selector hints for the element to place the button near." },
-                "text_contains": { "type": "string", "description": "Optional visible text filter for selected anchor candidates." },
-                "text_equals": { "type": "string", "description": "Optional exact visible text filter for selected anchor candidates." },
-                "url_contains": { "type": "string", "description": "Only install this launcher when the current page URL contains this string." },
-                "url_matches": { "type": "string", "description": "Only install this launcher when the current page URL matches this regular expression." },
-                "placement": { "type": "string", "enum": ["beforebegin", "afterbegin", "beforeend", "afterend"], "default": "afterend" },
-                "max_instances": { "type": "integer", "minimum": 1, "maximum": 10, "default": 3 }
+                "id": {
+                  "type": "string",
+                  "description": "Stable launcher id used to replace older buttons for the same overlay affordance."
+                },
+                "label": {
+                  "type": "string",
+                  "description": "Button text shown in the original page DOM."
+                },
+                "title": {
+                  "type": "string",
+                  "description": "Tooltip/title for the launcher button."
+                },
+                "selector": {
+                  "type": "string",
+                  "description": "Single CSS selector hint for the element to place the button near."
+                },
+                "selectors": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Ordered CSS selector hints for the element to place the button near."
+                },
+                "text_contains": {
+                  "type": "string",
+                  "description": "Optional visible text filter for selected anchor candidates."
+                },
+                "text_equals": {
+                  "type": "string",
+                  "description": "Optional exact visible text filter for selected anchor candidates."
+                },
+                "url_contains": {
+                  "type": "string",
+                  "description": "Only install this launcher when the current page URL contains this string."
+                },
+                "url_matches": {
+                  "type": "string",
+                  "description": "Only install this launcher when the current page URL matches this regular expression."
+                },
+                "placement": {
+                  "type": "string",
+                  "enum": [
+                    "beforebegin",
+                    "afterbegin",
+                    "beforeend",
+                    "afterend"
+                  ],
+                  "default": "afterend"
+                },
+                "max_instances": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 10,
+                  "default": 3
+                }
               },
               "additionalProperties": false
             }
@@ -584,19 +1833,42 @@
       },
       "output_schema": {
         "type": "object",
-        "required": ["ok", "overlay_id"],
+        "required": [
+          "ok",
+          "overlay_id"
+        ],
         "properties": {
-          "ok": { "type": "boolean" },
-          "overlay_id": { "type": "string" },
-          "launchers": { "type": "array" }
+          "ok": {
+            "type": "boolean"
+          },
+          "overlay_id": {
+            "type": "string"
+          },
+          "launchers": {
+            "type": "array"
+          }
         }
       },
       "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
       },
-      "errors": ["asset_not_found", "invalid_json", "unsafe_path", "render_failed"],
-      "conformance": { "fixture": "overlay-fixture", "assertions": ["overlay_rendered"] }
+      "errors": [
+        "asset_not_found",
+        "invalid_json",
+        "unsafe_path",
+        "render_failed"
+      ],
+      "conformance": {
+        "fixture": "overlay-fixture",
+        "assertions": [
+          "overlay_rendered"
+        ]
+      }
     },
     {
       "name": "overlay.register_launcher",
@@ -605,7 +1877,9 @@
       "summary": "Register visible-page launcher buttons that can reopen an overlay later.",
       "capability_class": "privileged",
       "portable": false,
-      "capabilities": ["overlay.launcher"],
+      "capabilities": [
+        "overlay.launcher"
+      ],
       "input_schema": {
         "type": "object",
         "properties": {
@@ -616,66 +1890,162 @@
           "template": {
             "type": "object",
             "description": "Storage reference for a reusable overlay template. The runtime resolves it when the launcher opens.",
-            "required": ["scope", "path"],
+            "required": [
+              "scope",
+              "path"
+            ],
             "properties": {
-              "scope": { "type": "string", "description": "Storage scope, such as public, private, or shared/name." },
-              "path": { "type": "string", "description": "Path inside the scope, such as sites/example.com/overlays/report/template.html." }
+              "scope": {
+                "type": "string",
+                "description": "Storage scope, such as public, private, or shared/name."
+              },
+              "path": {
+                "type": "string",
+                "description": "Path inside the scope, such as sites/example.com/overlays/report/template.html."
+              }
             },
             "additionalProperties": false
           },
           "data": {
             "type": "object",
             "description": "Optional storage reference for JSON data injected into a template as [data-actions-json-overlay-data].",
-            "required": ["scope", "path"],
+            "required": [
+              "scope",
+              "path"
+            ],
             "properties": {
-              "scope": { "type": "string" },
-              "path": { "type": "string" }
+              "scope": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
             },
             "additionalProperties": false
           },
-          "title": { "type": "string", "description": "Overlay title shown when the launcher opens the overlay." },
-          "width": { "type": "integer", "minimum": 420, "maximum": 1400 },
-          "height": { "type": "integer", "minimum": 320, "maximum": 1000 },
+          "title": {
+            "type": "string",
+            "description": "Overlay title shown when the launcher opens the overlay."
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 420,
+            "maximum": 1400
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 320,
+            "maximum": 1000
+          },
           "launchers": {
             "type": "array",
             "description": "Visible-page buttons that reopen this overlay from a relevant DOM anchor.",
             "items": {
               "type": "object",
               "properties": {
-                "id": { "type": "string", "description": "Stable launcher id used to replace older buttons for the same overlay affordance." },
-                "label": { "type": "string", "description": "Button text shown in the original page DOM." },
-                "title": { "type": "string", "description": "Tooltip/title for the launcher button." },
-                "selector": { "type": "string", "description": "Single CSS selector hint for the element to place the button near." },
-                "selectors": { "type": "array", "items": { "type": "string" }, "description": "Ordered CSS selector hints for the element to place the button near." },
-                "text_contains": { "type": "string", "description": "Optional visible text filter for selected anchor candidates." },
-                "text_equals": { "type": "string", "description": "Optional exact visible text filter for selected anchor candidates." },
-                "url_contains": { "type": "string", "description": "Only install this launcher when the current page URL contains this string." },
-                "url_matches": { "type": "string", "description": "Only install this launcher when the current page URL matches this regular expression." },
-                "placement": { "type": "string", "enum": ["beforebegin", "afterbegin", "beforeend", "afterend"], "default": "afterend" },
-                "max_instances": { "type": "integer", "minimum": 1, "maximum": 10, "default": 3 }
+                "id": {
+                  "type": "string",
+                  "description": "Stable launcher id used to replace older buttons for the same overlay affordance."
+                },
+                "label": {
+                  "type": "string",
+                  "description": "Button text shown in the original page DOM."
+                },
+                "title": {
+                  "type": "string",
+                  "description": "Tooltip/title for the launcher button."
+                },
+                "selector": {
+                  "type": "string",
+                  "description": "Single CSS selector hint for the element to place the button near."
+                },
+                "selectors": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Ordered CSS selector hints for the element to place the button near."
+                },
+                "text_contains": {
+                  "type": "string",
+                  "description": "Optional visible text filter for selected anchor candidates."
+                },
+                "text_equals": {
+                  "type": "string",
+                  "description": "Optional exact visible text filter for selected anchor candidates."
+                },
+                "url_contains": {
+                  "type": "string",
+                  "description": "Only install this launcher when the current page URL contains this string."
+                },
+                "url_matches": {
+                  "type": "string",
+                  "description": "Only install this launcher when the current page URL matches this regular expression."
+                },
+                "placement": {
+                  "type": "string",
+                  "enum": [
+                    "beforebegin",
+                    "afterbegin",
+                    "beforeend",
+                    "afterend"
+                  ],
+                  "default": "afterend"
+                },
+                "max_instances": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 10,
+                  "default": 3
+                }
               },
               "additionalProperties": false
             }
           }
         },
-        "required": ["launchers"],
+        "required": [
+          "launchers"
+        ],
         "additionalProperties": false
       },
       "output_schema": {
         "type": "object",
-        "required": ["ok", "overlay_id"],
+        "required": [
+          "ok",
+          "overlay_id"
+        ],
         "properties": {
-          "ok": { "type": "boolean" },
-          "overlay_id": { "type": "string" },
-          "launchers": { "type": "array" }
+          "ok": {
+            "type": "boolean"
+          },
+          "overlay_id": {
+            "type": "string"
+          },
+          "launchers": {
+            "type": "array"
+          }
         }
       },
       "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
       },
-      "errors": ["asset_not_found", "invalid_json", "unsafe_path", "launcher_failed"],
-      "conformance": { "fixture": "overlay-fixture", "assertions": ["launcher_registered"] }
+      "errors": [
+        "asset_not_found",
+        "invalid_json",
+        "unsafe_path",
+        "launcher_failed"
+      ],
+      "conformance": {
+        "fixture": "overlay-fixture",
+        "assertions": [
+          "launcher_registered"
+        ]
+      }
     },
     {
       "name": "overlay.close",
@@ -684,7 +2054,9 @@
       "summary": "Close the current actions.json overlay if one exists.",
       "capability_class": "privileged",
       "portable": false,
-      "capabilities": ["overlay.close"],
+      "capabilities": [
+        "overlay.close"
+      ],
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -692,17 +2064,32 @@
       },
       "output_schema": {
         "type": "object",
-        "required": ["ok"],
+        "required": [
+          "ok"
+        ],
         "properties": {
-          "ok": { "type": "boolean" }
+          "ok": {
+            "type": "boolean"
+          }
         }
       },
       "adapters": {
-        "extension": { "support": "supported" },
-        "embed": { "support": "supported" }
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "supported"
+        }
       },
-      "errors": ["close_failed"],
-      "conformance": { "fixture": "overlay-fixture", "assertions": ["overlay_closed"] }
+      "errors": [
+        "close_failed"
+      ],
+      "conformance": {
+        "fixture": "overlay-fixture",
+        "assertions": [
+          "overlay_closed"
+        ]
+      }
     }
   ]
 }

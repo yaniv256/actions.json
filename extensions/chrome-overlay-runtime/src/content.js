@@ -26,6 +26,7 @@
   let minPrimitiveIntervalMs = DEFAULT_MIN_PRIMITIVE_INTERVAL_MS;
   let primitiveQueue = Promise.resolve();
   let lastHumanInteractionStartedAt = 0;
+  let stateProjectionModulePromise = null;
 
   const LAUNCHER_ATTR = "data-actions-json-overlay-launcher";
   const OVERLAY_REGISTRY_STORAGE_KEY = "actionsJsonOverlayRegistry.v1";
@@ -53,7 +54,11 @@
   };
 
   const isHumanInteractionAction = (name) =>
-    name === "viewport.scroll" || name.startsWith("pointer.") || name === "text.insert" || name === "keyboard.press";
+    name === "viewport.scroll" ||
+    name.startsWith("pointer.") ||
+    name === "text.insert" ||
+    name === "transfer.insert" ||
+    name === "keyboard.press";
 
   const waitForHumanInteractionSlot = async (name) => {
     if (!isHumanInteractionAction(name)) return 0;
@@ -93,6 +98,59 @@
       min_interval_ms: minPrimitiveIntervalMs,
     });
   };
+
+  // Generic in-session task queue (logic in src/agent/task-queue.mjs so it is
+  // unit-testable). Externalizes a multi-step plan so an agent does not have to
+  // hold the whole loop in context: seed tasks with task.add, pull one at a time
+  // with task.next, do the work, report task.complete, pull the next. On an
+  // empty task.next the agent learns the run is done and gets a summary of every
+  // completed/failed task to ground its final report. State lives for the tab
+  // session. The module is imported lazily on first use: an eager import fires a
+  // network script load at injection time, which strict page CSP blocks for the
+  // page-injected runtime (extension content scripts load from the extension
+  // origin and are unaffected).
+  let taskQueueImpl = null;
+  let taskQueueLoadPromise = null;
+  const ensureTaskQueue = () => {
+    if (taskQueueImpl) {
+      return Promise.resolve();
+    }
+    if (!taskQueueLoadPromise) {
+      taskQueueLoadPromise = import(chrome.runtime.getURL("src/agent/task-queue.mjs"))
+        .then((module) => {
+          taskQueueImpl = module.createTaskQueue();
+        })
+        .catch(() => {
+          taskQueueLoadPromise = null;
+        });
+    }
+    return taskQueueLoadPromise;
+  };
+
+  const taskQueueCall = async (primitive, method, args) => {
+    if (!taskQueueImpl) {
+      await ensureTaskQueue();
+    }
+    if (!taskQueueImpl) {
+      return primitiveError(
+        primitive,
+        "task_queue_unavailable",
+        "Task queue module could not be loaded on this page (script loading may be blocked by page CSP).",
+      );
+    }
+    const result = taskQueueImpl[method](args);
+    if (result.ok === false) {
+      return primitiveError(primitive, result.error.code, result.error.message);
+    }
+    const { ok: _ok, ...value } = result;
+    return primitiveSuccess(primitive, value);
+  };
+
+  const taskAdd = (args = {}) => taskQueueCall("task.add", "add", args);
+  const taskNext = () => taskQueueCall("task.next", "next");
+  const taskComplete = (args = {}) => taskQueueCall("task.complete", "complete", args);
+  const taskList = () => taskQueueCall("task.list", "list");
+  const taskClear = () => taskQueueCall("task.clear", "clear");
 
   const relayToPage = (item) => {
     window.postMessage(
@@ -951,6 +1009,68 @@
     return { ok: true };
   };
 
+  const menuOverlayControl = () => {
+    const host = document.getElementById("__actions_json_menu_overlay_host");
+    if (!host || !host.__actionsJsonMenuControl) {
+      throw new Error("The actions.json menu overlay is not open; nothing to collapse, expand, or move.");
+    }
+    return { host, control: host.__actionsJsonMenuControl };
+  };
+
+  const collapseMenuOverlay = () => {
+    const { control } = menuOverlayControl();
+    control.setCollapsed(true);
+    return { ok: true, overlay_id: "actions-json-menu", collapsed: true, geometry: control.geometry() };
+  };
+
+  const expandMenuOverlay = () => {
+    const { control } = menuOverlayControl();
+    control.setCollapsed(false);
+    return { ok: true, overlay_id: "actions-json-menu", collapsed: false, geometry: control.geometry() };
+  };
+
+  const hideMenuOverlay = () => {
+    const { control } = menuOverlayControl();
+    control.setHidden(true);
+    return { ok: true, overlay_id: "actions-json-menu", hidden: true };
+  };
+
+  const showMenuOverlay = () => {
+    const { control } = menuOverlayControl();
+    control.setHidden(false);
+    return { ok: true, overlay_id: "actions-json-menu", hidden: false, geometry: control.geometry() };
+  };
+
+  const moveMenuOverlay = (args = {}) => {
+    const { control } = menuOverlayControl();
+    const corner = typeof args.corner === "string" ? args.corner.toLowerCase() : null;
+    let left = Number.isFinite(args.left) ? args.left : null;
+    let top = Number.isFinite(args.top) ? args.top : null;
+    if (corner) {
+      const margin = 12;
+      const geo = control.geometry();
+      const w = geo.width;
+      const h = geo.height;
+      const right = Math.max(margin, window.innerWidth - w - margin);
+      const bottom = Math.max(margin, window.innerHeight - h - margin);
+      const map = {
+        "top-left": [margin, margin],
+        "top-right": [right, margin],
+        "bottom-left": [margin, bottom],
+        "bottom-right": [right, bottom],
+      };
+      if (!map[corner]) {
+        throw new Error(`Unknown corner '${args.corner}'. Use top-left, top-right, bottom-left, or bottom-right, or pass left/top.`);
+      }
+      [left, top] = map[corner];
+    }
+    if (left == null || top == null) {
+      throw new Error("overlay.menu.move requires a corner, or numeric left and top coordinates.");
+    }
+    control.place(left, top);
+    return { ok: true, overlay_id: "actions-json-menu", geometry: control.geometry() };
+  };
+
   const menuOverlayGeometryFrom = (host) => {
     const rect = host.getBoundingClientRect();
     return {
@@ -1042,7 +1162,7 @@
           grid-template-columns: 30px;
           padding: 6px;
         }
-        .panel[data-collapsed="true"] .tabs,
+        .panel[data-collapsed="true"] .title,
         .panel[data-collapsed="true"] [data-close] {
           display: none;
         }
@@ -1061,36 +1181,18 @@
           cursor: move;
           user-select: none;
         }
-        .tabs {
+        .title {
           display: flex;
           gap: 4px;
-          align-items: end;
+          align-items: center;
           min-width: 0;
           height: 100%;
-          padding-top: 6px;
-          overflow: hidden;
-        }
-        .tab {
-          appearance: none;
-          min-width: 0;
-          max-width: 128px;
-          height: 30px;
-          padding: 0 10px;
-          border: 1px solid rgba(255,255,255,0.18);
-          border-bottom: 0;
-          border-radius: 7px 7px 0 0;
-          background: rgba(255,255,255,0.09);
           color: #fff;
           font: 750 12px/1 system-ui, sans-serif;
+          letter-spacing: 0.02em;
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
-          cursor: pointer;
-        }
-        .tab[aria-selected="true"] {
-          background: var(--tab-active);
-          color: var(--ink);
-          border-color: var(--tab-active);
         }
         .actions {
           display: flex;
@@ -1135,10 +1237,7 @@
       </style>
       <section class="panel" role="dialog" aria-label="actions.json menu">
         <header class="bar" data-drag-handle>
-          <div class="tabs" role="tablist" aria-label="actions.json overlay tabs">
-            <button class="tab" role="tab" aria-selected="true" data-tab="agent">Agent</button>
-            <button class="tab" role="tab" aria-selected="false" data-tab="config">Settings</button>
-          </div>
+          <div class="title">actions.json agent</div>
           <div class="actions">
             <button class="icon" type="button" title="Collapse" data-minimize>☰</button>
             <button class="icon" type="button" title="Close" data-close>×</button>
@@ -1147,9 +1246,6 @@
         <main class="body">
           <section class="panel-view active" data-panel="agent" role="tabpanel">
             <iframe title="actions.json agent" allow="microphone; autoplay" src="${chrome.runtime.getURL("sidepanel.html?surface=overlay&tab=agent")}"></iframe>
-          </section>
-          <section class="panel-view" data-panel="config" role="tabpanel">
-            <iframe title="actions.json settings" allow="microphone; autoplay" src="${chrome.runtime.getURL("sidepanel.html?surface=overlay&tab=config")}"></iframe>
           </section>
         </main>
       </section>
@@ -1160,10 +1256,7 @@
     const bar = shadow.querySelector("[data-drag-handle]");
     const minimize = shadow.querySelector("[data-minimize]");
     const close = shadow.querySelector("[data-close]");
-    const tabs = Array.from(shadow.querySelectorAll("[data-tab]"));
-    const panels = Array.from(shadow.querySelectorAll("[data-panel]"));
     let drag = null;
-    let selectedTab = restoreState.selected_tab === "config" ? "config" : "agent";
     let restoreGeometry = restoredGeometry;
     let persistTimer = null;
 
@@ -1176,7 +1269,7 @@
           : menuOverlayGeometryFrom(host);
         persistMenuOverlayState({
           open: true,
-          selected_tab: selectedTab,
+          selected_tab: "agent",
           collapsed,
           geometry,
           ...extra,
@@ -1191,16 +1284,6 @@
       host.style.top = `${clamp(top, 8, window.innerHeight - Math.min(rect.height, window.innerHeight) - 8)}px`;
       host.style.right = "auto";
       host.style.bottom = "auto";
-    };
-    const selectTab = (id) => {
-      selectedTab = id === "config" ? "config" : "agent";
-      for (const tab of tabs) {
-        tab.setAttribute("aria-selected", String(tab.dataset.tab === selectedTab));
-      }
-      for (const view of panels) {
-        view.classList.toggle("active", view.dataset.panel === selectedTab);
-      }
-      persistCurrentState();
     };
     const setCollapsed = (collapsed) => {
       if (collapsed) {
@@ -1248,15 +1331,33 @@
       persistCurrentState({ collapsed: false });
     };
 
-    selectTab(selectedTab);
-
-    for (const tab of tabs) {
-      tab.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        selectTab(tab.dataset.tab);
-      });
-    }
+    // Expose a programmatic control surface so runtime primitives can collapse,
+    // expand, and move the menu overlay without simulating shadow-DOM pointer
+    // events (which the bound handlers ignore). Reuses the same setCollapsed/place
+    // logic the header buttons use, including geometry persistence and clamping.
+    host.__actionsJsonMenuControl = {
+      setCollapsed,
+      place,
+      isCollapsed: () => panel.dataset.collapsed === "true",
+      setHidden: (hidden) => {
+        // Hide removes the overlay from hit-testing entirely so it cannot
+        // intercept clicks on page controls underneath. The open/collapsed
+        // state and geometry are untouched, so show restores it exactly.
+        host.style.visibility = hidden ? "hidden" : "";
+        host.style.pointerEvents = hidden ? "none" : "";
+        host.dataset.hidden = hidden ? "true" : "false";
+      },
+      isHidden: () => host.dataset.hidden === "true",
+      geometry: () => {
+        const rect = host.getBoundingClientRect();
+        return {
+          left: Math.round(rect.left),
+          top: Math.round(rect.top),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        };
+      },
+    };
 
     bar.addEventListener("pointerdown", (event) => {
       if (event.target.closest("button")) return;
@@ -1716,19 +1817,75 @@
     });
   };
 
+  const entryModifiedAtMs = (entry = {}) => {
+    const value = entry.modified_at_ms ?? entry.last_modified_ms ?? entry.mtime_ms ?? entry.updated_at_ms;
+    if (Number.isFinite(value)) return value;
+    if (typeof value === "string") {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) return numeric;
+      const parsed = Date.parse(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return 0;
+  };
+
+  const mergeBridgeHydrationBundle = (currentBundle, incomingBundle) => {
+    const byPath = new Map();
+    for (const entry of Array.isArray(currentBundle?.entries) ? currentBundle.entries : []) {
+      if (typeof entry?.path === "string" && entry.path) {
+        byPath.set(entry.path, entry);
+      }
+    }
+
+    let updatedCount = 0;
+    let preservedCount = 0;
+    for (const entry of incomingBundle.entries) {
+      if (typeof entry?.path !== "string" || !entry.path) {
+        continue;
+      }
+      const previous = byPath.get(entry.path);
+      if (!previous || entryModifiedAtMs(entry) > entryModifiedAtMs(previous)) {
+        byPath.set(entry.path, entry);
+        updatedCount += 1;
+      } else {
+        preservedCount += 1;
+      }
+    }
+
+    const entries = Array.from(byPath.values()).sort((left, right) =>
+      String(left.path || "").localeCompare(String(right.path || ""))
+    );
+    return {
+      ...incomingBundle,
+      entries,
+      imported_at: new Date().toISOString(),
+      x_actions_json_bridge_hydration_merged: true,
+      x_actions_json_hydration_updated_count: updatedCount,
+      x_actions_json_hydration_preserved_count: preservedCount
+    };
+  };
+
   const importStorageBundle = async (args = {}) => {
     const bundle = args.bundle;
     if (bundle?.protocol !== "actions.json.storage.bundle" || !Array.isArray(bundle.entries)) {
       throw new Error("storage.import_bundle requires an actions.json.storage.bundle");
     }
-    const normalizedBundle = {
-      ...bundle,
-      imported_at: new Date().toISOString()
-    };
+    const currentBundle = bundle.x_actions_json_bridge_hydration
+      ? await storageGet(STORAGE_BUNDLE_KEY)
+      : null;
+    const normalizedBundle = bundle.x_actions_json_bridge_hydration
+      ? mergeBridgeHydrationBundle(currentBundle, bundle)
+      : {
+          ...bundle,
+          imported_at: new Date().toISOString()
+        };
     await storageSet({ [STORAGE_BUNDLE_KEY]: normalizedBundle });
     return {
       ok: true,
       entry_count: normalizedBundle.entries.length,
+      merged: Boolean(normalizedBundle.x_actions_json_bridge_hydration_merged),
+      updated_count: normalizedBundle.x_actions_json_hydration_updated_count || 0,
+      preserved_count: normalizedBundle.x_actions_json_hydration_preserved_count || 0,
       synced_at_ms: normalizedBundle.synced_at_ms || null,
       imported_at: normalizedBundle.imported_at
     };
@@ -1997,6 +2154,7 @@
   const domObserveVisible = (args = {}) => {
     const selector = typeof args.selector === "string" && args.selector.trim() ? args.selector.trim() : "*";
     const textContains = normalizeText(args.text_contains || args.textContains).toLowerCase();
+    const maxPayloadBytes = Math.max(1000, Math.min(Number(args.max_payload_bytes ?? args.maxPayloadBytes ?? 16000), 256000));
     let candidates;
     try {
       candidates = Array.from(document.querySelectorAll(selector));
@@ -2028,7 +2186,32 @@
           }
         };
       });
-    return primitiveSuccess("dom.observe.visible", { matches, match_count: matches.length });
+    const payload = { matches, match_count: matches.length };
+    const approximateBytes = new Blob([JSON.stringify(payload)]).size;
+    if (approximateBytes > maxPayloadBytes) {
+      return primitiveSuccess("dom.observe.visible", {
+        ok: false,
+        error: {
+          code: "payload_too_large",
+          message: "The visible DOM query matched too much page content. Narrow the selector or text query and try again.",
+          recoverable: true,
+          evidence: {
+            selector,
+            text_contains: textContains || null,
+            match_count: matches.length,
+            approximate_bytes: approximateBytes,
+            max_payload_bytes: maxPayloadBytes,
+            narrowing_hints: [
+              "Use a narrower selector.",
+              "Prefer a site-specific actions.site action when one exists.",
+              "Use max_matches with a small value only when the first few matches are known to be useful.",
+              "Target buttons, links, headings, or data-testid selectors instead of broad page containers."
+            ]
+          }
+        }
+      });
+    }
+    return primitiveSuccess("dom.observe.visible", payload);
   };
 
   const deriveSectionHeading = (section, headingSelector, maxHeadingLength) => {
@@ -2148,6 +2331,66 @@
     return primitiveSuccess("runtime.session.log", response.log || response);
   };
 
+  const runtimeAgentUserMessage = async (args = {}) => {
+    const text = typeof args.text === "string" ? args.text.trim() : "";
+    if (!text) {
+      return primitiveError("runtime.agent.user_message", "invalid_input", "runtime.agent.user_message requires non-empty text.", {});
+    }
+    const response = await sendRuntimeMessage({
+      type: "actions-json:agent-session-user-message",
+      text,
+      responseMode: "text_only_transcript",
+    });
+    return primitiveSuccess("runtime.agent.user_message", response.result || response);
+  };
+
+  const runtimeAgentStart = async (args = {}) => {
+    const textOnly = args.text_only !== false && args.textOnly !== false;
+    const response = await sendRuntimeMessage({
+      type: "actions-json:agent-session-start",
+      textOnly,
+    });
+    return primitiveSuccess("runtime.agent.start", response);
+  };
+
+  const runtimeAgentStop = async () => {
+    const response = await sendRuntimeMessage({
+      type: "actions-json:agent-session-stop",
+    });
+    return primitiveSuccess("runtime.agent.stop", response);
+  };
+
+  const showAgentToast = ({ text, request_id: requestId } = {}) => {
+    const message = typeof text === "string" ? text.trim() : "";
+    if (!message) return { ok: false, reason: "empty_text" };
+    const existing = document.querySelector("[data-actions-json-agent-toast]");
+    if (existing) existing.remove();
+    const toast = document.createElement("div");
+    toast.dataset.actionsJsonAgentToast = "true";
+    if (requestId) toast.dataset.requestId = String(requestId);
+    toast.textContent = message;
+    Object.assign(toast.style, {
+      position: "fixed",
+      right: "18px",
+      bottom: "18px",
+      zIndex: "2147483647",
+      maxWidth: "420px",
+      padding: "12px 14px",
+      borderRadius: "10px",
+      background: "rgba(18, 24, 38, 0.96)",
+      color: "#fff",
+      font: "14px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+      boxShadow: "0 18px 48px rgba(0,0,0,0.34)",
+      whiteSpace: "pre-wrap",
+      pointerEvents: "none"
+    });
+    document.documentElement.append(toast);
+    window.setTimeout(() => {
+      if (toast.isConnected) toast.remove();
+    }, 12_000);
+    return { ok: true };
+  };
+
   const primitiveSuccess = (primitive, value) => ({
     ok: true,
     primitive,
@@ -2155,17 +2398,39 @@
     value
   });
 
-  const primitiveError = (primitive, code, message, evidence = {}) => ({
-    ok: false,
-    primitive,
-    adapter: "extension",
-    error: {
-      code,
-      message,
-      recoverable: true,
-      evidence
+  const menuOverlayCurrentlyVisible = () => {
+    const host = document.getElementById("__actions_json_menu_overlay_host");
+    if (!host) return false;
+    if (host.dataset.hidden === "true") return false;
+    const style = window.getComputedStyle(host);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    const rect = host.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+
+  const primitiveError = (primitive, code, message, evidence = {}) => {
+    let finalMessage = message;
+    let finalEvidence = evidence;
+    // The first suspect for "no visible element" and dead click points is the
+    // actions.json overlay itself covering the target (or having swallowed the
+    // click that should have revealed it). Say so in the error so agents reach
+    // for overlay.menu.hide before inventing other theories.
+    if (code === "target_not_found" && menuOverlayCurrentlyVisible()) {
+      finalMessage = `${message} The actions.json overlay is open and may be covering the target or may have intercepted the click that should have revealed it; call overlay.menu.hide, retry, then overlay.menu.show.`;
+      finalEvidence = { ...evidence, overlay_menu_visible: true };
     }
-  });
+    return {
+      ok: false,
+      primitive,
+      adapter: "extension",
+      error: {
+        code,
+        message: finalMessage,
+        recoverable: true,
+        evidence: finalEvidence
+      }
+    };
+  };
 
   const resolveLocatorCandidates = (locator) => {
     if (!locator || typeof locator !== "object") return [];
@@ -2219,32 +2484,42 @@
 
   const locatorElementInfo = (args = {}) => {
     const locator = args.locator;
-    const element = resolveSingleVisibleLocator(locator);
+    const visibleCandidates = resolveLocatorCandidates(locator).filter(isElementVisible);
+    const element = visibleCandidates[0] || null;
     if (!element) {
       return primitiveError("locator.element_info", "target_not_found", "No visible element matched the locator.", {
         locator
       });
     }
-    const rect = element.getBoundingClientRect();
-    const visibleRect = visibleRectFor(element) || rect;
+    const elementInfoFor = (candidate) => {
+      const rect = candidate.getBoundingClientRect();
+      const visibleRect = visibleRectFor(candidate) || rect;
+      return {
+        tag_name: candidate.tagName.toLowerCase(),
+        text: normalizeText(candidate.textContent),
+        bounding_box: {
+          x: rect.left,
+          y: rect.top,
+          width: rect.width,
+          height: rect.height,
+          left: rect.left,
+          top: rect.top,
+          right: rect.right,
+          bottom: rect.bottom
+        },
+        clickable_center: {
+          x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
+          y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2
+        }
+      };
+    };
+    const primary = elementInfoFor(element);
     return primitiveSuccess("locator.element_info", {
       locator,
-      tag_name: element.tagName.toLowerCase(),
-      text: normalizeText(element.textContent),
-      bounding_box: {
-        x: rect.left,
-        y: rect.top,
-        width: rect.width,
-        height: rect.height,
-        left: rect.left,
-        top: rect.top,
-        right: rect.right,
-        bottom: rect.bottom
-      },
-      clickable_center: {
-        x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
-        y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2
-      }
+      ...primary,
+      ambiguous: visibleCandidates.length > 1,
+      candidate_count: visibleCandidates.length,
+      candidates: visibleCandidates.map(elementInfoFor)
     });
   };
 
@@ -2426,6 +2701,51 @@
     return null;
   };
 
+  const pointFromViewportPointOrLocator = (primitive, value, role) => {
+    if (!value || typeof value !== "object") {
+      return { error: primitiveError(primitive, "target_not_found", `No ${role} point or locator was provided.`, { [role]: value || null }) };
+    }
+    const x = Number(value.x);
+    const y = Number(value.y);
+    if (Number.isFinite(x) || Number.isFinite(y)) {
+      const viewportError = validateViewportPoint(primitive, x, y, value);
+      if (viewportError) return { error: viewportError };
+      return {
+        point: { x, y },
+        element: document.elementFromPoint(x, y),
+        geometry: { source: "coordinates", input: value, point: { x, y } },
+      };
+    }
+    const locator = value.locator && typeof value.locator === "object" ? value.locator : value;
+    const element = resolveSingleVisibleLocator(locator);
+    if (!element) {
+      return {
+        error: primitiveError(primitive, "target_not_found", `No visible element matched the ${role} locator.`, {
+          [role]: locator,
+        }),
+      };
+    }
+    const visibleRect = visibleRectFor(element) || element.getBoundingClientRect();
+    const point = {
+      x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
+      y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2,
+    };
+    const viewportError = validateViewportPoint(primitive, point.x, point.y, point);
+    if (viewportError) return { error: viewportError };
+    return {
+      point,
+      element,
+      geometry: {
+        source: "locator",
+        locator,
+        tag_name: element.tagName.toLowerCase(),
+        text: normalizeText(element.textContent),
+        bounding_box: rectDiagnostic(element),
+        point,
+      },
+    };
+  };
+
   const dispatchPointerClick = (target, { x, y, button, detail = 1 }) => {
     const buttonCode = button === "middle" ? 1 : button === "right" ? 2 : 0;
     const common = {
@@ -2515,32 +2835,48 @@
   const pointerDrag = (args = {}) => {
     const from = args.from || {};
     const to = args.to || {};
-    const startX = Number(from.x);
-    const startY = Number(from.y);
-    const endX = Number(to.x);
-    const endY = Number(to.y);
-    const startError = validateViewportPoint("pointer.drag", startX, startY, from);
-    if (startError) return startError;
-    const endError = validateViewportPoint("pointer.drag", endX, endY, to);
-    if (endError) return endError;
-    const target = document.elementFromPoint(startX, startY);
+    const start = pointFromViewportPointOrLocator("pointer.drag", from, "from");
+    if (start.error) return start.error;
+    const end = pointFromViewportPointOrLocator("pointer.drag", to, "to");
+    if (end.error) return end.error;
+    const startX = start.point.x;
+    const startY = start.point.y;
+    const endX = end.point.x;
+    const endY = end.point.y;
+    const target = start.element || document.elementFromPoint(startX, startY);
     if (!target) {
       return primitiveError("pointer.drag", "target_not_found", "No element exists at the requested drag start point.", { from, to });
     }
     moveVisiblePointer(startX, startY);
     dispatchPointerEvent(target, "pointerdown", { x: startX, y: startY, buttons: 1 });
     dispatchPointerEvent(target, "mousedown", { x: startX, y: startY, buttons: 1, eventCtor: MouseEvent });
-    moveVisiblePointer(endX, endY);
+    const steps = Math.max(1, Math.min(Number(args.steps ?? 1), 40));
+    for (let step = 1; step <= steps; step += 1) {
+      const x = startX + ((endX - startX) * step) / steps;
+      const y = startY + ((endY - startY) * step) / steps;
+      moveVisiblePointer(x, y);
+      const stepTarget = document.elementFromPoint(x, y) || target;
+      dispatchPointerEvent(stepTarget, "pointermove", { x, y, buttons: 1 });
+      dispatchPointerEvent(stepTarget, "mousemove", { x, y, buttons: 1, eventCtor: MouseEvent });
+    }
     const moveTarget = document.elementFromPoint(endX, endY) || target;
-    dispatchPointerEvent(moveTarget, "pointermove", { x: endX, y: endY, buttons: 1 });
-    dispatchPointerEvent(moveTarget, "mousemove", { x: endX, y: endY, buttons: 1, eventCtor: MouseEvent });
     dispatchPointerEvent(moveTarget, "pointerup", { x: endX, y: endY, buttons: 0 });
     dispatchPointerEvent(moveTarget, "mouseup", { x: endX, y: endY, buttons: 0, eventCtor: MouseEvent });
     if (moveTarget !== target) {
       dispatchPointerEvent(target, "pointerup", { x: endX, y: endY, buttons: 0 });
       dispatchPointerEvent(target, "mouseup", { x: endX, y: endY, buttons: 0, eventCtor: MouseEvent });
     }
-    return primitiveSuccess("pointer.drag", { dragged: true, from: { x: startX, y: startY }, to: { x: endX, y: endY } });
+    return primitiveSuccess("pointer.drag", {
+      dragged: true,
+      from: { x: startX, y: startY },
+      to: { x: endX, y: endY },
+      steps,
+      diagnostics: {
+        viewport: viewportDiagnostic(),
+        from: start.geometry,
+        to: end.geometry,
+      },
+    });
   };
 
   const isEditableElement = (element) => {
@@ -2551,49 +2887,119 @@
     return element.isContentEditable;
   };
 
-  const textInsert = (args = {}) => {
+  const resolveEditableTarget = (targetSpec) => {
+    if (!targetSpec) return document.activeElement;
+    if (typeof targetSpec === "string") return document.querySelector(targetSpec);
+    if (typeof targetSpec !== "object") return null;
+    if (typeof targetSpec.selector === "string" && targetSpec.selector.trim()) {
+      return resolveSingleLocator({ selector: targetSpec.selector.trim() });
+    }
+    if (targetSpec.locator && typeof targetSpec.locator === "object") {
+      return resolveSingleLocator(targetSpec.locator);
+    }
+    return resolveSingleLocator(targetSpec);
+  };
+
+  const insertTextIntoEditable = (primitive, args = {}) => {
     const text = String(args.text ?? "");
-    const target = document.activeElement;
+    const target = resolveEditableTarget(args.target);
     if (!isEditableElement(target)) {
-      return primitiveError("text.insert", "target_not_editable", "The active element is not editable.", {
+      return primitiveError(primitive, "target_not_editable", "The target element is not editable.", {
+        target: args.target || null,
         tag_name: target?.tagName?.toLowerCase?.() || null
       });
     }
+    target.focus?.();
+    const mode = args.mode === "replace" ? "replace" : "append";
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
-      const start = Number.isInteger(target.selectionStart) ? target.selectionStart : target.value.length;
-      const end = Number.isInteger(target.selectionEnd) ? target.selectionEnd : start;
-      target.value = `${target.value.slice(0, start)}${text}${target.value.slice(end)}`;
-      const cursor = start + text.length;
+      const start = mode === "replace" ? 0 : Number.isInteger(target.selectionStart) ? target.selectionStart : target.value.length;
+      const end = mode === "replace" ? target.value.length : Number.isInteger(target.selectionEnd) ? target.selectionEnd : start;
+      const insertedText = mode === "append" && start === target.value.length && target.value && !target.value.endsWith("\n")
+        ? `${text}`
+        : text;
+      target.value = `${target.value.slice(0, start)}${insertedText}${target.value.slice(end)}`;
+      const cursor = start + insertedText.length;
       target.setSelectionRange?.(cursor, cursor);
     } else {
-      document.execCommand?.("insertText", false, text);
-      if (target.textContent === "") target.textContent = text;
+      if (mode === "replace") target.textContent = "";
+      const inserted = document.execCommand?.("insertText", false, text);
+      if (!inserted) target.textContent = mode === "append" ? `${target.textContent || ""}${text}` : text;
     }
     target.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: text }));
     target.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-    return primitiveSuccess("text.insert", { inserted: true, inserted_length: text.length });
+    return primitiveSuccess(primitive, { inserted: true, inserted_length: text.length });
+  };
+
+  const textInsert = (args = {}) => {
+    return insertTextIntoEditable("text.insert", args);
+  };
+
+  const transferBufferAction = async (primitive, args = {}) => {
+    const response = await sendRuntimeMessage({
+      type: "actions-json:transfer-buffer",
+      primitive,
+      arguments: args,
+    });
+    const result = response.result;
+    if (!result || typeof result !== "object") {
+      return primitiveError(primitive, "transfer_failed", "Transfer buffer returned an invalid response.", { primitive });
+    }
+    return result;
+  };
+
+  const transferInsert = async (args = {}) => {
+    const result = await transferBufferAction("transfer.insert", args);
+    if (result.ok === false) return result;
+    return insertTextIntoEditable("transfer.insert", {
+      text: result.value?.text ?? result.value?.rendered_text ?? "",
+      target: args.target,
+      mode: args.mode,
+    });
+  };
+
+  const storageReadFile = async (args = {}) => {
+    const response = await sendRuntimeMessage({
+      type: "actions-json:storage-read-file",
+      arguments: args,
+      pageUrl: location.href,
+    });
+    const result = response.result;
+    if (!result || typeof result !== "object") {
+      return primitiveError("storage.read_file", "storage_file_read_failed", "Storage file reader returned an invalid response.", {});
+    }
+    return result;
   };
 
   const keyboardPress = (args = {}) => {
-    const key = String(args.key || "");
-    const modifiers = Array.isArray(args.modifiers) ? args.modifiers : [];
-    if (!key || modifiers.length > 0) {
-      return primitiveError("keyboard.press", "capability_unavailable", "This runtime can only dispatch page-level unmodified key events here.", {
-        key,
-        modifiers,
-        reason: "trusted_key_events_unavailable"
+    const rawKey = String(args.key || "");
+    const rawModifiers = Array.isArray(args.modifiers) ? args.modifiers : [];
+    const chordParts = rawKey.includes("+") ? rawKey.split("+").filter(Boolean) : [];
+    const key = chordParts.length > 1 ? chordParts.at(-1) : rawKey;
+    const modifiers = [
+      ...rawModifiers,
+      ...(chordParts.length > 1 ? chordParts.slice(0, -1) : []),
+    ].map((modifier) => String(modifier).toLowerCase());
+    if (!key) {
+      return primitiveError("keyboard.press", "invalid_key", "keyboard.press requires a key.", {
+        key: rawKey,
+        modifiers
       });
     }
     const target = document.activeElement || document.body;
+    const eventInit = {
+      key,
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      altKey: modifiers.includes("alt") || modifiers.includes("option"),
+      ctrlKey: modifiers.includes("control") || modifiers.includes("ctrl"),
+      metaKey: modifiers.includes("meta") || modifiers.includes("cmd") || modifiers.includes("command"),
+      shiftKey: modifiers.includes("shift"),
+    };
     for (const type of ["keydown", "keyup"]) {
-      target.dispatchEvent(new KeyboardEvent(type, {
-        key,
-        bubbles: true,
-        cancelable: true,
-        composed: true
-      }));
+      target.dispatchEvent(new KeyboardEvent(type, eventInit));
     }
-    return primitiveSuccess("keyboard.press", { pressed: true, key, fidelity: "page_level" });
+    return primitiveSuccess("keyboard.press", { pressed: true, key, modifiers, fidelity: "page_level" });
   };
 
   window.actionsJsonOverlay = {
@@ -2607,6 +3013,9 @@
     runJavascript,
     debugRunJavascript,
     locatorElementInfo,
+    runtimeAgentStart,
+    runtimeAgentStop,
+    runtimeAgentUserMessage,
     viewportScroll,
     pointerClick
   };
@@ -2618,10 +3027,37 @@
     return manifest;
   };
 
+  const loadStateProjectionModule = async () => {
+    if (!stateProjectionModulePromise) {
+      stateProjectionModulePromise = import(chrome.runtime.getURL("src/agent/state-projections.mjs"));
+    }
+    return stateProjectionModulePromise;
+  };
+
+  const executeStateProjection = async (message) => {
+    const module = await loadStateProjectionModule();
+    return module.executeStateProjection({
+      bundle: message.bundle,
+      pageUrl: location.href,
+      document,
+      projectionName: message.projection_name,
+      summaryName: message.summary_name || null,
+      maxBytes: message.max_bytes,
+    });
+  };
+
+  const findExecutableAction = (actions, name) => {
+    const declaredTool = actions.tools?.find((tool) => tool.name === name);
+    if (declaredTool) return declaredTool;
+    const primitive = actions.primitive_dictionary?.primitives?.find((entry) => entry.name === name);
+    if (!primitive || primitive.support === "unsupported") return null;
+    return primitive;
+  };
+
   const executeAction = async (message) => {
     const rateLimitWaitMs = await waitForHumanInteractionSlot(message.name);
     const actions = await loadManifest();
-    const action = actions.tools?.find((tool) => tool.name === message.name);
+    const action = findExecutableAction(actions, message.name);
     if (!action) throw new Error(`Unknown action: ${message.name}`);
 
     let output;
@@ -2631,10 +3067,36 @@
       output = await registerLauncher(message.arguments || {});
     } else if (message.name === "overlay.close") {
       output = closeOverlay();
+    } else if (message.name === "overlay.menu.collapse") {
+      output = collapseMenuOverlay();
+    } else if (message.name === "overlay.menu.expand") {
+      output = expandMenuOverlay();
+    } else if (message.name === "overlay.menu.move") {
+      output = moveMenuOverlay(message.arguments || {});
+    } else if (message.name === "overlay.menu.hide") {
+      output = hideMenuOverlay();
+    } else if (message.name === "overlay.menu.show") {
+      output = showMenuOverlay();
+    } else if (message.name === "task.add") {
+      output = await taskAdd(message.arguments || {});
+    } else if (message.name === "task.next") {
+      output = await taskNext();
+    } else if (message.name === "task.complete") {
+      output = await taskComplete(message.arguments || {});
+    } else if (message.name === "task.list") {
+      output = await taskList();
+    } else if (message.name === "task.clear") {
+      output = await taskClear();
     } else if (message.name === "runtime.configure_pacing") {
       output = configurePrimitivePacing(message.arguments || {});
     } else if (message.name === "runtime.session.log") {
       output = await runtimeSessionLog(message.arguments || {});
+    } else if (message.name === "runtime.agent.start") {
+      output = await runtimeAgentStart(message.arguments || {});
+    } else if (message.name === "runtime.agent.stop") {
+      output = await runtimeAgentStop();
+    } else if (message.name === "runtime.agent.user_message") {
+      output = await runtimeAgentUserMessage(message.arguments || {});
     } else if (message.name === "browser.claimed_tabs.list") {
       output = await listClaimedTabs();
     } else if (message.name === "browser.claimed_tabs.activate") {
@@ -2665,6 +3127,16 @@
       output = pointerDrag(message.arguments || {});
     } else if (message.name === "text.insert") {
       output = textInsert(message.arguments || {});
+    } else if (message.name === "transfer.write") {
+      output = await transferBufferAction("transfer.write", message.arguments || {});
+    } else if (message.name === "transfer.read") {
+      output = await transferBufferAction("transfer.read", message.arguments || {});
+    } else if (message.name === "transfer.clear") {
+      output = await transferBufferAction("transfer.clear", message.arguments || {});
+    } else if (message.name === "transfer.insert") {
+      output = await transferInsert(message.arguments || {});
+    } else if (message.name === "storage.read_file") {
+      output = await storageReadFile(message.arguments || {});
     } else if (message.name === "keyboard.press") {
       output = keyboardPress(message.arguments || {});
     } else if (message.name === "page.info") {
@@ -2745,6 +3217,97 @@
     actions: actions.tools?.map((tool) => tool.name) || []
   });
 
+  const prepareRuntimeReady = async (message = {}) => {
+    runtimeKey = message.runtimeKey || runtimeKey;
+    authorizationId = message.authorizationId || authorizationId;
+    extensionVersion = message.extensionVersion || extensionVersion;
+    const actions = await loadManifest();
+    await restoreRegisteredOverlays();
+    await restoreMenuOverlayIfNeeded();
+    installManifestAttachments(actions);
+    return runtimeReadyItem(actions);
+  };
+
+  const handleBridgeStateProjectionCall = async (message) => {
+    const callId = message.call_id || newActionCallId();
+    const response = await new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage(
+          { type: "actions-json:bridge-state-projection-call", item: message },
+          (result) => resolve(result),
+        );
+      } catch (error) {
+        resolve({
+          ok: false,
+          error: {
+            code: "state_projection_failed",
+            message: error.message || String(error),
+            recoverable: true,
+          },
+        });
+      }
+    });
+    if (!response || response.ok === false || response.output?.ok === false) {
+      protocolSend({
+        type: "action_error",
+        call_id: callId,
+        runtime_id: RUNTIME_ID,
+        error: response?.error || response?.output?.error || {
+          code: "state_projection_failed",
+          message: "State projection execution failed in the extension runtime.",
+          recoverable: true,
+        },
+      });
+      return;
+    }
+    protocolSend({
+      type: "action_call_output",
+      call_id: callId,
+      runtime_id: RUNTIME_ID,
+      output: response.output,
+    });
+  };
+
+  const handleBridgeSiteActionCall = async (message) => {
+    const callId = message.call_id || newActionCallId();
+    const response = await new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage(
+          { type: "actions-json:bridge-site-action-call", item: message },
+          (result) => resolve(result),
+        );
+      } catch (error) {
+        resolve({
+          ok: false,
+          error: {
+            code: "site_action_failed",
+            message: error.message || String(error),
+            recoverable: true,
+          },
+        });
+      }
+    });
+    if (!response || response.ok === false || response.output?.ok === false) {
+      protocolSend({
+        type: "action_error",
+        call_id: callId,
+        runtime_id: RUNTIME_ID,
+        error: response?.error || response?.output?.error || {
+          code: "site_action_failed",
+          message: "Site action execution failed in the extension runtime.",
+          recoverable: true,
+        },
+      });
+      return;
+    }
+    protocolSend({
+      type: "action_call_output",
+      call_id: callId,
+      runtime_id: RUNTIME_ID,
+      output: response.output,
+    });
+  };
+
   const handleBridgeMessage = async (message, actions) => {
     if (message.type === "action_call") {
       if (message.runtime_id && relayedRuntimeIds.has(message.runtime_id)) {
@@ -2752,6 +3315,10 @@
         return;
       }
       await enqueueActionCall(message);
+    } else if (message.type === "state_projection_call") {
+      await handleBridgeStateProjectionCall(message);
+    } else if (message.type === "site_action_call") {
+      await handleBridgeSiteActionCall(message);
     } else if (message.type === "runtime_status") {
       protocolSend(runtimeStatusItem(actions));
       for (const runtimeId of relayedRuntimeIds) {
@@ -2825,7 +3392,14 @@
       authorizationId = message.authorizationId || authorizationId;
       extensionVersion = message.extensionVersion || extensionVersion;
       connect(message.bridgeUrl).then(
-        () => sendResponse({ ok: true }),
+        () => prepareRuntimeReady(message).then((readyItem) => sendResponse({ ok: true, readyItem })),
+        (error) => sendResponse({ ok: false, error: error.message || String(error) })
+      );
+      return true;
+    }
+    if (message?.type === "actions-json:runtime-ready") {
+      prepareRuntimeReady(message).then(
+        (readyItem) => sendResponse({ ok: true, readyItem }),
         (error) => sendResponse({ ok: false, error: error.message || String(error) })
       );
       return true;
@@ -2835,6 +3409,10 @@
         (actions) => handleBridgeMessage(message.item || {}, actions).then(() => sendResponse({ ok: true })),
         (error) => sendResponse({ ok: false, error: error.message || String(error) })
       );
+      return true;
+    }
+    if (message?.type === "actions-json:agent-toast") {
+      sendResponse(showAgentToast(message));
       return true;
     }
     if (message?.type === "actions-json:close-overlay") {
@@ -2854,6 +3432,19 @@
           ok: false,
           error: {
             code: "handler_failed",
+            message: error.message || String(error)
+          }
+        })
+      );
+      return true;
+    }
+    if (message?.type === "actions-json:execute-state-projection") {
+      executeStateProjection(message).then(
+        (output) => sendResponse({ ok: output?.ok !== false, output, error: output?.error || null }),
+        (error) => sendResponse({
+          ok: false,
+          error: {
+            code: "state_projection_failed",
             message: error.message || String(error)
           }
         })

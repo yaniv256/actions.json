@@ -37,7 +37,7 @@ import {
   filterRealtimeToolsForBlockedPrimitives,
 } from "./agent/realtime-tool-catalog.mjs";
 
-const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:17345/extension";
+const DEFAULT_BRIDGE_URL = "ws://100.99.150.49:17345/extension";
 const EXTENSION_STORAGE_BUNDLE_KEY = "actionsJsonStorageBundle";
 const DEFAULT_STORAGE_SCOPE = "private";
 const EXTENSION_ACTIONS_URL = "actions/overlay.actions.json";
@@ -58,12 +58,17 @@ const agentPanelEl = document.getElementById("agentPanel");
 const configPanelEl = document.getElementById("configPanel");
 const startAgentEl = document.getElementById("startAgent");
 const stopAgentEl = document.getElementById("stopAgent");
+const muteMicEl = document.getElementById("muteMic");
+const muteSpeakerEl = document.getElementById("muteSpeaker");
 const voiceLauncherIconEl = document.getElementById("voiceLauncherIcon");
 const voiceLauncherLabelEl = document.getElementById("voiceLauncherLabel");
 const targetSummaryEl = document.getElementById("targetSummary");
 const clearMemoryEl = document.getElementById("clearMemory");
 const memoryStatusEl = document.getElementById("memoryStatus");
 const transcriptEl = document.getElementById("transcript");
+const agentTextFormEl = document.getElementById("agentTextForm");
+const agentTextInputEl = document.getElementById("agentTextInput");
+const sendAgentTextEl = document.getElementById("sendAgentText");
 const voiceSelectEl = document.getElementById("voiceSelect");
 const voiceStatusEl = document.getElementById("voiceStatus");
 const vadModeEl = document.getElementById("vadMode");
@@ -142,17 +147,15 @@ async function loadHostedRealtimeTools() {
   try {
     const tools = await applyCurrentSiteToolPolicy(await fetchBridgeRealtimeToolCatalog({ chromeApi: chrome }));
     sessionManager.setTools(tools);
-    const names = tools.map((tool) => tool.name).filter(Boolean);
-    appendTranscriptLine(`Bridge tools loaded: ${names.length ? names.join(", ") : "none"}.`);
+    const count = tools.filter((tool) => tool?.name).length;
+    appendTranscriptLine(`Bridge tools loaded: ${count}.`);
     return tools;
   } catch (error) {
     const tools = await applyCurrentSiteToolPolicy(await loadLocalRealtimeTools());
     sessionManager.setTools(tools);
-    const names = tools.map((tool) => tool.name).filter(Boolean);
+    const count = tools.filter((tool) => tool?.name).length;
     appendTranscriptLine(
-      `Using extension-local tools; bridge tool catalog was not reachable. Loaded ${
-        names.length ? names.join(", ") : "none"
-      }.`,
+      `Using ${count} extension-local tools; bridge tool catalog was not reachable.`,
     );
     return tools;
   }
@@ -398,6 +401,7 @@ async function requestVisibleMicrophoneGrant() {
 
 function renderCredentialState(state) {
   const sessionState = sessionManager.getState();
+  renderAudioControlState(sessionState);
   if (state.configured) {
     keySummaryEl.textContent = `OpenAI key configured: ${state.redacted}`;
     if (sessionState.status !== "connected" && sessionState.status !== "connecting") {
@@ -498,15 +502,22 @@ function finalizeLiveTranscript(role, text) {
     return;
   }
   preserveTranscriptScrollPosition(() => {
+    const expectedText = `${label}: ${finalText}`;
+    const lastFinalLine = Array.from(transcriptEl.querySelectorAll(".transcript-line"))
+      .filter((line) => !line.dataset.liveTranscript)
+      .at(-1);
+    if (lastFinalLine?.dataset.transcriptRole === role && lastFinalLine.textContent === expectedText) {
+      return;
+    }
     if (turn.lineEl?.isConnected) {
-      turn.lineEl.textContent = `${label}: ${finalText}`;
+      turn.lineEl.textContent = expectedText;
       turn.lineEl.classList.remove("is-live", "is-pending");
       delete turn.lineEl.dataset.liveTranscript;
     } else {
       const line = document.createElement("div");
       line.className = `transcript-line transcript-line-${role}`;
       line.dataset.transcriptRole = role;
-      line.textContent = `${label}: ${finalText}`;
+      line.textContent = expectedText;
       clearTranscriptEmptyState();
       transcriptEl.append(line);
     }
@@ -549,6 +560,14 @@ function realtimeFinalText(event) {
   if (itemText) {
     return itemText;
   }
+  const responseOutputText = (Array.isArray(event?.response?.output) ? event.response.output : [])
+    .map((item) => realtimeContentPartsText(item?.content))
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  if (responseOutputText) {
+    return responseOutputText;
+  }
   return "";
 }
 
@@ -557,6 +576,31 @@ function setVoiceLauncherState(state, label) {
   voiceLauncherIconEl.innerHTML = VOICE_ICONS[state] || VOICE_ICONS.idle;
   voiceLauncherLabelEl.textContent = label;
   startAgentEl.setAttribute("aria-label", label);
+}
+
+function renderAudioControlState(state = sessionManager.getState()) {
+  const connected = state.status === "connected";
+  const textOnly = state.textOnly === true;
+  if (muteMicEl) {
+    muteMicEl.disabled = !connected || textOnly;
+    muteMicEl.setAttribute("aria-pressed", String(Boolean(state.inputMuted)));
+    muteMicEl.classList.toggle("is-muted", Boolean(state.inputMuted));
+    muteMicEl.title = state.inputMuted ? "Microphone muted" : "Mute microphone";
+    muteMicEl.setAttribute("aria-label", state.inputMuted ? "Microphone muted" : "Mute microphone");
+  }
+  if (muteSpeakerEl) {
+    muteSpeakerEl.disabled = !connected || textOnly;
+    muteSpeakerEl.setAttribute("aria-pressed", String(Boolean(state.outputMuted)));
+    muteSpeakerEl.classList.toggle("is-muted", Boolean(state.outputMuted));
+    muteSpeakerEl.title = state.outputMuted ? "Speaker muted" : "Mute speaker";
+    muteSpeakerEl.setAttribute("aria-label", state.outputMuted ? "Speaker muted" : "Mute speaker");
+  }
+  if (sendAgentTextEl) {
+    sendAgentTextEl.disabled = !connected;
+  }
+  if (agentTextInputEl) {
+    agentTextInputEl.disabled = !connected;
+  }
 }
 
 function userFacingSessionError(error) {
@@ -577,6 +621,7 @@ async function renderRetryableSessionError(error) {
   appendTranscriptLine(`Error: ${message}`);
   const credential = await getOpenAiCredentialState(chrome.storage.local);
   startAgentEl.disabled = !credential.configured;
+  renderAudioControlState(sessionManager.getState());
   return message;
 }
 
@@ -590,12 +635,21 @@ async function handleRealtimeUiEvent(event) {
   }
   if (event?.type === "actions_json.tool.started") {
     setVoiceLauncherState("busy", "Using tool");
-    appendTranscriptLine(`Tool: ${event.name} started.`);
     return;
   }
   if (event?.type === "actions_json.tool.completed") {
-    const errorMessage = event.error?.message ? `: ${event.error.message}` : "";
-    appendTranscriptLine(`Tool: ${event.name} ${event.ok === false ? "failed" : "completed"}${errorMessage}.`);
+    if (event.ok === false) {
+      const errorMessage = event.error?.message ? `: ${event.error.message}` : "";
+      appendTranscriptLine(`Tool ${event.name} failed${errorMessage}.`);
+    }
+    return;
+  }
+  if (event?.type === "actions_json.transcript" && finalText) {
+    finalizeLiveTranscript(event.role === "assistant" ? "assistant" : "user", finalText);
+    return;
+  }
+  if (event?.type === "actions_json.agent_text_response" && finalText) {
+    finalizeLiveTranscript("assistant", finalText);
     return;
   }
   if (event?.type === "input_audio_buffer.speech_started") {
@@ -631,7 +685,7 @@ async function handleRealtimeUiEvent(event) {
       event?.type === "response.output_audio_transcript.done") &&
     finalText
   ) {
-    setVoiceLauncherState("live", "Voice live");
+    setVoiceLauncherState("live", "Session live");
     finalizeLiveTranscript("assistant", finalText);
     return;
   }
@@ -640,7 +694,7 @@ async function handleRealtimeUiEvent(event) {
     return;
   }
   if (event?.type === "response.done") {
-    setVoiceLauncherState("live", "Voice live");
+    setVoiceLauncherState("live", "Session live");
   }
 }
 
@@ -654,12 +708,13 @@ function renderMemoryState(state) {
 }
 
 function renderSessionState(state) {
+  renderAudioControlState(state);
   if (state.status === "connected") {
     agentStateEl.textContent = "Live";
     agentStateEl.dataset.state = "ready";
     startAgentEl.disabled = true;
     stopAgentEl.disabled = false;
-    setVoiceLauncherState("live", "Voice live");
+    setVoiceLauncherState("live", "Session live");
     targetSummaryEl.textContent = `${state.model} voice session connected.`;
     return;
   }
@@ -883,6 +938,42 @@ stopAgentEl.addEventListener("click", async () => {
   }
 });
 
+muteMicEl?.addEventListener("click", async () => {
+  try {
+    const state = sessionManager.getState();
+    renderSessionState(await sessionManager.setInputMuted(!state.inputMuted));
+  } catch (error) {
+    setStatus(error.message || String(error), true);
+  }
+});
+
+muteSpeakerEl?.addEventListener("click", async () => {
+  try {
+    const state = sessionManager.getState();
+    renderSessionState(await sessionManager.setOutputMuted(!state.outputMuted));
+  } catch (error) {
+    setStatus(error.message || String(error), true);
+  }
+});
+
+agentTextFormEl?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = agentTextInputEl?.value?.trim() || "";
+  if (!text) {
+    return;
+  }
+  sendAgentTextEl.disabled = true;
+  agentTextInputEl.disabled = true;
+  try {
+    await sessionManager.sendUserMessage({ text });
+    agentTextInputEl.value = "";
+    renderAudioControlState(sessionManager.getState());
+  } catch (error) {
+    appendTranscriptLine(`Error: ${error.message || String(error)}`);
+    renderAudioControlState(sessionManager.getState());
+  }
+});
+
 clearMemoryEl.addEventListener("click", async () => {
   try {
     await clearAgentMemory(chrome.storage.local);
@@ -983,3 +1074,24 @@ chrome.storage?.onChanged?.addListener?.((changes, areaName) => {
 
 setVoiceLauncherState("idle", "Add key first");
 selectPanel(selectedPanelFromUrl());
+
+// Settings accordions collapse only in the constrained popup surface; the
+// full-page settings view (and tests) keep every section expanded.
+if (new URLSearchParams(location.search).get("surface") !== "popup") {
+  for (const group of document.querySelectorAll("details.settings-group")) {
+    group.open = true;
+  }
+} else {
+  // In the popup, open the Bridge section automatically when no bridge URL is
+  // stored yet (fresh install) so the unconfigured connection is visible.
+  chrome.storage?.local?.get?.("bridgeUrl").then((stored) => {
+    if (stored?.bridgeUrl) {
+      return;
+    }
+    for (const group of document.querySelectorAll("details.settings-group")) {
+      if (group.querySelector("#bridgeUrl")) {
+        group.open = true;
+      }
+    }
+  }).catch(() => {});
+}

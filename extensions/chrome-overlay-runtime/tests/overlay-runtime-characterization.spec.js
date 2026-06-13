@@ -7,18 +7,83 @@ const contentScriptPath = path.join(__dirname, "../src/content.js");
 const backgroundScriptPath = path.join(__dirname, "../src/background.js");
 
 function backgroundScriptForBrowserTest() {
+  // Strip the leading module imports generically so adding or reordering an
+  // import in background.js cannot silently break this harness (a byte-exact
+  // regex here once turned a new import into an inline-script SyntaxError and
+  // the background listener never registered).
   return fs.readFileSync(backgroundScriptPath, "utf8")
-    .replace(
-      /^import \{\n  listSiteActionsFromBundle,\n  resolveSiteActionFromBundle,\n  siteBlockedPrimitiveNamesFromBundle,\n\} from "\.\/agent\/local-actions-catalog\.mjs";\nimport \{\n  buildRealtimeToolCatalog,\n  filterRealtimeToolsForBlockedPrimitives,\n\} from "\.\/agent\/realtime-tool-catalog\.mjs";\n\n/,
-      "",
-    );
+    .replace(/^(?:import \{[^}]*\} from "\.\/agent\/[a-zA-Z-]+\.mjs";\n)+\n?/, "");
 }
 
 async function addBackgroundScript(page) {
   await page.evaluate(() => {
+    window.normalizeSiteActionCallArgs = window.normalizeSiteActionCallArgs || ((args = {}) => {
+      const rest = args.arguments && typeof args.arguments === "object" ? args.arguments : {};
+      const top = args.action || args.action_name || args.name;
+      if (top) {
+        return { action: top, actionArguments: rest };
+      }
+      if (typeof rest.action === "string" && rest.action) {
+        const { action, ...remaining } = rest;
+        return { action, actionArguments: remaining };
+      }
+      return null;
+    });
     window.listSiteActionsFromBundle = window.listSiteActionsFromBundle || (() => []);
+    window.listSiteStorageFilesFromBundle = window.listSiteStorageFilesFromBundle || (() => ({ files: [], skills: [] }));
+    window.listStateProjectionsFromBundle = window.listStateProjectionsFromBundle || (() => []);
+    window.diffStates = window.diffStates || ((before, after) => {
+      const beforeCards = before?.board?.lists?.[0]?.cards || [];
+      const afterCards = after?.board?.lists?.[0]?.cards || [];
+      return afterCards.length > beforeCards.length
+        ? [{ op: "add", path: "/board/lists/0/cards/1", value: afterCards[1] }]
+        : [];
+    });
+    window.buildSemanticDeltas = window.buildSemanticDeltas || ((patches) => patches.map((patch) => ({
+      type: "patch",
+      path: patch.path,
+      patch,
+    })));
+    window.verifyStatePostcondition = window.verifyStatePostcondition || (async () => ({ ok: true }));
+    window.readSiteStorageFileFromBundle = window.readSiteStorageFileFromBundle || (() => ({
+      ok: true,
+      value: {
+        id: "skill",
+        path: "scopes/private/sites/example.test/SKILL.md",
+        kind: "skill",
+        mime_type: "text/markdown",
+        bytes: 42,
+        truncated: false,
+        front_matter: { name: "Example Skill" },
+        text: "# Example Skill",
+      },
+    }));
     window.siteBlockedPrimitiveNamesFromBundle = window.siteBlockedPrimitiveNamesFromBundle || (() => []);
     window.filterRealtimeToolsForBlockedPrimitives = window.filterRealtimeToolsForBlockedPrimitives || ((tools) => tools);
+    window.executeWorkflowAction = window.executeWorkflowAction || (async () => ({
+      ok: false,
+      error: { code: "workflow_unavailable_in_harness", message: "Workflow executor is not loaded in this harness." },
+    }));
+    window.TransferBufferError = window.TransferBufferError || class TransferBufferError extends Error {
+      constructor(code, message) {
+        super(message);
+        this.code = code;
+      }
+    };
+    window.TransferBuffer = window.TransferBuffer || class TransferBuffer {
+      write(args) {
+        return { id: "test-transfer", label: args.label, format: args.format, value: args.value };
+      }
+      read(args) {
+        return { id: "test-transfer", label: args.label, include_value: !!args.include_value };
+      }
+      clear() {
+        return { cleared: 1 };
+      }
+      render() {
+        return { rendered_text: "test transfer" };
+      }
+    };
     window.buildRealtimeToolCatalog = window.buildRealtimeToolCatalog || (() => [
       {
         type: "function",
@@ -623,6 +688,66 @@ test("overlay.open resolves private template data imported with storage-relative
   await expect(overlayReportFrame(page).locator("h1")).toHaveText("Relative Private Storage Works");
 });
 
+test("bridge hydration storage import fast-forwards per file without overwriting newer local entries", async ({ page }) => {
+  await installRuntime(page);
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "local-storage-import", "storage.import_bundle", {
+    bundle: {
+      protocol: "actions.json.storage.bundle",
+      version: 1,
+      entries: [
+        {
+          path: "scopes/private/sites/trello.com/board/SKILL.md",
+          content_type: "text/markdown",
+          content: "# Local newer Trello skill\n",
+          modified_at_ms: 2000,
+        },
+      ],
+    },
+  });
+  await expect.poll(() => actionOutput(page, "local-storage-import")).toMatchObject({ output: { ok: true } });
+
+  await callRuntimeAction(page, "bridge-hydration-import", "storage.import_bundle", {
+    bundle: {
+      protocol: "actions.json.storage.bundle",
+      version: 1,
+      x_actions_json_bridge_hydration: true,
+      entries: [
+        {
+          path: "scopes/private/sites/trello.com/board/SKILL.md",
+          content_type: "text/markdown",
+          content: "# Bridge older Trello skill\n",
+          modified_at_ms: 1000,
+        },
+        {
+          path: "scopes/private/sites/trello.com/board/quality-score.md",
+          content_type: "text/markdown",
+          content: "# Bridge newer score\n",
+          modified_at_ms: 3000,
+        },
+      ],
+    },
+  });
+  await expect.poll(() => actionOutput(page, "bridge-hydration-import")).toMatchObject({
+    output: {
+      ok: true,
+      entry_count: 2,
+      merged: true,
+      updated_count: 1,
+      preserved_count: 1,
+    },
+  });
+
+  const entries = await page.evaluate(() =>
+    Object.fromEntries(
+      window.__actionsJsonStorage.actionsJsonStorageBundle.entries.map((entry) => [entry.path, entry.content])
+    )
+  );
+  expect(entries["scopes/private/sites/trello.com/board/SKILL.md"]).toBe("# Local newer Trello skill\n");
+  expect(entries["scopes/private/sites/trello.com/board/quality-score.md"]).toBe("# Bridge newer score\n");
+});
+
 test("overlay.open resolves shared templates and reports storage reference failures", async ({ page }) => {
   await installRuntime(page);
   await connectRuntime(page);
@@ -875,7 +1000,235 @@ test("runtime.session.log returns the extension-local hosted agent log through t
     });
 });
 
-test("extension menu opens top-level Agent and Settings tabs in the page overlay shell", async ({ page }) => {
+test("runtime.agent.user_message proxies developer prompts through the bridge action path", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "runtime.agent.user_message", input_schema: { type: "object" } },
+    ],
+  });
+  await page.evaluate(() => {
+    window.__actionsJsonRuntimeMessageHandler = async (message) => {
+      if (message.type !== "actions-json:agent-session-user-message") {
+        return { ok: false, error: `Unexpected message ${message.type}` };
+      }
+      return {
+        ok: true,
+        result: {
+          ok: true,
+          request_id: "developer-text-test",
+          response_mode: "text_only_transcript",
+          text: message.text,
+        },
+      };
+    };
+  });
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "inject-agent-text", "runtime.agent.user_message", {
+    text: "Check the Trello card candidates.",
+  });
+
+  await expect
+    .poll(() => actionOutput(page, "inject-agent-text"))
+    .toMatchObject({
+      type: "action_call_output",
+      call_id: "inject-agent-text",
+      output: {
+        ok: true,
+        primitive: "runtime.agent.user_message",
+        adapter: "extension",
+        value: {
+          ok: true,
+          request_id: "developer-text-test",
+          response_mode: "text_only_transcript",
+          text: "Check the Trello card candidates.",
+        },
+      },
+    });
+  await expect(
+    page.evaluate(() =>
+      window.__actionsJsonMessages.find(
+        (item) => item.type === "chrome_runtime_message" &&
+          item.message?.type === "actions-json:agent-session-user-message"
+      )?.message
+    )
+  ).resolves.toMatchObject({
+    type: "actions-json:agent-session-user-message",
+    text: "Check the Trello card candidates.",
+    responseMode: "text_only_transcript",
+  });
+});
+
+test("runtime.agent.start proxies a text-only hosted session start by default", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "runtime.agent.start", input_schema: { type: "object" } },
+    ],
+  });
+  await page.evaluate(() => {
+    window.__actionsJsonRuntimeMessageHandler = async (message) => {
+      if (message.type !== "actions-json:agent-session-start") {
+        return { ok: false, error: `Unexpected message ${message.type}` };
+      }
+      return {
+        ok: true,
+        state: {
+          status: "connected",
+          model: "gpt-realtime-2",
+          error: null,
+          inputMuted: false,
+        },
+      };
+    };
+  });
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "start-agent-text-only", "runtime.agent.start", {});
+
+  await expect
+    .poll(() => actionOutput(page, "start-agent-text-only"))
+    .toMatchObject({
+      type: "action_call_output",
+      call_id: "start-agent-text-only",
+      output: {
+        ok: true,
+        primitive: "runtime.agent.start",
+        adapter: "extension",
+        value: {
+          ok: true,
+          state: {
+            status: "connected",
+            model: "gpt-realtime-2",
+          },
+        },
+      },
+    });
+  await expect(
+    page.evaluate(() =>
+      window.__actionsJsonMessages.find(
+        (item) => item.type === "chrome_runtime_message" &&
+          item.message?.type === "actions-json:agent-session-start"
+      )?.message
+    )
+  ).resolves.toMatchObject({
+    type: "actions-json:agent-session-start",
+    textOnly: true,
+  });
+});
+
+test("runtime.agent.start can explicitly request the microphone voice path", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "runtime.agent.start", input_schema: { type: "object" } },
+    ],
+  });
+  await page.evaluate(() => {
+    window.__actionsJsonRuntimeMessageHandler = async (message) => ({
+      ok: message.type === "actions-json:agent-session-start",
+      state: {
+        status: "connected",
+        model: "gpt-realtime-2",
+        error: null,
+        inputMuted: false,
+      },
+    });
+  });
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "start-agent-voice", "runtime.agent.start", {
+    text_only: false,
+  });
+
+  await expect(
+    page.evaluate(() =>
+      window.__actionsJsonMessages.find(
+        (item) => item.type === "chrome_runtime_message" &&
+          item.message?.type === "actions-json:agent-session-start"
+      )?.message
+    )
+  ).resolves.toMatchObject({
+    type: "actions-json:agent-session-start",
+    textOnly: false,
+  });
+});
+
+test("runtime.agent.stop proxies hosted session stop through the bridge action path", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "runtime.agent.stop", input_schema: { type: "object" } },
+    ],
+  });
+  await page.evaluate(() => {
+    window.__actionsJsonRuntimeMessageHandler = async (message) => {
+      if (message.type !== "actions-json:agent-session-stop") {
+        return { ok: false, error: `Unexpected message ${message.type}` };
+      }
+      return {
+        ok: true,
+        state: {
+          status: "stopped",
+          model: "gpt-realtime-2",
+          error: null,
+          inputMuted: false,
+        },
+      };
+    };
+  });
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "stop-agent-session", "runtime.agent.stop", {});
+
+  await expect
+    .poll(() => actionOutput(page, "stop-agent-session"))
+    .toMatchObject({
+      type: "action_call_output",
+      call_id: "stop-agent-session",
+      output: {
+        ok: true,
+        primitive: "runtime.agent.stop",
+        adapter: "extension",
+        value: {
+          ok: true,
+          state: {
+            status: "stopped",
+            model: "gpt-realtime-2",
+          },
+        },
+      },
+    });
+  await expect(
+    page.evaluate(() =>
+      window.__actionsJsonMessages.find(
+        (item) => item.type === "chrome_runtime_message" &&
+          item.message?.type === "actions-json:agent-session-stop"
+      )?.message
+    )
+  ).resolves.toMatchObject({
+    type: "actions-json:agent-session-stop",
+  });
+});
+
+test("content runtime renders agent text responses as toast notifications", async ({ page }) => {
+  await installRuntime(page);
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener(
+        {
+          type: "actions-json:agent-toast",
+          text: "I found two candidate cards.",
+          request_id: "developer-text-test",
+        },
+        {},
+        resolve
+      )
+    );
+  });
+
+  await expect(page.locator("[data-actions-json-agent-toast]")).toContainText("I found two candidate cards.");
+});
+
+test("extension menu opens a single agent pane in the page overlay shell", async ({ page }) => {
   await installRuntime(page);
   await page.evaluate(async () => {
     const listener = window.__actionsJsonRuntimeListeners[0];
@@ -890,27 +1243,19 @@ test("extension menu opens top-level Agent and Settings tabs in the page overlay
 
   const menu = page.locator("#__actions_json_menu_overlay_host");
   await expect(menu).toHaveCount(1);
+  await expect(menu.locator("iframe")).toHaveCount(1);
   await expect(menu.locator("iframe").first()).toHaveAttribute(
     "src",
     "https://actions-json.test/sidepanel.html?surface=overlay&tab=agent"
   );
-  await expect(menu.locator("[data-tab='agent']")).toHaveAttribute("aria-selected", "true");
-  await expect(menu.locator("[data-tab='config']")).toHaveText("Settings");
+  await expect(menu.locator(".title")).toHaveText("actions.json agent");
+  await expect(menu.locator("[data-tab]")).toHaveCount(0);
   await expect(menu.locator("[data-panel='agent']")).toHaveClass(/active/);
-  await expect(menu.locator("[data-tab='status']")).toHaveCount(0);
-
-  await menu.locator("[data-tab='config']").click();
-  await expect(menu.locator("[data-tab='config']")).toHaveAttribute("aria-selected", "true");
-  await expect(menu.locator("[data-panel='config']")).toHaveClass(/active/);
-  await expect(menu.locator("iframe").nth(1)).toHaveAttribute(
-    "src",
-    "https://actions-json.test/sidepanel.html?surface=overlay&tab=config"
-  );
+  await expect(menu.locator("[data-panel='config']")).toHaveCount(0);
 
   await menu.locator("[data-minimize]").click();
   await expect(menu.locator("[data-minimize]")).toBeVisible();
-  await expect(menu.locator("[data-tab='agent']")).toBeHidden();
-  await expect(menu.locator("[data-tab='config']")).toBeHidden();
+  await expect(menu.locator(".title")).toBeHidden();
   await expect(menu.locator("[data-close]")).toBeHidden();
   await expect
     .poll(() => menu.evaluate((node) => Math.round(node.getBoundingClientRect().width)))
@@ -1060,7 +1405,6 @@ test("runtime reconnect preserves an already-open menu overlay without rebuildin
     );
     const host = document.querySelector("#__actions_json_menu_overlay_host");
     host.dataset.reconnectMarker = "same-host";
-    host.shadowRoot.querySelector("[data-tab='config']").click();
   });
 
   await page.evaluate(() => window.__actionsJsonWebSocket.close());
@@ -1079,10 +1423,10 @@ test("runtime reconnect preserves an already-open menu overlay without rebuildin
       document
         .querySelector("#__actions_json_menu_overlay_host")
         ?.shadowRoot
-        ?.querySelector("[data-tab='config']")
-        ?.getAttribute("aria-selected")
+        ?.querySelector(".title")
+        ?.textContent
     ))
-    .toBe("true");
+    .toBe("actions.json agent");
 });
 
 test("runtime relays bookmarklet protocol messages over the extension bridge", async ({ page }) => {
@@ -1677,9 +2021,229 @@ test("background screenshot focuses the sender window before visible-tab capture
   ]);
 });
 
+test("background transfer buffer handles write and read messages", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__actionsJsonBackgroundCalls = [];
+    window.chrome = {
+      runtime: {
+        lastError: null,
+        getManifest() {
+          return { version: "test-version" };
+        },
+        onInstalled: {
+          addListener() {},
+        },
+        onMessage: {
+          addListener(listener) {
+            window.__actionsJsonBackgroundMessageListener = listener;
+          },
+        },
+      },
+      storage: {
+        local: {
+          async get() {
+            return {};
+          },
+          async set() {},
+        },
+      },
+      scripting: {
+        async executeScript() {},
+      },
+      tabGroups: {
+        async get(id) {
+          return { id };
+        },
+        async update() {},
+      },
+      tabs: {
+        async get(id) {
+          return { id, windowId: 77, url: "https://linear.app/acme/issue/ACT-1" };
+        },
+        async group() {
+          return 42;
+        },
+        async sendMessage() {},
+        update(_tabId, _props, callback) {
+          callback?.();
+        },
+      },
+      windows: {
+        update(_windowId, _props, callback) {
+          callback?.();
+        },
+      },
+    };
+  });
+
+  await page.goto("data:text/html,<main><h1>Background transfer test</h1></main>");
+  await addBackgroundScript(page);
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              type: "actions-json:transfer-buffer",
+              primitive: "transfer.write",
+              arguments: {
+                label: "linear-import",
+                format: "application/json",
+                value: [{ title: "Prepare Trello cards" }],
+              },
+            },
+            {
+              tab: {
+                id: 321,
+                url: "https://linear.app/acme/issue/ACT-1",
+              },
+              frameId: 0,
+            },
+            resolve,
+          );
+        }),
+    ),
+  ).resolves.toMatchObject({
+    ok: true,
+    result: {
+      ok: true,
+      primitive: "transfer.write",
+      adapter: "extension",
+      value: {
+        label: "linear-import",
+        format: "application/json",
+      },
+    },
+  });
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              type: "actions-json:transfer-buffer",
+              primitive: "transfer.read",
+              arguments: {
+                label: "linear-import",
+                include_value: false,
+              },
+            },
+            {},
+            resolve,
+          );
+        }),
+    ),
+  ).resolves.toMatchObject({
+    ok: true,
+    result: {
+      ok: true,
+      primitive: "transfer.read",
+      adapter: "extension",
+      value: {
+        label: "linear-import",
+      },
+    },
+  });
+});
+
+test("background storage.read_file handles read messages", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.chrome = {
+      runtime: {
+        lastError: null,
+        getManifest() {
+          return { version: "test-version" };
+        },
+        onInstalled: {
+          addListener() {},
+        },
+        onMessage: {
+          addListener(listener) {
+            window.__actionsJsonBackgroundMessageListener = listener;
+          },
+        },
+      },
+      storage: {
+        local: {
+          async get() {
+            return {};
+          },
+          async set() {},
+        },
+      },
+      scripting: {
+        async executeScript() {},
+      },
+      tabGroups: {
+        async get(id) {
+          return { id };
+        },
+        async update() {},
+      },
+      tabs: {
+        async get(id) {
+          return { id, windowId: 77, url: "https://example.test/" };
+        },
+        async group() {
+          return 42;
+        },
+        async sendMessage() {},
+        update(_tabId, _props, callback) {
+          callback?.();
+        },
+      },
+      windows: {
+        update(_windowId, _props, callback) {
+          callback?.();
+        },
+      },
+    };
+  });
+
+  await page.goto("data:text/html,<main><h1>Background storage file test</h1></main>");
+  await addBackgroundScript(page);
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              type: "actions-json:storage-read-file",
+              pageUrl: "https://example.test/",
+              arguments: { id: "skill" },
+            },
+            {
+              tab: {
+                id: 1,
+                url: "https://example.test/",
+              },
+            },
+            resolve,
+          );
+        }),
+    ),
+  ).resolves.toMatchObject({
+    ok: true,
+    result: {
+      ok: true,
+      primitive: "storage.read_file",
+      adapter: "extension",
+      value: {
+        id: "skill",
+        path: "scopes/private/sites/example.test/SKILL.md",
+        front_matter: { name: "Example Skill" },
+      },
+    },
+  });
+});
+
 test("background lists and activates extension-claimed tabs", async ({ page }) => {
   await page.addInitScript(() => {
     window.__actionsJsonBackgroundCalls = [];
+    window.__actionsJsonStateProjectionCalls = 0;
     window.__actionsJsonStorage = {
       ACTIONS_JSON_OVERLAY_SESSION_STATE: {
         sessions: {
@@ -1867,6 +2431,874 @@ test("background lists and activates extension-claimed tabs", async ({ page }) =
         authorizationId: "auth-202",
       }),
     });
+});
+
+test("background hosted agent tools prefer the claimed active tab over the foreground HeyCode tab", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__actionsJsonBackgroundCalls = [];
+    window.__actionsJsonStorage = {
+      ACTIONS_JSON_OVERLAY_SESSION_STATE: {
+        sessions: {
+          "actions-json-default": {
+            chromeGroupId: 42,
+            title: "actions.json",
+            activeTabId: 202,
+            tabs: {
+              202: {
+                bridgeUrl: "ws://127.0.0.1:17345/extension",
+                authorizationId: "auth-202",
+                runtimeKey: "chrome-tab:202",
+                url: "https://trello.com/b/example/actions-json",
+              },
+            },
+          },
+        },
+      },
+      actionsJsonStorageBundle: {
+        "scopes/private/sites/trello.com/board/actions.json": {
+          tools: [],
+        },
+      },
+    };
+    window.listSiteActionsFromBundle = (_bundle, pageUrl, targetUrl) => [
+      {
+        name: "trello.find_card",
+        page_url: pageUrl,
+        target_url_contains: targetUrl,
+      },
+    ];
+    window.listStateProjectionsFromBundle = () => [
+      {
+        name: "trello.board",
+        description: "Logical Trello board state.",
+        summaries: ["agent_context"],
+      },
+    ];
+    window.listSiteStorageFilesFromBundle = () => ({ files: [], skills: [] });
+    window.resolveSiteActionFromBundle = (_bundle, _pageUrl, request) => {
+      if (request.action !== "trello.find_card.open") {
+        return {
+          ok: false,
+          error: { code: "unknown_action", message: "Unknown test action." },
+        };
+      }
+      return {
+        ok: true,
+        workflow: {
+          action_name: "trello.find_card.open",
+          definition: {
+            version: 1,
+            expression_language: "jsonata",
+            steps: [
+              { id: "find", primitive: "locator.element_info", args: {} },
+              { id: "click", primitive: "pointer.click", args: {} },
+            ],
+          },
+          input: request.arguments,
+        },
+      };
+    };
+    window.executeWorkflowAction = async (request) => {
+      window.__actionsJsonBackgroundCalls.push({
+        method: "executeWorkflowAction",
+        actionName: request.actionName,
+        input: request.input,
+      });
+      return {
+        ok: true,
+        output: {
+          ok: true,
+          primitive: "actions.workflow",
+          action: request.actionName,
+          value: { opened: request.input.title },
+        },
+        steps: [
+          { id: "find", primitive: "locator.element_info", ok: true, duration_ms: 1 },
+          { id: "click", primitive: "pointer.click", ok: true, duration_ms: 1 },
+        ],
+      };
+    };
+    window.chrome = {
+      runtime: {
+        lastError: null,
+        getManifest() {
+          return { version: "test-version" };
+        },
+        onInstalled: {
+          addListener() {},
+        },
+        onMessage: {
+          addListener(listener) {
+            window.__actionsJsonBackgroundMessageListener = listener;
+          },
+        },
+      },
+      storage: {
+        local: {
+          async get(key) {
+            if (typeof key === "string") {
+              return { [key]: window.__actionsJsonStorage[key] };
+            }
+            return { ...window.__actionsJsonStorage };
+          },
+          async set(values) {
+            Object.assign(window.__actionsJsonStorage, values);
+          },
+        },
+      },
+      tabs: {
+        async query(query) {
+          window.__actionsJsonBackgroundCalls.push({ method: "tabs.query", query });
+          return [
+            {
+              id: 99,
+              windowId: 9,
+              title: "HeyCode",
+              url: "https://hey-code.ai/a/zara",
+              active: true,
+            },
+          ];
+        },
+        async get(id) {
+          if (id === 202) {
+            return {
+              id,
+              windowId: 88,
+              title: "Trello Board",
+              url: "https://trello.com/b/example/actions-json",
+              active: false,
+            };
+          }
+          throw new Error(`missing tab ${id}`);
+        },
+        async sendMessage(tabId, message) {
+          window.__actionsJsonBackgroundCalls.push({ method: "tabs.sendMessage", tabId, message });
+          if (message.type === "actions-json:execute-state-projection") {
+            window.__actionsJsonStateProjectionCalls = (window.__actionsJsonStateProjectionCalls || 0) + 1;
+            const cards = window.__actionsJsonStateProjectionCalls > 1
+              ? [{ title: "Demo card" }, { title: "New follow-up card" }]
+              : [{ title: "Demo card" }];
+            return {
+              ok: true,
+              output: {
+                ok: true,
+                projection: message.projection_name,
+                state_hash: `test-hash-${window.__actionsJsonStateProjectionCalls}`,
+                observed_at: "2026-06-10T00:00:00.000Z",
+                state: {
+                  board: {
+                    lists: [
+                      {
+                        name: "In Progress",
+                        cards,
+                      },
+                    ],
+                  },
+                },
+              },
+              error: null,
+            };
+          }
+          return { ok: true };
+        },
+      },
+    };
+  });
+
+  await page.goto("data:text/html,<main><h1>Hosted routing test</h1></main>");
+  await addBackgroundScript(page);
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              target: "background",
+              type: "actions-json:agent-tool-execute",
+              call: {
+                name: "actions.site",
+                call_id: "call-actions-site",
+                arguments: { mode: "list" },
+              },
+            },
+            {},
+            resolve,
+          );
+        }),
+    ),
+  ).resolves.toMatchObject({
+    ok: true,
+    result: {
+      ok: true,
+      call_id: "call-actions-site",
+      output: {
+        ok: true,
+        target_url_contains: "https://trello.com/b/example/actions-json",
+        actions: [
+          expect.objectContaining({
+            name: "trello.find_card",
+            page_url: "https://trello.com/b/example/actions-json",
+          }),
+        ],
+        state_projections: [
+          {
+            name: "trello.board",
+            description: "Logical Trello board state.",
+            summaries: ["agent_context"],
+          },
+        ],
+      },
+    },
+  });
+
+  await expect(page.evaluate(() => window.__actionsJsonBackgroundCalls)).resolves.not.toContainEqual({
+    method: "tabs.query",
+    query: { active: true, currentWindow: true },
+  });
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              target: "background",
+              type: "actions-json:agent-tool-execute",
+              call: {
+                name: "actions.site",
+                call_id: "call-workflow",
+                arguments: {
+                  mode: "call",
+                  action: "trello.find_card.open",
+                  arguments: { title: "Demo card" },
+                },
+              },
+            },
+            {},
+            resolve,
+          );
+        }),
+    ),
+  ).resolves.toMatchObject({
+    ok: true,
+    result: {
+      ok: true,
+      call_id: "call-workflow",
+      output: {
+        ok: true,
+        primitive: "actions.workflow",
+        action: "trello.find_card.open",
+        value: { opened: "Demo card" },
+      },
+    },
+  });
+  await expect(page.evaluate(() => window.__actionsJsonBackgroundCalls)).resolves.toContainEqual({
+    method: "executeWorkflowAction",
+    actionName: "trello.find_card.open",
+    input: { title: "Demo card" },
+  });
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              target: "background",
+              type: "actions-json:agent-tool-execute",
+              call: {
+                name: "actions.site",
+                call_id: "call-state",
+                arguments: {
+                  mode: "state_read",
+                  projection_name: "trello.board",
+                },
+              },
+            },
+            {},
+            resolve,
+          );
+        }),
+    ),
+  ).resolves.toMatchObject({
+    ok: true,
+    result: {
+      ok: true,
+      call_id: "call-state",
+      output: {
+        ok: true,
+        projection: "trello.board",
+        state: {
+          board: {
+            lists: [
+              {
+                name: "In Progress",
+                cards: [{ title: "Demo card" }],
+              },
+            ],
+          },
+        },
+      },
+    },
+  });
+  await expect(page.evaluate(() => window.__actionsJsonBackgroundCalls)).resolves.toContainEqual({
+    method: "tabs.sendMessage",
+    tabId: 202,
+    message: expect.objectContaining({
+      type: "actions-json:execute-state-projection",
+      projection_name: "trello.board",
+    }),
+  });
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              target: "background",
+              type: "actions-json:agent-tool-execute",
+              call: {
+                name: "actions.site",
+                call_id: "call-state-diff",
+                arguments: {
+                  mode: "state_diff",
+                  projection_name: "trello.board",
+                },
+              },
+            },
+            {},
+            resolve,
+          );
+        }),
+    ),
+  ).resolves.toMatchObject({
+    ok: true,
+    result: {
+      ok: true,
+      call_id: "call-state-diff",
+      output: {
+        ok: true,
+        projection: "trello.board",
+        baseline: "previous_snapshot",
+        patch_format: "json_patch",
+        patches: [
+          {
+            op: "add",
+            path: "/board/lists/0/cards/1",
+            value: { title: "New follow-up card" },
+          },
+        ],
+        previous_state_hash: "test-hash-1",
+        state_hash: "test-hash-2",
+      },
+    },
+  });
+});
+
+test("background hosted claimed-tab tools execute against the registry without a page target", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__actionsJsonBackgroundCalls = [];
+    window.__actionsJsonStorage = {
+      ACTIONS_JSON_OVERLAY_SESSION_STATE: {
+        sessions: {
+          "actions-json-default": {
+            chromeGroupId: 42,
+            title: "actions.json",
+            activeTabId: 202,
+            tabs: {
+              202: {
+                bridgeUrl: "ws://127.0.0.1:17345/extension",
+                authorizationId: "auth-202",
+                runtimeKey: "chrome-tab:202",
+                url: "https://trello.com/b/example/actions-json",
+              },
+            },
+          },
+        },
+      },
+    };
+    window.chrome = {
+      runtime: {
+        lastError: null,
+        getManifest() {
+          return { version: "test-version" };
+        },
+        onInstalled: {
+          addListener() {},
+        },
+        onMessage: {
+          addListener(listener) {
+            window.__actionsJsonBackgroundMessageListener = listener;
+          },
+        },
+      },
+      storage: {
+        local: {
+          async get(key) {
+            if (typeof key === "string") {
+              return { [key]: window.__actionsJsonStorage[key] };
+            }
+            return { ...window.__actionsJsonStorage };
+          },
+          async set(values) {
+            Object.assign(window.__actionsJsonStorage, values);
+          },
+        },
+      },
+      tabs: {
+        async query(query) {
+          window.__actionsJsonBackgroundCalls.push({ method: "tabs.query", query });
+          return [
+            {
+              id: 99,
+              windowId: 9,
+              title: "HeyCode",
+              url: "https://hey-code.ai/a/zara",
+              active: true,
+            },
+          ];
+        },
+        async get(id) {
+          if (id === 202) {
+            return {
+              id,
+              windowId: 88,
+              title: "Trello Board",
+              url: "https://trello.com/b/example/actions-json",
+              active: false,
+            };
+          }
+          throw new Error(`missing tab ${id}`);
+        },
+      },
+    };
+  });
+
+  await page.goto("data:text/html,<main><h1>Hosted claimed tools test</h1></main>");
+  await addBackgroundScript(page);
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              target: "background",
+              type: "actions-json:agent-tool-execute",
+              call: {
+                name: "browser.claimed_tabs.list",
+                call_id: "call-claimed-tabs",
+                arguments: {},
+              },
+            },
+            {},
+            resolve,
+          );
+        }),
+    ),
+  ).resolves.toMatchObject({
+    ok: true,
+    result: {
+      ok: true,
+      call_id: "call-claimed-tabs",
+      output: {
+        ok: true,
+        active_tab_id: 202,
+        count: 1,
+        tabs: [
+          expect.objectContaining({
+            tab_id: 202,
+            url: "https://trello.com/b/example/actions-json",
+          }),
+        ],
+      },
+    },
+  });
+
+  await expect(page.evaluate(() => window.__actionsJsonBackgroundCalls)).resolves.not.toContainEqual({
+    method: "tabs.query",
+    query: { active: true, currentWindow: true },
+  });
+});
+
+test("background bridge reconnect replays every already-claimed tab", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__actionsJsonBackgroundCalls = [];
+    window.__actionsJsonBridgeSends = [];
+    window.__actionsJsonStorage = {
+      ACTIONS_JSON_OVERLAY_SESSION_STATE: {
+        sessions: {
+          "actions-json-default": {
+            chromeGroupId: 42,
+            title: "actions.json",
+            activeTabId: 101,
+            tabs: {
+              101: {
+                bridgeUrl: "ws://127.0.0.1:17345/extension",
+                authorizationId: "auth-101",
+                runtimeKey: "chrome-tab:101",
+                url: "https://www.linkedin.com/messaging/",
+              },
+              202: {
+                bridgeUrl: "ws://127.0.0.1:17345/extension",
+                authorizationId: "auth-202",
+                runtimeKey: "chrome-tab:202",
+                url: "https://trello.com/b/example/actions-json",
+              },
+            },
+          },
+        },
+      },
+    };
+    window.chrome = {
+      runtime: {
+        lastError: null,
+        getManifest() {
+          return { version: "test-version" };
+        },
+        onInstalled: {
+          addListener() {},
+        },
+        onMessage: {
+          addListener(listener) {
+            window.__actionsJsonBackgroundMessageListener = listener;
+          },
+        },
+      },
+      storage: {
+        local: {
+          async get(key) {
+            if (typeof key === "string") {
+              return { [key]: window.__actionsJsonStorage[key] };
+            }
+            return { ...window.__actionsJsonStorage };
+          },
+          async set(values) {
+            Object.assign(window.__actionsJsonStorage, values);
+          },
+        },
+      },
+      scripting: {
+        async executeScript(details) {
+          window.__actionsJsonBackgroundCalls.push({ method: "scripting.executeScript", details });
+        },
+      },
+      tabGroups: {
+        async get(id) {
+          return { id };
+        },
+        async update() {},
+      },
+      tabs: {
+        async get(id) {
+          if (id === 101) {
+            return {
+              id,
+              windowId: 77,
+              title: "LinkedIn Messaging",
+              url: "https://www.linkedin.com/messaging/",
+              active: true,
+            };
+          }
+          if (id === 202) {
+            return {
+              id,
+              windowId: 88,
+              title: "Trello Board",
+              url: "https://trello.com/b/example/actions-json",
+              active: false,
+            };
+          }
+          throw new Error(`missing tab ${id}`);
+        },
+        async group() {
+          return 42;
+        },
+        async sendMessage(tabId, message) {
+          window.__actionsJsonBackgroundCalls.push({ method: "tabs.sendMessage", tabId, message });
+          if (message.type === "actions-json:runtime-ready") {
+            return {
+              ok: true,
+              readyItem: {
+                type: "runtime_ready",
+                runtime_id: `runtime-${tabId}`,
+                runtime_key: message.runtimeKey,
+                authorization_id: message.authorizationId,
+                extension_version: message.extensionVersion,
+                url: tabId === 101
+                  ? "https://www.linkedin.com/messaging/"
+                  : "https://trello.com/b/example/actions-json",
+                manifest: { tools: [{ name: "page.info" }] },
+              },
+            };
+          }
+          return { ok: true };
+        },
+      },
+      windows: {
+        async update() {},
+      },
+    };
+    window.WebSocket = class OpenWebSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
+      constructor(url) {
+        super();
+        this.url = url;
+        this.readyState = OpenWebSocket.OPEN;
+        window.__actionsJsonBridgeSockets = window.__actionsJsonBridgeSockets || [];
+        window.__actionsJsonBridgeSockets.push(this);
+        setTimeout(() => this.dispatchEvent(new Event("open")), 0);
+      }
+
+      send(raw) {
+        window.__actionsJsonBridgeSends.push(JSON.parse(raw));
+      }
+
+      close() {
+        this.readyState = OpenWebSocket.CLOSED;
+        this.dispatchEvent(new Event("close"));
+      }
+    };
+  });
+
+  await page.goto("data:text/html,<main><h1>Bridge replay test</h1></main>");
+  await addBackgroundScript(page);
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              type: "actions-json:bridge-connect",
+              bridgeUrl: "ws://127.0.0.1:17345/extension",
+              readyItem: {
+                type: "runtime_ready",
+                runtime_id: "runtime-101",
+                runtime_key: "chrome-tab:101",
+                authorization_id: "auth-101",
+                extension_version: "test-version",
+                url: "https://www.linkedin.com/messaging/",
+                manifest: { tools: [{ name: "page.info" }] },
+              },
+            },
+            { tab: { id: 101 } },
+            resolve,
+          );
+        }),
+    )
+  ).resolves.toMatchObject({ ok: true, transport_owner: "extension_background" });
+
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonBridgeSends.filter((item) => item.type === "runtime_ready")))
+    .toEqual([
+      expect.objectContaining({
+        runtime_id: "runtime-101",
+        runtime_key: "chrome-tab:101",
+        authorization_id: "auth-101",
+        tab: expect.objectContaining({ tab_id: 101, active: true }),
+      }),
+      expect.objectContaining({
+        runtime_id: "runtime-202",
+        runtime_key: "chrome-tab:202",
+        authorization_id: "auth-202",
+        tab: expect.objectContaining({ tab_id: 202, active: false }),
+      }),
+    ]);
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonBridgeSends.find((item) => item.type === "bridge_runtime_replay_summary") || null))
+    .toMatchObject({
+      claimed_count: 2,
+      registered_count: 2,
+      removed_count: 0,
+      failed_count: 0,
+    });
+});
+
+test("background bridge reconnect keeps retrying after a failed reconnect attempt", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__actionsJsonBackgroundCalls = [];
+    window.__actionsJsonBridgeSends = [];
+    window.__actionsJsonBridgeSockets = [];
+    window.__actionsJsonSocketMode = "open";
+    window.__actionsJsonStorage = {
+      ACTIONS_JSON_OVERLAY_SESSION_STATE: {
+        sessions: {
+          "actions-json-default": {
+            activeTabId: 101,
+            tabs: {
+              101: {
+                bridgeUrl: "ws://127.0.0.1:17345/extension",
+                authorizationId: "auth-101",
+                runtimeKey: "chrome-tab:101",
+                url: "https://trello.com/b/example/actions-json",
+              },
+            },
+          },
+        },
+      },
+    };
+    window.chrome = {
+      runtime: {
+        lastError: null,
+        getManifest() {
+          return { version: "test-version" };
+        },
+        onInstalled: {
+          addListener() {},
+        },
+        onMessage: {
+          addListener(listener) {
+            window.__actionsJsonBackgroundMessageListener = listener;
+          },
+        },
+      },
+      storage: {
+        local: {
+          async get(key) {
+            if (typeof key === "string") {
+              return { [key]: window.__actionsJsonStorage[key] };
+            }
+            return { ...window.__actionsJsonStorage };
+          },
+          async set(values) {
+            Object.assign(window.__actionsJsonStorage, values);
+          },
+        },
+      },
+      scripting: {
+        async executeScript(details) {
+          window.__actionsJsonBackgroundCalls.push({ method: "scripting.executeScript", details });
+        },
+      },
+      tabGroups: {
+        async get(id) {
+          return { id };
+        },
+        async update() {},
+      },
+      tabs: {
+        async get(id) {
+          if (id !== 101) throw new Error(`missing tab ${id}`);
+          return {
+            id,
+            windowId: 77,
+            title: "Trello Board",
+            url: "https://trello.com/b/example/actions-json",
+            active: true,
+          };
+        },
+        async group() {
+          return 42;
+        },
+        async sendMessage(tabId, message) {
+          window.__actionsJsonBackgroundCalls.push({ method: "tabs.sendMessage", tabId, message });
+          if (message.type === "actions-json:runtime-ready") {
+            return {
+              ok: true,
+              readyItem: {
+                type: "runtime_ready",
+                runtime_id: `runtime-${tabId}`,
+                runtime_key: message.runtimeKey,
+                authorization_id: message.authorizationId,
+                extension_version: message.extensionVersion,
+                url: "https://trello.com/b/example/actions-json",
+                manifest: { tools: [{ name: "page.info" }] },
+              },
+            };
+          }
+          return { ok: true };
+        },
+      },
+      windows: {
+        async update() {},
+      },
+    };
+    window.WebSocket = class ControlledWebSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
+      constructor(url) {
+        super();
+        this.url = url;
+        this.readyState = ControlledWebSocket.CONNECTING;
+        window.__actionsJsonBridgeSockets.push(this);
+        setTimeout(() => {
+          if (window.__actionsJsonSocketMode === "fail") {
+            this.dispatchEvent(new Event("error"));
+            this.readyState = ControlledWebSocket.CLOSED;
+            this.dispatchEvent(new Event("close"));
+            return;
+          }
+          this.readyState = ControlledWebSocket.OPEN;
+          this.dispatchEvent(new Event("open"));
+        }, 0);
+      }
+
+      send(raw) {
+        window.__actionsJsonBridgeSends.push(JSON.parse(raw));
+      }
+
+      close() {
+        if (this.readyState === ControlledWebSocket.CLOSED) return;
+        this.readyState = ControlledWebSocket.CLOSED;
+        this.dispatchEvent(new Event("close"));
+      }
+    };
+  });
+
+  await page.goto("data:text/html,<main><h1>Bridge retry test</h1></main>");
+  await addBackgroundScript(page);
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              type: "actions-json:bridge-connect",
+              bridgeUrl: "ws://127.0.0.1:17345/extension",
+              readyItem: {
+                type: "runtime_ready",
+                runtime_id: "runtime-101",
+                runtime_key: "chrome-tab:101",
+                authorization_id: "auth-101",
+                extension_version: "test-version",
+                url: "https://trello.com/b/example/actions-json",
+                manifest: { tools: [{ name: "page.info" }] },
+              },
+            },
+            { tab: { id: 101 } },
+            resolve,
+          );
+        }),
+    )
+  ).resolves.toMatchObject({ ok: true, transport_owner: "extension_background" });
+
+  await expect.poll(() => page.evaluate(() => window.__actionsJsonBridgeSockets.length)).toBe(1);
+  await page.evaluate(() => {
+    window.__actionsJsonSocketMode = "fail";
+    window.__actionsJsonBridgeSockets[0].close();
+  });
+  await expect.poll(() => page.evaluate(() => window.__actionsJsonBridgeSockets.length)).toBe(2);
+  await page.evaluate(() => {
+    window.__actionsJsonSocketMode = "open";
+  });
+
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonBridgeSockets.length), { timeout: 7000 })
+    .toBeGreaterThanOrEqual(3);
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonBridgeSends.filter((item) => item.type === "runtime_ready").length))
+    .toBeGreaterThanOrEqual(2);
 });
 
 test("background session log handler returns stored agent memory without dynamic import", async ({ page }) => {
@@ -2616,6 +4048,12 @@ test("extension implements advertised point and input primitives", async ({ page
       style="position:absolute;left:120px;top:260px;width:180px;height:36px"
       oninput="document.body.dataset.inputValue = this.value"
     />
+    <div
+      data-testid="contenteditable-target"
+      contenteditable="true"
+      style="position:absolute;left:120px;top:320px;width:220px;min-height:40px;border:1px solid #999"
+      oninput="document.body.dataset.editableText = this.textContent"
+    ></div>
   `);
 
   await connectRuntime(page);
@@ -2668,6 +4106,305 @@ test("extension implements advertised point and input primitives", async ({ page
     },
   });
   await expect(page.evaluate(() => document.querySelector("[data-testid='text-target']").value)).resolves.toBe("hello extension");
+
+  await callRuntimeAction(page, "extension-text-insert-contenteditable", "text.insert", {
+    text: "editable note",
+    target: { selector: "[data-testid='contenteditable-target']" },
+    mode: "replace",
+  });
+  await expect.poll(() => actionOutput(page, "extension-text-insert-contenteditable")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "text.insert",
+      adapter: "extension",
+      value: { inserted: true, inserted_length: 13 },
+    },
+  });
+  await expect(page.evaluate(() => document.querySelector("[data-testid='contenteditable-target']").textContent)).resolves.toBe("editable note");
+});
+
+test("extension executes supported primitives declared only in primitive dictionary", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [],
+    primitive_dictionary: {
+      primitives: [
+        {
+          name: "text.insert",
+          support: "supported",
+          input_schema: {
+            type: "object",
+            required: ["text"],
+            properties: { text: { type: "string" } },
+          },
+        },
+      ],
+    },
+  });
+
+  await page.setContent(`<input data-testid="text-target" />`);
+  await connectRuntime(page);
+  await page.locator("[data-testid='text-target']").focus();
+
+  await callRuntimeAction(page, "dictionary-text-insert", "text.insert", { text: "dictionary primitive" });
+
+  await expect.poll(() => actionOutput(page, "dictionary-text-insert")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "text.insert",
+      adapter: "extension",
+      value: { inserted: true, inserted_length: 20 },
+    },
+  });
+  await expect(page.evaluate(() => document.querySelector("[data-testid='text-target']").value)).resolves.toBe(
+    "dictionary primitive",
+  );
+});
+
+test("extension pointer.drag resolves source and destination locators", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "pointer.drag", input_schema: { type: "object" } },
+    ],
+  });
+
+  await page.setContent(`
+    <div
+      data-testid="source-card"
+      style="position:absolute;left:120px;top:140px;width:160px;height:56px;background:#dbeafe"
+      onpointerdown="document.body.dataset.dragLocatorStarted = 'yes'"
+    >Move me</div>
+    <div
+      data-testid="target-list"
+      style="position:absolute;left:420px;top:220px;width:180px;height:96px;background:#dcfce7"
+      onpointerup="document.body.dataset.dragLocatorEnded = 'yes'"
+    >Done</div>
+  `);
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "extension-pointer-drag-locator", "pointer.drag", {
+    from: { selector: "[data-testid='source-card']" },
+    to: { selector: "[data-testid='target-list']" },
+    duration_ms: 0,
+    steps: 4,
+  });
+
+  await expect.poll(() => actionOutput(page, "extension-pointer-drag-locator")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "pointer.drag",
+      adapter: "extension",
+      value: {
+        dragged: true,
+        steps: 4,
+        diagnostics: {
+          from: { source: "locator", tag_name: "div", text: "Move me" },
+          to: { source: "locator", tag_name: "div", text: "Done" },
+        },
+      },
+    },
+  });
+  await expect(page.evaluate(() => document.body.dataset.dragLocatorStarted)).resolves.toBe("yes");
+  await expect(page.evaluate(() => document.body.dataset.dragLocatorEnded)).resolves.toBe("yes");
+});
+
+test("extension transfer buffer writes, reads, and inserts rendered data through the action path", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "transfer.write", input_schema: { type: "object" } },
+      { name: "transfer.read", input_schema: { type: "object" } },
+      { name: "transfer.clear", input_schema: { type: "object" } },
+      { name: "transfer.insert", input_schema: { type: "object" } },
+    ],
+  });
+  await page.setContent(`
+    <main>
+      <textarea
+        data-testid="trello-card"
+        style="position:absolute;left:120px;top:180px;width:320px;height:120px"
+        oninput="document.body.dataset.cardText = this.value"
+      ></textarea>
+      <div
+        data-testid="trello-description"
+        contenteditable="true"
+        style="position:absolute;left:120px;top:340px;width:320px;min-height:80px;border:1px solid #999"
+        oninput="document.body.dataset.descriptionText = this.textContent"
+      ></div>
+    </main>
+  `);
+  await page.evaluate(() => {
+    const items = new Map();
+    window.__actionsJsonRuntimeMessageHandler = async (message) => {
+      if (message.type !== "actions-json:transfer-buffer") return { ok: true };
+      const args = message.arguments || {};
+      if (message.primitive === "transfer.write") {
+        const item = {
+          id: `transfer-${items.size + 1}`,
+          label: args.label,
+          format: args.format,
+          value: args.value,
+          metadata: args.metadata || {},
+          size_bytes: JSON.stringify(args.value).length,
+        };
+        items.set(args.label, item);
+        return { ok: true, result: { ok: true, primitive: message.primitive, adapter: "extension", value: item } };
+      }
+      if (message.primitive === "transfer.read") {
+        const item = items.get(args.label);
+        return {
+          ok: true,
+          result: {
+            ok: true,
+            primitive: message.primitive,
+            adapter: "extension",
+            value: args.include_value ? item : { ...item, value: undefined },
+          },
+        };
+      }
+      if (message.primitive === "transfer.insert") {
+        const item = items.get(args.label);
+        const first = item.value[0];
+        return {
+          ok: true,
+          result: {
+            ok: true,
+            primitive: message.primitive,
+            adapter: "extension",
+            value: {
+              id: item.id,
+              label: item.label,
+              text: `${first.title} - ${first.owner}`,
+            },
+          },
+        };
+      }
+      if (message.primitive === "transfer.clear") {
+        items.delete(args.label);
+        return { ok: true, result: { ok: true, primitive: message.primitive, adapter: "extension", value: { cleared: 1 } } };
+      }
+      return { ok: false, error: "unexpected transfer primitive" };
+    };
+  });
+
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "transfer-write", "transfer.write", {
+    label: "linear-import",
+    format: "application/json",
+    value: [{ title: "Fix Trello drag primitive", owner: "Zara" }],
+  });
+  await expect.poll(() => actionOutput(page, "transfer-write")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "transfer.write",
+      adapter: "extension",
+      value: { label: "linear-import", format: "application/json" },
+    },
+  });
+
+  await callRuntimeAction(page, "transfer-read", "transfer.read", {
+    label: "linear-import",
+    include_value: false,
+  });
+  await expect.poll(() => actionOutput(page, "transfer-read")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "transfer.read",
+      adapter: "extension",
+      value: { label: "linear-import" },
+    },
+  });
+
+  await callRuntimeAction(page, "transfer-insert", "transfer.insert", {
+    label: "linear-import",
+    target: { selector: "[data-testid='trello-card']" },
+    item_selector: { index: 0 },
+    render: { template: "{{title}} - {{owner}}" },
+  });
+  await expect.poll(() => actionOutput(page, "transfer-insert")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "transfer.insert",
+      adapter: "extension",
+      value: { inserted: true },
+    },
+  });
+  await expect(page.evaluate(() => document.querySelector("[data-testid='trello-card']").value)).resolves.toBe(
+    "Fix Trello drag primitive - Zara",
+  );
+
+  await callRuntimeAction(page, "transfer-insert-contenteditable", "transfer.insert", {
+    label: "linear-import",
+    target: { selector: "[data-testid='trello-description']" },
+    item_selector: { index: 0 },
+    render: { template: "{{title}}" },
+    mode: "replace",
+  });
+  await expect.poll(() => actionOutput(page, "transfer-insert-contenteditable")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "transfer.insert",
+      adapter: "extension",
+      value: { inserted: true },
+    },
+  });
+  await expect(page.evaluate(() => document.querySelector("[data-testid='trello-description']").textContent)).resolves.toBe(
+    "Fix Trello drag primitive - Zara",
+  );
+});
+
+test("extension storage.read_file reads declared files through the action path", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "storage.read_file", input_schema: { type: "object" } },
+    ],
+  });
+  await page.setContent("<main><h1>Storage file action path</h1></main>");
+  await page.evaluate(() => {
+    window.__actionsJsonRuntimeMessageHandler = async (message) => {
+      if (message.type !== "actions-json:storage-read-file") return { ok: true };
+      return {
+        ok: true,
+        result: {
+          ok: true,
+          primitive: "storage.read_file",
+          adapter: "extension",
+          value: {
+            id: message.arguments.id || null,
+            path: message.arguments.path || "scopes/shared/youtube/sites/youtube.com/watch/SKILL.md",
+            kind: "skill",
+            mime_type: "text/markdown",
+            bytes: 96,
+            truncated: false,
+            front_matter: {
+              name: "YouTube Tutorial Extraction",
+              description: "Operate YouTube videos with ad-aware screenshot capture.",
+            },
+            text: "---\nname: YouTube Tutorial Extraction\n---\n# YouTube Skill",
+          },
+        },
+      };
+    };
+  });
+
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "read-youtube-skill", "storage.read_file", {
+    id: "youtube-tutorial-skill",
+  });
+  await expect.poll(() => actionOutput(page, "read-youtube-skill")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "storage.read_file",
+      adapter: "extension",
+      value: {
+        id: "youtube-tutorial-skill",
+        kind: "skill",
+        front_matter: {
+          name: "YouTube Tutorial Extraction",
+        },
+      },
+    },
+  });
 });
 
 test("extension implements page, DOM, locator text, wait, and keyboard primitives", async ({ page }) => {
@@ -2686,7 +4423,7 @@ test("extension implements page, DOM, locator text, wait, and keyboard primitive
   await page.setContent(`
     <title>Extension Observation Fixture</title>
     <main>
-      <button data-testid="visible-action" onkeydown="document.body.dataset.key = event.key">Observe Me</button>
+      <button data-testid="visible-action" onkeydown="document.body.dataset.key = event.key; document.body.dataset.modifierChord = event.metaKey && event.key === 'a' ? 'yes' : document.body.dataset.modifierChord">Observe Me</button>
       <p class="copy">Visible text snapshot target</p>
       <section data-testid="standard-carousel" style="margin-top: 40px; height: 160px">
         <h2>Top picks</h2>
@@ -2804,6 +4541,57 @@ test("extension implements page, DOM, locator text, wait, and keyboard primitive
     },
   });
   await expect(page.evaluate(() => document.body.dataset.key)).resolves.toBe("Enter");
+
+  await callRuntimeAction(page, "extension-keyboard-modifier", "keyboard.press", { key: "Meta+a" });
+  await expect.poll(() => actionOutput(page, "extension-keyboard-modifier")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "keyboard.press",
+      adapter: "extension",
+      value: { pressed: true, key: "a", modifiers: ["meta"], fidelity: "page_level" },
+    },
+  });
+  await expect(page.evaluate(() => document.body.dataset.modifierChord)).resolves.toBe("yes");
+});
+
+test("dom.observe.visible refuses oversized broad payloads with narrowing hints", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "dom.observe.visible", input_schema: { type: "object" } },
+    ],
+  });
+
+  const repeated = Array.from({ length: 80 }, (_, index) =>
+    `<section><h2>Card section ${index}</h2><p>${"Card payload text ".repeat(200)}</p></section>`
+  ).join("");
+  await page.setContent(`
+    <title>Large Observation Fixture</title>
+    <main>${repeated}</main>
+  `);
+
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "large-dom-observe", "dom.observe.visible", {
+    text_contains: "Card",
+  });
+
+  await expect.poll(() => actionOutput(page, "large-dom-observe")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "dom.observe.visible",
+      adapter: "extension",
+      value: {
+        ok: false,
+        error: {
+          code: "payload_too_large",
+        },
+      },
+    },
+  });
+  const output = await actionOutput(page, "large-dom-observe");
+  expect(JSON.stringify(output.output.value).length).toBeLessThan(2000);
+  expect(output.output.value.error.evidence.match_count).toBeGreaterThan(0);
+  expect(output.output.value.error.evidence.narrowing_hints).toContain("Use a narrower selector.");
 });
 
 test("dom.list_sections treats viewport-edge sections as not visible", async ({ page }) => {
@@ -2953,6 +4741,280 @@ test("background bridge connect reports failure when WebSocket never opens", asy
     ok: false,
     error: expect.stringContaining("WebSocket"),
   });
+});
+
+test("background bridge credential hydration stores OpenAI key without logging the raw key", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__actionsJsonStorage = {};
+    window.__actionsJsonBridgeSends = [];
+    window.chrome = {
+      runtime: {
+        lastError: null,
+        getManifest() {
+          return { version: "test-version" };
+        },
+        onInstalled: {
+          addListener() {},
+        },
+        onMessage: {
+          addListener(listener) {
+            window.__actionsJsonBackgroundMessageListener = listener;
+          },
+        },
+      },
+      storage: {
+        local: {
+          async get(key) {
+            if (typeof key === "string") {
+              return { [key]: window.__actionsJsonStorage[key] };
+            }
+            return { ...window.__actionsJsonStorage };
+          },
+          async set(values) {
+            Object.assign(window.__actionsJsonStorage, values);
+          },
+          async remove(key) {
+            delete window.__actionsJsonStorage[key];
+          },
+        },
+      },
+      scripting: {
+        async executeScript() {},
+      },
+      tabGroups: {
+        async get(id) {
+          return { id };
+        },
+        async update() {},
+      },
+      tabs: {
+        async get(id) {
+          return { id, windowId: 77, url: "https://trello.com/b/example/actions-json" };
+        },
+        async group() {
+          return 42;
+        },
+        async sendMessage() {
+          return { ok: true };
+        },
+      },
+    };
+    window.WebSocket = class OpenWebSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
+      constructor(url) {
+        super();
+        this.url = url;
+        this.readyState = OpenWebSocket.CONNECTING;
+        window.__actionsJsonBackgroundWebSocket = this;
+        setTimeout(() => {
+          this.readyState = OpenWebSocket.OPEN;
+          this.dispatchEvent(new Event("open"));
+        }, 0);
+      }
+
+      send(value) {
+        window.__actionsJsonBridgeSends.push(JSON.parse(value));
+      }
+
+      close() {
+        this.readyState = OpenWebSocket.CLOSED;
+        this.dispatchEvent(new CloseEvent("close"));
+      }
+    };
+  });
+
+  await page.goto("data:text/html,<main><h1>Credential hydration test</h1></main>");
+  await addBackgroundScript(page);
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              type: "actions-json:bridge-connect",
+              bridgeUrl: "ws://100.99.150.49:17345/extension",
+              readyItem: {
+                type: "runtime_ready",
+                runtime_id: "trello-runtime",
+                manifest: { tools: [] },
+              },
+            },
+            { tab: { id: 202, windowId: 77, url: "https://trello.com/b/example/actions-json" } },
+            resolve,
+          );
+        }),
+    )
+  ).resolves.toMatchObject({ ok: true });
+
+  await page.evaluate(() => {
+    window.__actionsJsonBackgroundWebSocket.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "credential_hydration",
+          provider: "openai",
+          source: "mcp_bridge_local",
+          credential: { api_key: "sk-test-hydration-1234567890" },
+          redacted: "sk...7890",
+        }),
+      }),
+    );
+  });
+
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonStorage.ACTIONS_JSON_OPENAI_API_KEY || null))
+    .toBe("sk-test-hydration-1234567890");
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonBridgeSends.find((item) => item.type === "credential_hydration_result") || null))
+    .toMatchObject({
+      type: "credential_hydration_result",
+      provider: "openai",
+      ok: true,
+      configured: true,
+      redacted: "sk...7890",
+    });
+  await expect(
+    page.evaluate(() => JSON.stringify(window.__actionsJsonStorage.ACTIONS_JSON_AGENT_MEMORY_V1 || {})),
+  ).resolves.not.toContain("sk-test-hydration-1234567890");
+});
+
+test("background bridge rejects malformed credential hydration without storing a key", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__actionsJsonStorage = {};
+    window.__actionsJsonBridgeSends = [];
+    window.chrome = {
+      runtime: {
+        lastError: null,
+        getManifest() {
+          return { version: "test-version" };
+        },
+        onInstalled: {
+          addListener() {},
+        },
+        onMessage: {
+          addListener(listener) {
+            window.__actionsJsonBackgroundMessageListener = listener;
+          },
+        },
+      },
+      storage: {
+        local: {
+          async get(key) {
+            if (typeof key === "string") {
+              return { [key]: window.__actionsJsonStorage[key] };
+            }
+            return { ...window.__actionsJsonStorage };
+          },
+          async set(values) {
+            Object.assign(window.__actionsJsonStorage, values);
+          },
+          async remove(key) {
+            delete window.__actionsJsonStorage[key];
+          },
+        },
+      },
+      scripting: {
+        async executeScript() {},
+      },
+      tabGroups: {
+        async get(id) {
+          return { id };
+        },
+        async update() {},
+      },
+      tabs: {
+        async get(id) {
+          return { id, windowId: 77, url: "https://trello.com/b/example/actions-json" };
+        },
+        async group() {
+          return 42;
+        },
+        async sendMessage() {
+          return { ok: true };
+        },
+      },
+    };
+    window.WebSocket = class OpenWebSocket extends EventTarget {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+
+      constructor(url) {
+        super();
+        this.url = url;
+        this.readyState = OpenWebSocket.CONNECTING;
+        window.__actionsJsonBackgroundWebSocket = this;
+        setTimeout(() => {
+          this.readyState = OpenWebSocket.OPEN;
+          this.dispatchEvent(new Event("open"));
+        }, 0);
+      }
+
+      send(value) {
+        window.__actionsJsonBridgeSends.push(JSON.parse(value));
+      }
+
+      close() {
+        this.readyState = OpenWebSocket.CLOSED;
+        this.dispatchEvent(new CloseEvent("close"));
+      }
+    };
+  });
+
+  await page.goto("data:text/html,<main><h1>Credential hydration rejection test</h1></main>");
+  await addBackgroundScript(page);
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              type: "actions-json:bridge-connect",
+              bridgeUrl: "ws://100.99.150.49:17345/extension",
+              readyItem: {
+                type: "runtime_ready",
+                runtime_id: "trello-runtime",
+                manifest: { tools: [] },
+              },
+            },
+            { tab: { id: 202, windowId: 77, url: "https://trello.com/b/example/actions-json" } },
+            resolve,
+          );
+        }),
+    )
+  ).resolves.toMatchObject({ ok: true });
+
+  await page.evaluate(() => {
+    window.__actionsJsonBackgroundWebSocket.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "credential_hydration",
+          provider: "openai",
+          source: "mcp_bridge_local",
+          credential: {},
+        }),
+      }),
+    );
+  });
+
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonBridgeSends.find((item) => item.type === "credential_hydration_result") || null))
+    .toMatchObject({
+      type: "credential_hydration_result",
+      provider: "openai",
+      ok: false,
+      configured: false,
+      error: {
+        code: "credential_hydration_failed",
+      },
+    });
+  await expect(page.evaluate(() => window.__actionsJsonStorage.ACTIONS_JSON_OPENAI_API_KEY || null)).resolves.toBeNull();
 });
 
 test("debug.run_javascript delegates arbitrary evaluation to the privileged background fallback", async ({ page }) => {
@@ -3298,7 +5360,6 @@ test("actions.json menu overlay restores after content script reload", async ({ 
     host.style.height = "260px";
   });
   await page.locator("#__actions_json_menu_overlay_host").evaluate((host) => {
-    host.shadowRoot.querySelector("[data-tab='config']").click();
     host.shadowRoot.querySelector("[data-minimize]").click();
   });
   await expect
@@ -3340,9 +5401,9 @@ test("actions.json menu overlay restores after content script reload", async ({ 
   });
   await expect(
     page.locator("#__actions_json_menu_overlay_host").evaluate((host) =>
-      host.shadowRoot.querySelector("[data-tab='config']").getAttribute("aria-selected")
+      host.shadowRoot.querySelector(".title").textContent
     )
-  ).resolves.toBe("true");
+  ).resolves.toBe("actions.json agent");
 });
 
 test("locator.element_info center feeds pointer.click through the extension action path", async ({ page }) => {
@@ -3490,6 +5551,85 @@ test("locator.element_info filters selector candidates by text through the exten
   });
 });
 
+test("locator.element_info returns visible candidate options when text matches multiple elements", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [{ name: "locator.element_info", input_schema: { type: "object" } }],
+  });
+
+  await page.setViewportSize({ width: 900, height: 700 });
+  await page.setContent(`
+    <main data-testid="board" style="position:absolute;left:0;top:40px;width:800px;height:500px">
+      <a data-testid="trello-card" href="/c/a" style="position:absolute;left:20px;top:30px;width:260px;height:60px;display:block">
+        Get Trello control to be demo ready
+      </a>
+      <a data-testid="trello-card" href="/c/b" style="position:absolute;left:320px;top:160px;width:260px;height:60px;display:block">
+        Get Trello control to be demo ready follow-up
+      </a>
+    </main>
+  `);
+
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener(
+        {
+          type: "actions-json:connect",
+          bridgeUrl: "ws://127.0.0.1:17345/extension",
+          runtimeKey: "test-tab",
+          authorizationId: "test-auth",
+          extensionVersion: "test",
+        },
+        {},
+        resolve
+      )
+    );
+  });
+
+  await page.evaluate(() => {
+    window.__actionsJsonWebSocket.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "action_call",
+          call_id: "locator-ambiguous-call",
+          name: "locator.element_info",
+          arguments: { locator: { selector: "[data-testid='board'], [data-testid='trello-card']", text_contains: "Get Trello control to be demo ready" } },
+        }),
+      })
+    );
+  });
+  const output = await readExtensionActionOutput(page, "locator-ambiguous-call");
+
+  expect(output).toMatchObject({
+    ok: true,
+    primitive: "locator.element_info",
+    adapter: "extension",
+    value: {
+      ambiguous: true,
+      candidate_count: 3,
+      candidates: [
+        expect.objectContaining({
+          tag_name: "main",
+          text: expect.stringContaining("Get Trello control to be demo ready"),
+          bounding_box: expect.objectContaining({ x: 0, y: 40, width: 800, height: 500 }),
+          clickable_center: { x: 400, y: 290 },
+        }),
+        expect.objectContaining({
+          tag_name: "a",
+          text: "Get Trello control to be demo ready",
+          bounding_box: expect.objectContaining({ x: 20, y: 70, width: 260, height: 60 }),
+          clickable_center: { x: 150, y: 100 },
+        }),
+        expect.objectContaining({
+          tag_name: "a",
+          text: "Get Trello control to be demo ready follow-up",
+          bounding_box: expect.objectContaining({ x: 320, y: 200, width: 260, height: 60 }),
+          clickable_center: { x: 450, y: 230 },
+        }),
+      ],
+    },
+  });
+});
+
 test("locator.element_info clips clickable center to the visible viewport through the extension action path", async ({ page }) => {
   await installRuntime(page, {
     tools: [{ name: "locator.element_info", input_schema: { type: "object" } }],
@@ -3562,3 +5702,208 @@ async function readExtensionActionOutput(page, callId) {
     )?.output || null,
   callId);
 }
+
+test("bridge state_projection_call forwards to the background executor and returns output", async ({ page }) => {
+  await installRuntime(page);
+  await connectRuntime(page);
+
+  await page.evaluate(() => {
+    window.__actionsJsonStateProjectionRequests = [];
+    window.__actionsJsonRuntimeMessageHandler = (message) => {
+      if (message?.type === "actions-json:bridge-state-projection-call") {
+        window.__actionsJsonStateProjectionRequests.push(message.item);
+        return {
+          ok: true,
+          call_id: message.item?.call_id || null,
+          output: {
+            ok: true,
+            projection: message.item?.projection_name || null,
+            state: { board: { lists: [] } },
+            state_hash: "sha256:test",
+          },
+        };
+      }
+      return { ok: true };
+    };
+    window.__actionsJsonWebSocket.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "state_projection_call",
+          call_id: "state-call-1",
+          mode: "state_read",
+          projection_name: "trello.board",
+          map_path: "scopes/private/sites/trello.com/board/actions.json",
+          projection: {
+            name: "trello.board",
+            snapshot: {
+              version: 1,
+              source: "dom",
+              extract: [],
+              projection: { language: "jsonata", expression: "{% records %}" },
+            },
+          },
+        }),
+      })
+    );
+  });
+
+  await expect.poll(() => actionOutput(page, "state-call-1")).toMatchObject({
+    type: "action_call_output",
+    call_id: "state-call-1",
+    output: {
+      ok: true,
+      projection: "trello.board",
+      state_hash: "sha256:test",
+    },
+  });
+
+  const forwarded = await page.evaluate(() => window.__actionsJsonStateProjectionRequests);
+  expect(forwarded).toHaveLength(1);
+  expect(forwarded[0]).toMatchObject({
+    type: "state_projection_call",
+    mode: "state_read",
+    projection_name: "trello.board",
+    map_path: "scopes/private/sites/trello.com/board/actions.json",
+  });
+  expect(forwarded[0].projection.snapshot.version).toBe(1);
+});
+
+test("bridge state_projection_call returns a structured action_error when execution fails", async ({ page }) => {
+  await installRuntime(page);
+  await connectRuntime(page);
+
+  await page.evaluate(() => {
+    window.__actionsJsonRuntimeMessageHandler = (message) => {
+      if (message?.type === "actions-json:bridge-state-projection-call") {
+        return {
+          ok: false,
+          error: {
+            code: "state_payload_too_large",
+            message: "Full state exceeded the configured budget.",
+            recoverable: true,
+          },
+        };
+      }
+      return { ok: true };
+    };
+    window.__actionsJsonWebSocket.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "state_projection_call",
+          call_id: "state-call-2",
+          mode: "state_read",
+          projection_name: "trello.board",
+          map_path: "scopes/private/sites/trello.com/board/actions.json",
+          projection: { name: "trello.board" },
+        }),
+      })
+    );
+  });
+
+  await expect.poll(() => actionError(page, "state-call-2")).toMatchObject({
+    type: "action_error",
+    call_id: "state-call-2",
+    error: { code: "state_payload_too_large" },
+  });
+});
+
+test("bridge site_action_call forwards to the background executor and returns output", async ({ page }) => {
+  await installRuntime(page);
+  await connectRuntime(page);
+
+  await page.evaluate(() => {
+    window.__actionsJsonSiteActionRequests = [];
+    window.__actionsJsonRuntimeMessageHandler = (message) => {
+      if (message?.type === "actions-json:bridge-site-action-call") {
+        window.__actionsJsonSiteActionRequests.push(message.item);
+        return {
+          ok: true,
+          call_id: message.item?.call_id || null,
+          output: {
+            ok: true,
+            opened: message.item?.arguments?.list_name || null,
+            steps: [],
+          },
+        };
+      }
+      return { ok: true };
+    };
+    window.__actionsJsonWebSocket.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "site_action_call",
+          call_id: "site-action-call-1",
+          action: "trello.board.add_card.open_composer",
+          arguments: { list_name: "Backlog" },
+          map_path: "scopes/private/sites/trello.com/board/actions.json",
+          map: {
+            protocol: "actions.json",
+            tools: [
+              {
+                name: "trello.board.add_card.open_composer",
+                workflow: { version: 1, expression_language: "jsonata", steps: [] },
+              },
+            ],
+          },
+        }),
+      })
+    );
+  });
+
+  await expect.poll(() => actionOutput(page, "site-action-call-1")).toMatchObject({
+    type: "action_call_output",
+    call_id: "site-action-call-1",
+    output: {
+      ok: true,
+      opened: "Backlog",
+    },
+  });
+
+  const forwarded = await page.evaluate(() => window.__actionsJsonSiteActionRequests);
+  expect(forwarded).toHaveLength(1);
+  expect(forwarded[0]).toMatchObject({
+    type: "site_action_call",
+    action: "trello.board.add_card.open_composer",
+    map_path: "scopes/private/sites/trello.com/board/actions.json",
+  });
+  expect(forwarded[0].map.tools[0].workflow.version).toBe(1);
+});
+
+test("bridge site_action_call returns a structured action_error when execution fails", async ({ page }) => {
+  await installRuntime(page);
+  await connectRuntime(page);
+
+  await page.evaluate(() => {
+    window.__actionsJsonRuntimeMessageHandler = (message) => {
+      if (message?.type === "actions-json:bridge-site-action-call") {
+        return {
+          ok: false,
+          error: {
+            code: "workflow_step_failed",
+            message: "Step findList failed: list not visible.",
+            recoverable: true,
+          },
+        };
+      }
+      return { ok: true };
+    };
+    window.__actionsJsonWebSocket.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "site_action_call",
+          call_id: "site-action-call-2",
+          action: "trello.board.add_card.open_composer",
+          arguments: { list_name: "Backlog" },
+          map_path: "scopes/private/sites/trello.com/board/actions.json",
+          map: { protocol: "actions.json", tools: [] },
+        }),
+      })
+    );
+  });
+
+  await expect.poll(() => actionError(page, "site-action-call-2")).toMatchObject({
+    type: "action_error",
+    call_id: "site-action-call-2",
+    error: { code: "workflow_step_failed" },
+  });
+});

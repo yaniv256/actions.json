@@ -72,36 +72,40 @@ useful maps declare one or more actions.
         "role": "search",
         "name": "Site search"
       },
-      "x_actions": {
-        "execution": {
-          "mode": "steps_first",
-          "steps": [
-            {
-              "id": "focus_search",
-              "type": "click",
-              "target": { "selector": "input[name='q']" }
-            },
-            {
-              "id": "type_query",
-              "type": "type",
-              "target": { "selector": "input[name='q']" },
-              "value_from": "query"
-            },
-            {
-              "id": "submit",
-              "type": "click",
-              "target": { "selector": "button[type='submit']" }
+      "workflow": {
+        "version": 1,
+        "expression_language": "jsonata",
+        "steps": [
+          {
+            "id": "findSearchInput",
+            "primitive": "locator.element_info",
+            "args": {
+              "locator": { "selector": "input[name='q']" }
             }
-          ]
-        },
-        "result_schema": {
-          "type": "object",
-          "properties": {
-            "ok": { "type": "boolean" },
-            "url": { "type": "string" }
           },
-          "required": ["ok"]
-        }
+          {
+            "id": "focusSearch",
+            "primitive": "pointer.click",
+            "args": {
+              "x": "{% steps.findSearchInput.output.clickable_center.x %}",
+              "y": "{% steps.findSearchInput.output.clickable_center.y %}"
+            }
+          },
+          {
+            "id": "typeQuery",
+            "primitive": "text.insert",
+            "args": {
+              "text": "{% input.query %}",
+              "mode": "replace"
+            }
+          },
+          {
+            "id": "submit",
+            "primitive": "keyboard.press",
+            "args": { "key": "Enter" }
+          }
+        ],
+        "output": "{% {'ok': true, 'query': input.query} %}"
       }
     }
   ]
@@ -111,10 +115,24 @@ useful maps declare one or more actions.
 This example is intentionally small. Real maps can also declare context blocks,
 states, transitions, attachments, imports, signals, and checks.
 
-Implementation pending: the `steps_first` execution shape shown here is schema
-direction, not a complete current runtime feature. Today, use implemented
-primitive handlers or the supported site-action patterns when you need an action
-to execute through the bridge.
+The `workflow` shape shown here is the implemented execution path: steps invoke
+named primitives, `{% ... %}` slots are JSONata expressions over `input` and
+prior `steps.<id>.output`, and validation strictly rejects unknown workflow or
+step fields and (when the runtime supplies its primitive dictionary) unknown
+primitive names. Steps also support `when` conditions, bounded `for_each`
+iteration, `retry_until` with `after_each` for scroll-until-visible patterns,
+`settle_after` for SPA settling, and `on_error` stop/continue — see the schema
+reference for the full contract.
+
+Beyond tools, two more implemented blocks matter for real maps:
+
+- `requires.primitive_dictionary` declares which runtime primitives the map's
+  workflows depend on (required and optional), so a runtime can check support
+  before operating.
+- `state_projections` turn DOM records into compact logical JSON that agents
+  read through `actions.site` modes `state_read`, `state_summary`, and
+  `state_diff` for orientation and post-mutation verification. See the schema
+  reference for the projection shape.
 
 ## Actions And Primitives
 

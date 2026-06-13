@@ -40,27 +40,43 @@ asking for a new authorization on every switch.
 
 ## Popup Controls
 
-The extension popup is the small menu opened by the browser action. It provides:
+The extension popup is the small menu opened by the browser action. It is the
+home of all settings. From top to bottom it shows:
 
+- an **actions.json / runtime** header;
 - **Take control of this tab**;
-- **Open actions.json menu**;
-- **Open storage tools**;
-- hosted voice Play, Mute/Unmute, and Stop controls.
+- **Open agent overlay**;
+- a **Session** card with the current session state (`Session: <state>`) and
+  **Start**, **Mute**, and **Stop** buttons;
+- an embedded **Settings** area with collapsible sections: **OpenAI API key**
+  (open by default), **Voice**, **Turn detection**, **Bridge**, **Storage
+  folder**, and **Memory and logs**.
 
 Stop is intentionally available from the popup so the user can stop a hidden
 offscreen voice session even if every page overlay is closed.
 
+In the popup the settings sections are collapsed except the API key. The same
+settings page can be opened as a full top-level page, where all sections are
+expanded.
+
 ## actions.json Menu Overlay
 
 The `actions.json` menu is a trusted extension-owned overlay injected into the
-page. It has top-level tabs:
+page. It is a single agent pane titled **actions.json agent**: hosted voice
+controls and transcript. There are no tabs and no Settings inside the overlay;
+all settings live in the extension popup.
 
-- **Agent**: hosted voice controls and transcript.
-- **Settings**: OpenAI key, bridge URL, voice, VAD, memory, and storage
-  controls.
+The pane header is a drag handle with a collapse (☰) and a close (×) button.
+Collapsed, the pane shrinks to a small square. Position, size, and collapsed
+state persist across page navigation.
 
 Unlike report overlays, the trusted menu embeds extension UI in an iframe so it
 can request microphone permission from a visible extension surface.
+
+The agent can also control the pane programmatically through the
+`overlay.menu.collapse`, `overlay.menu.expand`, `overlay.menu.move`,
+`overlay.menu.hide`, and `overlay.menu.show` primitives. A hide-operate-unhide
+sequence makes page clicks reliable when the pane covers a click target.
 
 ## Hosted Agent Controls
 
@@ -73,15 +89,26 @@ The hosted agent uses the extension runtime to:
 - preserve transcript and diagnostic memory;
 - keep the live session in an offscreen document.
 
+For multi-step work, the hosted agent also has session-scoped task queue
+primitives: `task.add`, `task.next`, `task.complete`, `task.list`, and
+`task.clear`. The agent seeds a plan with `task.add` and drains it one task at
+a time; an empty `task.next` returns `done: true` plus a summary of every
+task's status and result.
+
 Read [Hosted Agent](hosted-agent.md) for user workflow details.
 
 ## Storage Tools
 
-The Settings tab can upload or download a local `actions.json.storage` checkout.
+The **Storage folder** section in the popup settings can upload or download a
+local `actions.json.storage` checkout.
 
 Upload stores a browser-local bundle that powers hosted-agent `actions.site`
 lookups. Download writes browser-local storage files back to the selected local
 folder.
+
+Chrome blocks folder pickers inside iframes. The Upload and Download buttons
+detect this and automatically open the top-level settings page, where the
+picker works.
 
 Read [actions.json.storage](actions-json-storage.md).
 

@@ -69,7 +69,7 @@
 
       .agent-controls {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-columns: minmax(0, 1fr) auto auto auto;
         gap: 8px;
         align-items: center;
         min-width: 0;
@@ -117,7 +117,8 @@
 
       .voice-launcher:focus-visible,
       button:focus-visible,
-      input:focus-visible {
+      input:focus-visible,
+      textarea:focus-visible {
         outline: 2px solid color-mix(in srgb, currentColor 38%, transparent);
         outline-offset: 2px;
       }
@@ -217,6 +218,39 @@
         opacity: 1;
       }
 
+      button.icon-only[aria-pressed="true"] {
+        border: 1px solid #f0b9b9;
+        background: #f7e5e5;
+        color: var(--danger);
+        box-shadow: inset 0 0 0 1px rgba(182, 64, 64, 0.12);
+      }
+
+      button.icon-only .mute-slash,
+      button.icon-only .mute-slash-casing {
+        display: none;
+      }
+
+      button.icon-only.is-muted .mute-slash-casing {
+        display: block;
+        stroke: #f7e5e5;
+      }
+
+      button.icon-only.is-muted .mute-slash {
+        display: block;
+        stroke: currentColor;
+      }
+
+      button.icon-only.is-muted:disabled {
+        opacity: 1;
+      }
+
+      .agent-conversation {
+        display: grid;
+        grid-template-rows: minmax(0, 1fr) auto;
+        gap: 8px;
+        min-height: 0;
+      }
+
       .transcript {
         display: flex;
         flex-direction: column;
@@ -286,13 +320,66 @@
       }
 
       .config-panel {
-        gap: 12px;
+        gap: 8px;
       }
 
       section {
         display: grid;
         gap: 8px;
         min-width: 0;
+      }
+
+      details.settings-group {
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #ffffff;
+      }
+
+      details.settings-group > summary {
+        display: flex;
+        gap: 7px;
+        align-items: center;
+        padding: 9px 10px;
+        border-radius: 8px;
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 800;
+        list-style: none;
+        cursor: pointer;
+        user-select: none;
+      }
+
+      details.settings-group > summary::-webkit-details-marker {
+        display: none;
+      }
+
+      details.settings-group > summary::before {
+        content: "";
+        flex: 0 0 auto;
+        width: 7px;
+        height: 7px;
+        border-right: 2px solid var(--muted);
+        border-bottom: 2px solid var(--muted);
+        transform: rotate(-45deg);
+        transition: transform 140ms ease;
+      }
+
+      details.settings-group[open] > summary {
+        border-bottom: 1px solid var(--line);
+        border-bottom-left-radius: 0;
+        border-bottom-right-radius: 0;
+      }
+
+      details.settings-group[open] > summary::before {
+        transform: rotate(45deg);
+      }
+
+      details.settings-group > .settings-body {
+        display: grid;
+        gap: 8px;
+        min-width: 0;
+        padding: 10px;
       }
 
       h2 {
@@ -325,6 +412,27 @@
         border-radius: 7px;
         color: var(--ink);
         font: 13px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+
+      textarea {
+        width: 100%;
+        min-width: 0;
+        min-height: 44px;
+        max-height: 96px;
+        padding: 8px 9px;
+        resize: vertical;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        color: var(--ink);
+        font: 14px/1.35 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .agent-composer {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 7px;
+        align-items: end;
+        min-width: 0;
       }
 
       input[type="range"] {
@@ -437,13 +545,23 @@
             <span id="voiceLauncherIcon" class="voice-launcher-icon" aria-hidden="true"></span>
             <span id="voiceLauncherLabel" class="voice-launcher-label">Start voice</span>
           </button>
+          <button id="muteMic" class="secondary icon-only" disabled title="Mute microphone" aria-label="Mute microphone" aria-pressed="false">
+            <svg aria-hidden="true" viewBox="0 0 16 16" width="17" height="17"><rect x="5.25" y="2.25" width="5.5" height="7" rx="2.75" fill="none" stroke="currentColor" stroke-width="1.5"></rect><path d="M3.75 8a4.25 4.25 0 0 0 8.5 0M8 12.25v1.5M5.5 13.75h5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"></path><line class="mute-slash-casing" x1="1.6" y1="1.6" x2="14.4" y2="14.4" fill="none" stroke-width="3.4" stroke-linecap="round"></line><line class="mute-slash" x1="1.6" y1="1.6" x2="14.4" y2="14.4" fill="none" stroke-width="1.6" stroke-linecap="round"></line></svg>
+          </button>
+          <button id="muteSpeaker" class="secondary icon-only" disabled title="Mute speaker" aria-label="Mute speaker" aria-pressed="false">
+            <svg aria-hidden="true" viewBox="0 0 16 16" width="18" height="18"><path d="M2.75 6.25h2.5L8.5 3.5v9L5.25 9.75h-2.5z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.4"></path><path d="M10.5 6a3 3 0 0 1 0 4M12.25 4.5a5.25 5.25 0 0 1 0 7" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.4"></path><line class="mute-slash-casing" x1="1.6" y1="1.6" x2="14.4" y2="14.4" fill="none" stroke-width="3.4" stroke-linecap="round"></line><line class="mute-slash" x1="1.6" y1="1.6" x2="14.4" y2="14.4" fill="none" stroke-width="1.6" stroke-linecap="round"></line></svg>
+          </button>
           <button id="stopAgent" class="secondary icon-only" disabled title="Stop voice" aria-label="Stop voice">■</button>
         </section>
 
-        <section aria-label="Transcript">
+        <section class="agent-conversation" aria-label="Transcript">
           <div id="transcript" class="transcript">
             <div class="empty">Realtime transcript will appear here.</div>
           </div>
+          <form id="agentTextForm" class="agent-composer" aria-label="Send text to agent">
+            <textarea id="agentTextInput" placeholder="Type to the agent" aria-label="Text message to agent"></textarea>
+            <button id="sendAgentText" type="submit" disabled>Send</button>
+          </form>
         </section>
       </div>
 
@@ -455,105 +573,117 @@
           <p id="targetSummary">No active hosted-agent session.</p>
         </section>
 
-        <section aria-labelledby="voiceHeading">
-          <h2 id="voiceHeading">Voice</h2>
-          <p>Applies to the next Realtime voice session. OpenAI locks the voice after audio has started in a session.</p>
-          <label>
-            Realtime voice
-            <select id="voiceSelect">
-              <option value="alloy">alloy</option>
-              <option value="ash">ash</option>
-              <option value="ballad">ballad</option>
-              <option value="coral">coral</option>
-              <option value="echo">echo</option>
-              <option value="sage">sage</option>
-              <option value="shimmer">shimmer</option>
-              <option value="verse">verse</option>
-              <option value="marin">marin</option>
-              <option value="cedar">cedar</option>
-            </select>
-          </label>
-          <div id="voiceStatus" class="status-line" role="status"></div>
-        </section>
-
-        <section aria-labelledby="turnDetectionHeading">
-          <h2 id="turnDetectionHeading">Turn detection</h2>
-          <p>Applies to the next Realtime voice session. Use these controls when speech is interrupted too easily or the agent waits too long.</p>
-          <label>
-            VAD mode
-            <select id="vadMode">
-              <option value="server_vad">server VAD</option>
-              <option value="semantic_vad">semantic VAD</option>
-            </select>
-          </label>
-          <label>
-            Server threshold
-            <input id="vadThreshold" type="range" min="0" max="1" step="0.05" />
-          </label>
-          <label>
-            Silence duration ms
-            <input id="vadSilenceDuration" type="number" min="100" max="5000" step="100" />
-          </label>
-          <label>
-            Semantic eagerness
-            <select id="vadEagerness">
-              <option value="low">low</option>
-              <option value="medium">medium</option>
-              <option value="high">high</option>
-              <option value="auto">auto</option>
-            </select>
-          </label>
-          <label class="inline-check">
-            <input id="vadInterruptResponse" type="checkbox" />
-            Interrupt assistant when user speaks
-          </label>
-          <div id="vadStatus" class="status-line" role="status"></div>
-        </section>
-
-        <section aria-labelledby="credentialsHeading">
-          <h2 id="credentialsHeading">OpenAI API key</h2>
-          <p>The key stays in Chrome extension storage and is used only by this extension to connect to OpenAI.</p>
-          <label>
-            API key
-            <input id="apiKey" type="password" autocomplete="off" placeholder="sk-..." />
-          </label>
-          <div class="button-row">
-            <button id="saveKey">Save key</button>
-            <button id="clearKey" class="secondary">Clear</button>
+        <details class="settings-group" open>
+          <summary>OpenAI API key</summary>
+          <div class="settings-body">
+            <p>The key stays in Chrome extension storage and is used only by this extension to connect to OpenAI.</p>
+            <label>
+              API key
+              <input id="apiKey" type="password" autocomplete="off" placeholder="sk-..." />
+            </label>
+            <div class="button-row">
+              <button id="saveKey">Save key</button>
+              <button id="clearKey" class="secondary">Clear</button>
+            </div>
+            <div id="credentialStatus" class="status-line" role="status"></div>
           </div>
-          <div id="credentialStatus" class="status-line" role="status"></div>
-        </section>
+        </details>
 
-        <section aria-labelledby="bridgeHeading">
-          <h2 id="bridgeHeading">Bridge</h2>
-          <label>
-            URL
-            <input id="bridgeUrl" value="ws://127.0.0.1:17345/extension" />
-          </label>
-          <div class="button-row">
-            <button id="authorizeBridge">Connect</button>
-            <button id="closeOverlay" class="secondary">Close overlay</button>
+        <details class="settings-group">
+          <summary>Voice</summary>
+          <div class="settings-body">
+            <p>Applies to the next Realtime voice session. OpenAI locks the voice after audio has started in a session.</p>
+            <label>
+              Realtime voice
+              <select id="voiceSelect">
+                <option value="alloy">alloy</option>
+                <option value="ash">ash</option>
+                <option value="ballad">ballad</option>
+                <option value="coral">coral</option>
+                <option value="echo">echo</option>
+                <option value="sage">sage</option>
+                <option value="shimmer">shimmer</option>
+                <option value="verse">verse</option>
+                <option value="marin">marin</option>
+                <option value="cedar">cedar</option>
+              </select>
+            </label>
+            <div id="voiceStatus" class="status-line" role="status"></div>
           </div>
-          <div id="bridgeStatus" class="status-line" role="status"></div>
-        </section>
+        </details>
 
-        <section aria-labelledby="storageHeading">
-          <h2 id="storageHeading">Storage folder</h2>
-          <p>Upload or download actions.json storage from a local checkout.</p>
-          <div class="button-row">
-            <button id="loadStorageFolder">Upload</button>
-            <button id="writeStorageFolder" class="secondary">Download</button>
+        <details class="settings-group">
+          <summary>Turn detection</summary>
+          <div class="settings-body">
+            <p>Applies to the next Realtime voice session. Use these controls when speech is interrupted too easily or the agent waits too long.</p>
+            <label>
+              VAD mode
+              <select id="vadMode">
+                <option value="server_vad">server VAD</option>
+                <option value="semantic_vad">semantic VAD</option>
+              </select>
+            </label>
+            <label>
+              Server threshold
+              <input id="vadThreshold" type="range" min="0" max="1" step="0.05" />
+            </label>
+            <label>
+              Silence duration ms
+              <input id="vadSilenceDuration" type="number" min="100" max="5000" step="100" />
+            </label>
+            <label>
+              Semantic eagerness
+              <select id="vadEagerness">
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+                <option value="auto">auto</option>
+              </select>
+            </label>
+            <label class="inline-check">
+              <input id="vadInterruptResponse" type="checkbox" />
+              Interrupt assistant when user speaks
+            </label>
+            <div id="vadStatus" class="status-line" role="status"></div>
           </div>
-          <div id="storageFolderStatus" class="status-line" role="status"></div>
-        </section>
+        </details>
 
-        <section aria-labelledby="memoryHeading">
-          <h2 id="memoryHeading">Memory and logs</h2>
-          <p id="memoryStatus">Memory unavailable.</p>
-          <div class="button-row">
-            <button id="clearMemory" class="secondary">Clear memory</button>
+        <details class="settings-group">
+          <summary>Bridge</summary>
+          <div class="settings-body">
+            <label>
+              URL
+              <input id="bridgeUrl" value="ws://127.0.0.1:17345/extension" />
+            </label>
+            <div class="button-row">
+              <button id="authorizeBridge">Connect</button>
+              <button id="closeOverlay" class="secondary">Close overlay</button>
+            </div>
+            <div id="bridgeStatus" class="status-line" role="status"></div>
           </div>
-        </section>
+        </details>
+
+        <details class="settings-group">
+          <summary>Storage folder</summary>
+          <div class="settings-body">
+            <p>Upload or download actions.json storage from a local checkout.</p>
+            <div class="button-row">
+              <button id="loadStorageFolder">Upload</button>
+              <button id="writeStorageFolder" class="secondary">Download</button>
+            </div>
+            <div id="storageFolderStatus" class="status-line" role="status"></div>
+          </div>
+        </details>
+
+        <details class="settings-group">
+          <summary>Memory and logs</summary>
+          <div class="settings-body">
+            <p id="memoryStatus">Memory unavailable.</p>
+            <div class="button-row">
+              <button id="clearMemory" class="secondary">Clear memory</button>
+            </div>
+          </div>
+        </details>
       </div>
     </main>
 

@@ -29,8 +29,8 @@ stop the live voice session. Use **Stop** when you want the session to end.
 Current capabilities include:
 
 - voice conversation through `gpt-realtime-2`;
-- text transcript with one mutable `User:` and `Agent:` turn while speech
-  deltas arrive;
+- a text transcript with one mutable user and assistant bubble while speech
+  deltas arrive, plus a composer for typed input;
 - page screenshots after user authorization;
 - storage-backed website context and actions through `actions.site`;
 - direct browser primitives for visible page interaction;
@@ -43,39 +43,53 @@ Current capabilities include:
 
 1. Install and authorize the Chrome extension. See
    [Getting Started](getting-started.md).
-2. Open the `actions.json` menu.
-3. Open **Settings** and save your OpenAI API key.
-4. Optional but recommended: upload an `actions.json.storage` checkout.
-5. Open **Agent**.
-6. Press **Start voice**.
-7. Allow microphone permission if Chrome asks.
+2. Click the extension icon to open the popup. In the embedded Settings area,
+   save your OpenAI API key (the **OpenAI API key** section is open by
+   default).
+3. Optional but recommended: upload an `actions.json.storage` checkout from
+   the **Storage folder** section.
+4. Choose **Open agent overlay** to open the agent pane on the page.
+5. Press **Start voice**.
+6. Allow microphone permission if Chrome asks.
 
-Expected result: the Agent tab shows a live voice state and a transcript area.
+Expected result: the agent pane shows a live voice state and a transcript area.
 
-## Agent Tab
+## Agent Pane
 
-The Agent tab is the conversation surface.
+The agent pane — the page overlay titled **actions.json agent** — is the
+conversation surface.
 
 It contains:
 
 - the main voice control;
 - Stop and mute controls;
 - a bounded transcript;
+- a text composer;
 - current session status.
 
-The transcript is for conversation. Tool activity and detailed diagnostics
-belong in status UI and `runtime.session.log`, not as token-by-token chat spam.
+The transcript is for conversation. Successful tool calls do not add transcript
+lines; the voice launcher shows a transient **Using tool** state instead. A
+single line such as `Tool <name> failed: <message>.` appears only when a tool
+call fails, and at session start one line reports
+`Bridge tools loaded: <count>.` (a count, not a list). Detailed diagnostics
+belong in `runtime.session.log`, not as token-by-token chat spam.
 
-## Settings Tab
+## Settings (Popup)
 
-The Settings tab contains operational configuration:
+All operational configuration lives in the extension popup, in collapsible
+settings sections:
 
 - OpenAI API key save/delete state;
-- bridge URL for external-agent workflows;
 - Realtime voice selection;
-- VAD controls for speech interruption behavior;
-- memory controls;
-- storage Upload and Download.
+- turn detection (VAD) controls for speech interruption behavior;
+- bridge URL for external-agent workflows;
+- storage folder Upload and Download;
+- memory and log controls.
+
+In the popup all sections are collapsed except the API key. Opened as a
+top-level page, all sections are expanded. Folder pickers do not work inside
+iframes, so the storage Upload and Download buttons open the top-level settings
+page automatically.
 
 Voice and VAD settings apply to the next Realtime session. OpenAI locks the
 voice once audio has started in a session.
@@ -103,6 +117,9 @@ The agent can call `browser.screenshot` after the tab is authorized. Screenshot
 data is passed to the Realtime model as image input; large image payloads are
 not stored in session logs.
 
+Hosted screenshots default to a compact profile: JPEG at quality 60, scaled to
+at most 960x960 pixels, capped at 180 KB, with a 10 second capture timeout.
+
 For interaction, the agent should prefer stored actions. When it needs lower
 level control, it can use primitives such as:
 
@@ -111,6 +128,12 @@ level control, it can use primitives such as:
 - `pointer.click`;
 - `dom.list_sections`;
 - `browser.extract_elements`.
+
+Direct generic primitive calls from the hosted agent must include a
+`policy_exception_report` argument (`kind`, `intended_tool`,
+`actions_json_path`, `reason`). Calls without it are rejected with
+`policy_exception_report_required` before reaching the bridge. `actions.site`
+calls and internal steps of compound actions are exempt.
 
 Human-observable actions such as clicking and scrolling are paced by the
 runtime so bursts of requests do not execute faster than a human-visible rhythm.
@@ -127,6 +150,10 @@ Use `runtime.session.log` when you need to inspect:
 - tool failures;
 - screenshot metadata;
 - Realtime lifecycle and audio configuration events.
+
+`runtime.session.log` returns `{ ok, visitorId, eventCount, events }`. The
+returned events are capped (default 80, maximum 2000) and sanitized: secrets
+are redacted and image payloads are stripped.
 
 The log is for debugging. It is not a public artifact and may include browsing
 context from authorized tabs.

@@ -11,6 +11,8 @@ export function createRuntimeHostedSessionClient({
     model: "gpt-realtime-2",
     error: null,
     inputMuted: false,
+    outputMuted: false,
+    textOnly: true,
   };
   let tools = [];
 
@@ -56,6 +58,22 @@ export function createRuntimeHostedSessionClient({
     async setInputMuted(muted = true) {
       return sendCommand("actions-json:agent-session-mute", { muted: Boolean(muted) });
     },
+    async setOutputMuted(muted = true) {
+      return sendCommand("actions-json:agent-session-output-mute", { muted: Boolean(muted) });
+    },
+    async sendUserMessage({ text } = {}) {
+      const response = await chromeApi.runtime.sendMessage({
+        type: "actions-json:agent-session-user-message",
+        text,
+      });
+      if (!response?.ok) {
+        throw new Error(response?.error || "actions-json:agent-session-user-message failed");
+      }
+      if (response.state && typeof response.state === "object") {
+        state = { ...state, ...response.state };
+      }
+      return response.result || response;
+    },
     async stop() {
       return sendCommand("actions-json:agent-session-stop");
     },
@@ -73,6 +91,8 @@ export function createUnavailableHostedSessionClient({
     model: "gpt-realtime-2",
     error: null,
     inputMuted: false,
+    outputMuted: false,
+    textOnly: true,
   };
 
   return {
@@ -90,6 +110,14 @@ export function createUnavailableHostedSessionClient({
       return { ...state };
     },
     async setInputMuted() {
+      state = { ...state, status: "error", error: message };
+      throw new Error(message);
+    },
+    async setOutputMuted() {
+      state = { ...state, status: "error", error: message };
+      throw new Error(message);
+    },
+    async sendUserMessage() {
       state = { ...state, status: "error", error: message };
       throw new Error(message);
     },

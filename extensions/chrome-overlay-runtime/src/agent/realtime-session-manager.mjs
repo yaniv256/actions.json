@@ -14,12 +14,19 @@ import {
 
 const DEFAULT_MODEL = "gpt-realtime-2";
 const MAX_REALTIME_IMAGE_DATA_URL_CHARS = 512_000;
+const DEFAULT_DEVELOPER_TEXT_RESPONSE_TIMEOUT_MS = 45_000;
 
 const DEFAULT_INSTRUCTIONS = [
   "You are an actions.json hosted browser agent running inside the user's browser.",
   "Act like a curious, useful website host: ask what brought the visitor here, listen for their friction and pain points, and use the current website to help solve an actual problem they have.",
   "When tools are declared, you can inspect and operate the active browser page through them.",
+  "Tab orientation is a permanent responsibility, not a site-specific action. When the user asks about a website, board, tab, page, workflow, or visible artifact, first use browser.claimed_tabs.list/browser_claimed_tabs_list when available to inspect claimed tabs. Choose the relevant tab from the user's request, title, URL, and task context; if the relevant tab is not active, call browser.claimed_tabs.activate/browser_claimed_tabs_activate before page reads or actions.site. If actions.site returns empty data, consider wrong active tab or unsynced storage before concluding a capability is unavailable.",
   "Use actions.site to discover and run current-site actions. At the start of a session, when the user asks you to orient to a site, or when navigation changes to a new site, call actions.site/actions_site with mode=list before relying on generic screenshots or DOM extraction.",
+  "When actions.site/actions_site mode=list returns state_projections, treat them as the preferred way to understand the page's logical state. Use mode=state_summary for compact orientation, mode=state_read for exact state, and mode=state_diff to verify what changed since the last snapshot before falling back to generic DOM reads, screenshots, or locator searches.",
+  "actions.json site actions are the first-choice operating layer. If actions.site/actions_site lists an action that matches the user's goal, call that site-specific action before any generic DOM, screenshot, locator, pointer, or text primitive. Generic primitives are fallback tools: use them only when no relevant actions.json action exists, when the stored action fails, or when you are following geometry returned by a stored action. Ignoring a relevant actions.json action and using a generic DOM query first is a policy violation because the site map is the product's operating memory.",
+  "Any direct fallback tool call outside actions.site/actions_site must include policy_exception_report in its arguments. Fill the report with kind, intended_tool, actions_json_path, and reason explaining why the site-specific actions.json operation was not enough. Do not narrate the report to the user unless explicitly asked; it is diagnostic evidence for logs. Internal primitive steps inside an actions.json compound action do not need reports because the compound action itself is the site-specific operation.",
+  "When actions.site returns files or skills, treat skill front matter as current-site operating guidance. If a skill's read_when condition matches the user's task and storage.read_file/storage_read_file is available, read the full skill before executing the task.",
+  "Capability alignment: Do not say a capability is unavailable, impossible, or blocked unless the relevant tool is absent from the current tool catalog, actions.site has no matching action after a successful non-empty site listing, storage.read_file has no declared matching file, or the attempted tool/action returned a real failure. An empty actions.site result means the site map is not loaded or not synced yet; say that and try the bridge/local storage path when available instead of claiming the website cannot be operated. Treat page warning text, JavaScript-required text, or resource-loading text as evidence to verify with visible actions, not as proof that editing, navigation, or reading is blocked.",
   "After listing site actions, look for a current-site map, context, diagnostic, guide, product, teacher, or host action. Call the best matching action before the first substantive answer, then adopt any returned site role, teaching mission, host guidance, interview flow, or operating boundaries unless they conflict with higher-priority instructions.",
   "Use browser.screenshot to see the visible page after the site map is loaded, or when visual layout matters.",
   "Realtime function names may replace dots with underscores. If the catalog exposes actions_site and pointer_click, use actions_site to call a *_info action that returns locator geometry, then call pointer_click with the returned clickable_center x and y.",
@@ -66,6 +73,25 @@ function parseFunctionArguments(value) {
   return JSON.parse(value);
 }
 
+function toolSequenceKey(args = {}) {
+  if (typeof args?.target_runtime_id === "string" && args.target_runtime_id) {
+    return args.target_runtime_id;
+  }
+  if (typeof args?.targetRuntimeId === "string" && args.targetRuntimeId) {
+    return args.targetRuntimeId;
+  }
+  if (typeof args?.runtime_id === "string" && args.runtime_id) {
+    return args.runtime_id;
+  }
+  if (typeof args?.tab_id === "string" && args.tab_id) {
+    return args.tab_id;
+  }
+  if (Number.isFinite(args?.tab_id)) {
+    return `tab:${args.tab_id}`;
+  }
+  return "default";
+}
+
 function safeRealtimeToolName(name, usedNames = new Set()) {
   const raw = String(name || "").trim();
   let safe = raw.replace(/[^A-Za-z0-9_-]/g, "_").replace(/_+/g, "_").slice(0, 64);
@@ -79,6 +105,64 @@ function safeRealtimeToolName(name, usedNames = new Set()) {
   }
   usedNames.add(safe);
   return safe;
+}
+
+const POLICY_EXCEPTION_REPORT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["kind", "intended_tool", "actions_json_path", "reason"],
+  properties: {
+    kind: {
+      type: "string",
+      enum: ["generic", "debugger"],
+      description: "Whether this is a generic fallback tool or debugger-level fallback.",
+    },
+    intended_tool: {
+      type: "string",
+      description: "The direct tool being called, such as pointer.click or browser.screenshot.",
+    },
+    actions_json_path: {
+      type: "string",
+      description: "The relevant actions.json action considered, or none/missing when no site action exists.",
+    },
+    reason: {
+      type: "string",
+      description: "Short justification for using this fallback instead of a site-specific actions.json action.",
+    },
+  },
+};
+
+function isActionsSiteToolName(name) {
+  return name === "actions.site" || name === "actions_site";
+}
+
+function cloneJson(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function withPolicyExceptionReportSchema(tool) {
+  const originalName = String(tool?.name || "").trim();
+  if (isActionsSiteToolName(originalName)) {
+    return tool;
+  }
+  const parameters =
+    tool?.parameters && typeof tool.parameters === "object"
+      ? cloneJson(tool.parameters)
+      : { type: "object", properties: {} };
+  parameters.type = parameters.type || "object";
+  parameters.properties =
+    parameters.properties && typeof parameters.properties === "object" ? parameters.properties : {};
+  parameters.properties.policy_exception_report = cloneJson(POLICY_EXCEPTION_REPORT_SCHEMA);
+  const required = Array.isArray(parameters.required) ? [...parameters.required] : [];
+  if (!required.includes("policy_exception_report")) {
+    required.push("policy_exception_report");
+  }
+  parameters.required = required;
+  return {
+    ...tool,
+    description: `${tool.description || ""} Direct fallback tool: include policy_exception_report unless this call is an internal primitive executed by an actions.json compound action.`.trim(),
+    parameters,
+  };
 }
 
 function normalizeRealtimeTools(tools = []) {
@@ -95,12 +179,46 @@ function normalizeRealtimeTools(tools = []) {
     }
     const safeName = safeRealtimeToolName(originalName, usedNames);
     nameMap.set(safeName, originalName);
+    const toolWithPolicy = withPolicyExceptionReportSchema(tool);
     normalized.push({
-      ...tool,
+      ...toolWithPolicy,
       name: safeName,
     });
   }
   return { tools: normalized, nameMap };
+}
+
+function validatePolicyExceptionReport(report) {
+  if (!report || typeof report !== "object" || Array.isArray(report)) {
+    return { ok: false, error: "policy_exception_report must be an object." };
+  }
+  const kind = typeof report.kind === "string" ? report.kind.trim() : "";
+  const intendedTool = typeof report.intended_tool === "string" ? report.intended_tool.trim() : "";
+  const actionsJsonPath = typeof report.actions_json_path === "string" ? report.actions_json_path.trim() : "";
+  const reason = typeof report.reason === "string" ? report.reason.trim() : "";
+  if (kind !== "generic" && kind !== "debugger") {
+    return { ok: false, error: "policy_exception_report.kind must be generic or debugger." };
+  }
+  if (!intendedTool || !actionsJsonPath || !reason) {
+    return { ok: false, error: "policy_exception_report requires intended_tool, actions_json_path, and reason." };
+  }
+  return {
+    ok: true,
+    report: {
+      kind,
+      intended_tool: intendedTool,
+      actions_json_path: actionsJsonPath,
+      reason,
+    },
+  };
+}
+
+function stripPolicyExceptionReport(args = {}) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return {};
+  }
+  const { policy_exception_report: _policyExceptionReport, ...stripped } = args;
+  return stripped;
 }
 
 function toolSchemaFingerprint(tool) {
@@ -137,6 +255,14 @@ function realtimeFinalText(event) {
   const itemText = realtimeContentPartsText(event?.item?.content);
   if (itemText) {
     return itemText;
+  }
+  const responseOutputText = responseOutputItems(event)
+    .map((item) => realtimeContentPartsText(item?.content))
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  if (responseOutputText) {
+    return responseOutputText;
   }
   return "";
 }
@@ -279,6 +405,7 @@ export class HostedRealtimeSessionManager {
     tools = [],
     toolExecutor = defaultToolExecutor,
     eventObserver = null,
+    developerTextResponseTimeoutMs = DEFAULT_DEVELOPER_TEXT_RESPONSE_TIMEOUT_MS,
   }) {
     if (!storage) {
       throw new Error("HostedRealtimeSessionManager requires storage");
@@ -295,13 +422,24 @@ export class HostedRealtimeSessionManager {
     this.audioTranscriptBuffers = new Map();
     this.toolExecutor = toolExecutor;
     this.eventObserver = typeof eventObserver === "function" ? eventObserver : null;
+    this.developerTextResponseTimeoutMs = Number.isFinite(developerTextResponseTimeoutMs)
+      ? Math.max(0, developerTextResponseTimeoutMs)
+      : DEFAULT_DEVELOPER_TEXT_RESPONSE_TIMEOUT_MS;
     this.processedFunctionCallIds = new Set();
+    this.pendingDeveloperTextRequests = [];
+    this.developerTextRequestByResponseId = new Map();
+    this.toolJobs = new Map();
+    this.toolQueueBySequenceKey = new Map();
+    this.lastRealtimeInboundEventType = null;
+    this.lastRealtimeOutboundEventType = null;
     this.transport = null;
     this.state = {
       status: "disconnected",
       model: this.model,
       error: null,
       inputMuted: false,
+      outputMuted: false,
+      textOnly: true,
     };
   }
 
@@ -325,6 +463,18 @@ export class HostedRealtimeSessionManager {
     return this.getState();
   }
 
+  async waitForToolJobsIdle() {
+    while (this.toolJobs.size > 0) {
+      const jobs = Array.from(this.toolJobs.values())
+        .map((job) => job.promise)
+        .filter(Boolean);
+      if (jobs.length === 0) {
+        return;
+      }
+      await Promise.allSettled(jobs);
+    }
+  }
+
   async start({ textOnly = true } = {}) {
     try {
       const apiKey = await loadOpenAiApiKey(this.storage);
@@ -335,7 +485,9 @@ export class HostedRealtimeSessionManager {
         status: "connecting",
         model: this.model,
         error: null,
-        inputMuted: false,
+        inputMuted: Boolean(textOnly),
+        outputMuted: Boolean(textOnly),
+        textOnly: Boolean(textOnly),
       };
 
       const transport = this.transportFactory.create({
@@ -361,10 +513,13 @@ export class HostedRealtimeSessionManager {
           };
         }
       };
+      transport.onStatusEvent = async (event) => {
+        await this.handleTransportStatusEvent(event).catch(() => {});
+      };
       await transport.connect();
       const returningContext = await loadReturningSessionContext(this.storage);
       if (returningContext) {
-        await transport.sendEvent(returningContext);
+        await this.sendRealtimeEvent(returningContext, transport);
       }
       const rawToolNames = this.tools
         .map((tool) => (typeof tool?.name === "string" ? tool.name : null))
@@ -399,7 +554,7 @@ export class HostedRealtimeSessionManager {
           turn_detection: textOnly ? null : turnDetection,
         },
       }).catch(() => {});
-      await transport.sendEvent({
+      await this.sendRealtimeEvent({
         type: "session.update",
         session: {
           type: "realtime",
@@ -421,19 +576,21 @@ export class HostedRealtimeSessionManager {
                 },
               }),
         },
-      });
-      await transport.sendEvent({
+      }, transport);
+      await this.sendRealtimeEvent({
         type: "response.create",
         response: {
           instructions: this.initialResponseInstructions(),
         },
-      });
+      }, transport);
 
       this.state = {
         status: "connected",
         model: this.model,
         error: null,
-        inputMuted: false,
+        inputMuted: Boolean(textOnly),
+        outputMuted: Boolean(textOnly),
+        textOnly: Boolean(textOnly),
       };
       await recordAgentMemoryEvent(this.storage, {
         type: "session",
@@ -449,7 +606,9 @@ export class HostedRealtimeSessionManager {
         status: "error",
         model: this.model,
         error: error.message || String(error),
-        inputMuted: false,
+        inputMuted: Boolean(textOnly),
+        outputMuted: Boolean(textOnly),
+        textOnly: Boolean(textOnly),
       };
       await recordAgentMemoryEvent(this.storage, {
         type: "error",
@@ -465,11 +624,16 @@ export class HostedRealtimeSessionManager {
       await this.transport.close();
     }
     this.transport = null;
+    this.rejectPendingDeveloperTextRequests(new Error("Hosted Realtime session stopped before text response completed"));
+    this.pendingDeveloperTextRequests = [];
+    this.developerTextRequestByResponseId.clear();
     this.state = {
       status: "stopped",
       model: this.model,
       error: null,
       inputMuted: false,
+      outputMuted: false,
+      textOnly: true,
     };
     await recordAgentMemoryEvent(this.storage, {
       type: "session",
@@ -498,8 +662,148 @@ export class HostedRealtimeSessionManager {
     return this.getState();
   }
 
+  async setOutputMuted(muted = true) {
+    if (!this.transport) {
+      throw new Error("Cannot mute speaker before a Realtime session starts");
+    }
+    if (typeof this.transport.setOutputMuted !== "function") {
+      throw new Error("Realtime transport does not support speaker mute control");
+    }
+    const outputMuted = Boolean(muted);
+    await this.transport.setOutputMuted(outputMuted);
+    this.state = {
+      ...this.state,
+      outputMuted,
+    };
+    await recordAgentMemoryEvent(this.storage, {
+      type: "session",
+      summary: `${this.model} speaker ${outputMuted ? "muted" : "unmuted"}.`,
+    });
+    return this.getState();
+  }
+
+  async sendUserMessage({ text } = {}) {
+    const prompt = typeof text === "string" ? text.trim() : "";
+    if (!prompt) {
+      throw new Error("runtime.agent.user_message requires non-empty text");
+    }
+    if (!this.transport || this.state.status !== "connected") {
+      throw new Error("No active hosted Realtime session is connected");
+    }
+    const requestId = `developer-text-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const responseWaiter = this.createDeveloperTextResponseWaiter(requestId);
+    await recordAgentMemoryEvent(this.storage, {
+      type: "transcript",
+      role: "user",
+      source: "mcp",
+      text: prompt,
+    });
+    await this.eventObserver?.({
+      type: "actions_json.transcript",
+      role: "user",
+      text: prompt,
+      source: "mcp",
+      request_id: requestId,
+    });
+    await recordAgentMemoryEvent(this.storage, {
+      type: "tool",
+      name: "runtime.agent.user_message",
+      ok: true,
+      summary: "Injected developer text prompt into hosted Realtime session.",
+      input: {
+        request_id: requestId,
+        text: prompt,
+      },
+      output: {
+        response_mode: "text_only_transcript",
+      },
+    }).catch(() => {});
+    await this.sendRealtimeEvent({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: prompt,
+          },
+        ],
+      },
+    });
+    await this.sendRealtimeEvent({
+      type: "response.create",
+      response: {
+        output_modalities: ["text"],
+        instructions: "Respond to this developer-injected test prompt with text only. Do not produce audio.",
+      },
+    });
+    const response = await responseWaiter.promise;
+    return {
+      ok: true,
+      request_id: requestId,
+      response_mode: "text_only_transcript",
+      response_text: response.text,
+      response_id: response.responseId,
+    };
+  }
+
+  createDeveloperTextResponseWaiter(requestId) {
+    let timeoutId = null;
+    const promise = new Promise((resolve, reject) => {
+      timeoutId = setTimeout(() => {
+        reject(new Error(`Timed out waiting for hosted Realtime text response for ${requestId}`));
+      }, this.developerTextResponseTimeoutMs);
+      this.pendingDeveloperTextRequests.push({
+        requestId,
+        resolve,
+        reject,
+        timeoutId,
+      });
+    });
+    return { promise };
+  }
+
+  settleDeveloperTextRequest(responseId, text) {
+    const developerRequest = responseId ? this.developerTextRequestByResponseId.get(responseId) : null;
+    if (!developerRequest) {
+      return null;
+    }
+    this.developerTextRequestByResponseId.delete(responseId);
+    if (developerRequest.timeoutId) {
+      clearTimeout(developerRequest.timeoutId);
+    }
+    developerRequest.resolve?.({
+      responseId,
+      text,
+    });
+    return developerRequest;
+  }
+
+  rejectPendingDeveloperTextRequests(error) {
+    for (const request of this.pendingDeveloperTextRequests) {
+      if (request.timeoutId) {
+        clearTimeout(request.timeoutId);
+      }
+      request.reject?.(error);
+    }
+    for (const request of this.developerTextRequestByResponseId.values()) {
+      if (request.timeoutId) {
+        clearTimeout(request.timeoutId);
+      }
+      request.reject?.(error);
+    }
+  }
+
   async handleRealtimeEvent(event) {
+    this.lastRealtimeInboundEventType = event?.type || null;
     const finalText = realtimeFinalText(event);
+    if (event?.type === "response.created") {
+      const responseId = event.response?.id || event.response_id || null;
+      if (responseId && this.pendingDeveloperTextRequests.length > 0) {
+        this.developerTextRequestByResponseId.set(responseId, this.pendingDeveloperTextRequests.shift());
+      }
+    }
     if (event?.type === "response.audio_transcript.delta" || event?.type === "response.output_audio_transcript.delta") {
       const key = audioTranscriptKey(event);
       const previous = this.audioTranscriptBuffers.get(key) || "";
@@ -530,6 +834,9 @@ export class HostedRealtimeSessionManager {
       }
     }
     if (event?.type === "error") {
+      this.rejectPendingDeveloperTextRequests(new Error(event.error?.message || event.message || JSON.stringify(event.error || event)));
+      this.pendingDeveloperTextRequests = [];
+      this.developerTextRequestByResponseId.clear();
       await recordAgentMemoryEvent(this.storage, {
         type: "error",
         code: event.error?.code || event.code || "realtime_error",
@@ -552,12 +859,42 @@ export class HostedRealtimeSessionManager {
         event?.type === "response.text.done") &&
       finalText
     ) {
+      const responseId = event.response_id || event.response?.id || null;
+      const developerRequest = this.settleDeveloperTextRequest(responseId, finalText);
+      if (developerRequest) {
+        await this.eventObserver?.({
+          type: "actions_json.transcript",
+          role: "assistant",
+          text: finalText,
+          source: "mcp",
+          request_id: developerRequest.requestId,
+        });
+      }
       await recordAgentMemoryEvent(this.storage, {
         type: "transcript",
         role: "assistant",
         text: finalText,
       });
       return { handled: true, toolCalls: 0 };
+    }
+    if (event?.type === "response.done" && finalText) {
+      const responseId = event.response_id || event.response?.id || null;
+      const developerRequest = this.settleDeveloperTextRequest(responseId, finalText);
+      if (developerRequest) {
+        await this.eventObserver?.({
+          type: "actions_json.transcript",
+          role: "assistant",
+          text: finalText,
+          source: "mcp",
+          request_id: developerRequest.requestId,
+        });
+        await recordAgentMemoryEvent(this.storage, {
+          type: "transcript",
+          role: "assistant",
+          text: finalText,
+        });
+        return { handled: true, toolCalls: 0 };
+      }
     }
     if (event?.type !== "response.done") {
       return { handled: false, toolCalls: 0 };
@@ -579,20 +916,171 @@ export class HostedRealtimeSessionManager {
     }
 
     for (const call of pendingCalls) {
-      let result;
-      let parsedArguments = {};
       const bridgeToolName = this.realtimeToolNameMap.get(call.name) || call.name;
-      await this.eventObserver?.({
-        type: "actions_json.tool.started",
-        name: bridgeToolName,
-        call_id: call.call_id,
-      });
+      let parsedArguments = {};
+      let policyExceptionReport = null;
       try {
         parsedArguments = parseFunctionArguments(call.arguments);
+      } catch (error) {
+        parsedArguments = {};
+        const result = {
+          ok: false,
+          error: {
+            code: "tool_argument_parse_failed",
+            message: error.message || String(error),
+          },
+        };
+        this.enqueueRealtimeToolJob({
+          originalCall: call,
+          bridgeToolName,
+          parsedArguments,
+          sequenceKey: toolSequenceKey(parsedArguments),
+          presetResult: result,
+        });
+        continue;
+      }
+
+      if (!isActionsSiteToolName(bridgeToolName)) {
+        const validation = validatePolicyExceptionReport(parsedArguments.policy_exception_report);
+        if (!validation.ok) {
+          this.enqueueRealtimeToolJob({
+            originalCall: call,
+            bridgeToolName,
+            parsedArguments: stripPolicyExceptionReport(parsedArguments),
+            sequenceKey: toolSequenceKey(parsedArguments),
+            presetResult: {
+              ok: false,
+              error: {
+                code: "policy_exception_report_required",
+                message: `${validation.error} Check actions.site first, then retry with policy_exception_report.`,
+                recoverable: true,
+              },
+            },
+          });
+          continue;
+        }
+        policyExceptionReport = validation.report;
+        parsedArguments = stripPolicyExceptionReport(parsedArguments);
+      }
+
+      this.enqueueRealtimeToolJob({
+        originalCall: call,
+        bridgeToolName,
+        parsedArguments,
+        sequenceKey: toolSequenceKey(parsedArguments),
+        policyExceptionReport,
+      });
+    }
+    return { handled: true, toolCalls: pendingCalls.length, queued: true };
+  }
+
+  async handleTransportStatusEvent(event = {}) {
+    const name = event.type || "realtime.transport.event";
+    await recordAgentMemoryEvent(this.storage, {
+      type: "realtime",
+      name,
+      ok: name !== "realtime.data_channel.error",
+      summary: `Realtime transport event ${name}.`,
+      output: this.transportStatusDiagnosticPayload(event),
+    }).catch(() => {});
+    if ((name === "realtime.data_channel.close" && event.closed_by_client !== true) || name === "realtime.data_channel.error") {
+      this.state = {
+        status: "error",
+        model: this.model,
+        error: name,
+        inputMuted: this.state.inputMuted,
+        outputMuted: this.state.outputMuted,
+        textOnly: this.state.textOnly,
+      };
+    }
+  }
+
+  enqueueRealtimeToolJob({
+    originalCall,
+    bridgeToolName,
+    parsedArguments,
+    sequenceKey,
+    presetResult = null,
+    policyExceptionReport = null,
+  }) {
+    const job = {
+      id: originalCall.call_id,
+      name: bridgeToolName,
+      arguments: parsedArguments,
+      sequenceKey: sequenceKey || "default",
+      status: "queued",
+      delivered: false,
+      policyExceptionReport,
+      promise: null,
+    };
+    this.toolJobs.set(job.id, job);
+    recordAgentMemoryEvent(this.storage, {
+      type: "realtime",
+      name: "actions_json.tool.queued",
+      ok: true,
+      summary: `${bridgeToolName} queued for background execution.`,
+      input: {
+        call_id: job.id,
+        sequence_key: job.sequenceKey,
+      },
+    }).catch(() => {});
+
+    const previous = this.toolQueueBySequenceKey.get(job.sequenceKey) || Promise.resolve();
+    const promise = new Promise((resolve) => {
+      setTimeout(() => {
+        previous
+          .catch(() => {})
+          .then(() => this.runRealtimeToolJob({ job, originalCall, presetResult }))
+          .finally(resolve);
+      }, 0);
+    });
+    job.promise = promise;
+    this.toolQueueBySequenceKey.set(job.sequenceKey, promise);
+    promise.finally(() => {
+      if (this.toolQueueBySequenceKey.get(job.sequenceKey) === promise) {
+        this.toolQueueBySequenceKey.delete(job.sequenceKey);
+      }
+      this.toolJobs.delete(job.id);
+    });
+    return job;
+  }
+
+  async runRealtimeToolJob({ job, originalCall, presetResult = null }) {
+    job.status = "running";
+    await recordAgentMemoryEvent(this.storage, {
+      type: "realtime",
+      name: "actions_json.tool.running",
+      ok: true,
+      summary: `${job.name} running in background.`,
+      input: {
+        call_id: job.id,
+        sequence_key: job.sequenceKey,
+      },
+    }).catch(() => {});
+    if (job.policyExceptionReport) {
+      await recordAgentMemoryEvent(this.storage, {
+        type: "policy_exception",
+        kind: job.policyExceptionReport.kind,
+        tool: job.name,
+        call_id: job.id,
+        intended_tool: job.policyExceptionReport.intended_tool,
+        actions_json_path: job.policyExceptionReport.actions_json_path,
+        reason: job.policyExceptionReport.reason,
+      }).catch(() => {});
+    }
+    await this.eventObserver?.({
+      type: "actions_json.tool.started",
+      name: job.name,
+      call_id: job.id,
+    });
+
+    let result = presetResult;
+    if (!result) {
+      try {
         result = await this.toolExecutor.execute({
-          name: bridgeToolName,
-          call_id: call.call_id,
-          arguments: parsedArguments,
+          name: job.name,
+          call_id: job.id,
+          arguments: job.arguments,
         });
       } catch (error) {
         result = {
@@ -603,26 +1091,53 @@ export class HostedRealtimeSessionManager {
           },
         };
       }
-      await this.eventObserver?.({
-        type: "actions_json.tool.completed",
-        name: bridgeToolName,
-        call_id: call.call_id,
-        ok: result?.ok !== false,
-        error: result?.error || null,
-      });
-      const bridgeCall = { ...call, name: bridgeToolName };
-      const modelResult = modelSafeToolResult(bridgeCall, result);
-      await this.transport.sendEvent({
+    }
+
+    job.status = "completed";
+    await this.eventObserver?.({
+      type: "actions_json.tool.completed",
+      name: job.name,
+      call_id: job.id,
+      ok: result?.ok !== false,
+      error: result?.error || null,
+    });
+    await recordAgentMemoryEvent(this.storage, {
+      type: "tool",
+      name: job.name,
+      ok: result?.ok !== false,
+      summary: `${job.name} ${result?.ok === false ? "failed" : "completed"}${
+        result?.error?.message ? `: ${result.error.message}` : ""
+      }.`,
+      input: {
+        call_id: job.id,
+        arguments: job.arguments,
+      },
+      output: result?.output || result,
+    });
+
+    const bridgeCall = { ...originalCall, name: job.name };
+    const modelResult = modelSafeToolResult(bridgeCall, result);
+    try {
+      await this.sendRealtimeEvent({
         type: "conversation.item.create",
         item: {
           type: "function_call_output",
-          call_id: call.call_id,
+          call_id: job.id,
           output: JSON.stringify(modelResult),
         },
       });
-      const screenshot = extractScreenshotPayload(result);
-      if (screenshot?.dataUrl) {
-        await this.transport.sendEvent({
+      job.status = "delivered";
+      job.delivered = true;
+    } catch (error) {
+      job.status = "delivery_failed";
+      await this.recordToolDeliveryFailure({ job, outgoingType: "function_call_output", error, result });
+      return;
+    }
+
+    const screenshot = extractScreenshotPayload(result);
+    if (screenshot?.dataUrl) {
+      try {
+        await this.sendRealtimeEvent({
           type: "conversation.item.create",
           item: {
             type: "message",
@@ -630,7 +1145,7 @@ export class HostedRealtimeSessionManager {
             content: [
               {
                 type: "input_text",
-                text: `Screenshot captured for ${bridgeToolName} call ${call.call_id}.`,
+                text: `Screenshot captured for ${job.name} call ${job.id}.`,
               },
               {
                 type: "input_image",
@@ -639,23 +1154,101 @@ export class HostedRealtimeSessionManager {
             ],
           },
         });
+      } catch (error) {
+        await this.recordToolDeliveryFailure({ job, outgoingType: "screenshot_message", error, result });
+        return;
       }
-      await recordAgentMemoryEvent(this.storage, {
-        type: "tool",
-        name: bridgeToolName,
-        ok: result?.ok !== false,
-        summary: `${bridgeToolName} ${result?.ok === false ? "failed" : "completed"}${
-          result?.error?.message ? `: ${result.error.message}` : ""
-        }.`,
-        input: {
-          call_id: call.call_id,
-          arguments: parsedArguments,
-        },
-        output: result?.output || result,
-      });
     }
-    await this.transport.sendEvent({ type: "response.create" });
-    return { handled: true, toolCalls: pendingCalls.length };
+
+    try {
+      await this.sendRealtimeEvent({ type: "response.create" });
+    } catch (error) {
+      await this.recordToolDeliveryFailure({ job, outgoingType: "response.create", error, result, deliveredToModel: true });
+    }
+  }
+
+  async sendRealtimeEvent(event, transport = this.transport) {
+    this.lastRealtimeOutboundEventType = event?.type || null;
+    return transport.sendEvent(event);
+  }
+
+  realtimeManagerDiagnosticPayload() {
+    return {
+      manager_status: this.state.status || null,
+      text_only: this.state.textOnly === true,
+      input_muted: this.state.inputMuted === true,
+      output_muted: this.state.outputMuted === true,
+      pending_developer_text_requests: this.pendingDeveloperTextRequests.length,
+      developer_text_responses_waiting: this.developerTextRequestByResponseId.size,
+      queued_or_running_tool_jobs: this.toolJobs.size,
+      tool_sequence_queues: this.toolQueueBySequenceKey.size,
+    };
+  }
+
+  transportStatusDiagnosticPayload(event = {}) {
+    return {
+      data_channel_state: event.data_channel_state || null,
+      closed_by_client: event.closed_by_client === true,
+      close_code: Number.isFinite(event.close_code) ? event.close_code : null,
+      close_reason: typeof event.close_reason === "string" ? event.close_reason : null,
+      close_was_clean: typeof event.close_was_clean === "boolean" ? event.close_was_clean : null,
+      peer_connection_state: event.peer_connection_state || null,
+      ice_connection_state: event.ice_connection_state || null,
+      ice_gathering_state: event.ice_gathering_state || null,
+      signaling_state: event.signaling_state || null,
+      data_channel_buffered_amount: Number.isFinite(event.data_channel_buffered_amount)
+        ? event.data_channel_buffered_amount
+        : null,
+      error_message: event.error_message || null,
+      last_outbound_event_type: this.lastRealtimeOutboundEventType || event.last_outbound_event_type || null,
+      last_inbound_event_type: this.lastRealtimeInboundEventType || event.last_inbound_event_type || null,
+      ...this.realtimeManagerDiagnosticPayload(),
+    };
+  }
+
+  async recordToolDeliveryFailure({ job, outgoingType, error, result, deliveredToModel = false }) {
+    const message = error?.message || String(error);
+    this.state = {
+      status: "error",
+      model: this.model,
+      error: message,
+      inputMuted: this.state.inputMuted,
+      outputMuted: this.state.outputMuted,
+      textOnly: this.state.textOnly,
+    };
+    await recordAgentMemoryEvent(this.storage, {
+      type: "error",
+      code: error?.code || "realtime_data_channel_send_failed",
+      message,
+      recoverable: false,
+    }).catch(() => {});
+    await recordAgentMemoryEvent(this.storage, {
+      type: "realtime",
+      name: "realtime.data_channel.send_failed",
+      ok: false,
+      summary: `Failed to send ${outgoingType} for ${job.name}.`,
+      input: {
+        call_id: job.id,
+        tool_name: job.name,
+        outgoing_item_type: outgoingType,
+        sequence_key: job.sequenceKey,
+      },
+      output: {
+        delivered_to_model: deliveredToModel,
+        browser_tool_output: result?.output || result || null,
+        error: {
+          code: error?.code || null,
+          message,
+          data_channel_state: error?.dataChannelState || null,
+          peer_connection_state: error?.peerConnectionState || null,
+          ice_connection_state: error?.iceConnectionState || null,
+          signaling_state: error?.signalingState || null,
+          data_channel_buffered_amount: Number.isFinite(error?.dataChannelBufferedAmount)
+            ? error.dataChannelBufferedAmount
+            : null,
+        },
+      },
+    }).catch(() => {});
   }
 
   realtimeTools() {
@@ -668,6 +1261,6 @@ export class HostedRealtimeSessionManager {
     if (this.tools.length === 0) {
       return "Greet the user briefly as a curious website host. Ask what brought them here or what friction or pain point they are trying to solve, and offer a quick intro to what the website is about or help navigating it.";
     }
-    return "Before greeting, call actions_site with mode=list when available. If the current site exposes a site.map, context, diagnostic, teacher, host, guide, product, or interview action, call that action and adopt the returned role. Then greet the user briefly in that site-specific role, ask what brought them here or what friction they are trying to solve, and offer a quick intro, navigation to a specific section, a short lesson, or a visual overlay when that would make the answer easier to understand.";
+    return "Before greeting, call actions_site with mode=list when available. Review returned skills and files; if a skill front matter read_when applies and storage_read_file is available, read that skill. If the current site exposes a site.map, context, diagnostic, teacher, host, guide, product, interview, workflow, or task-specific action, call the best matching site-specific action before any generic DOM, screenshot, or locator primitive, and adopt the returned role. Then greet the user briefly in that site-specific role, ask what brought them here or what friction they are trying to solve, and offer a quick intro, navigation to a specific section, a short lesson, or a visual overlay when that would make the answer easier to understand.";
   }
 }
