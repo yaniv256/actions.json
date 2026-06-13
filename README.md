@@ -50,8 +50,8 @@ The extension-hosted agent can:
 - keep the live voice session in an extension-owned offscreen document so page
   overlay reinjection does not intentionally restart the session.
 
-Read [Hosted Agent](docs/hosted-agent.md) and
-[Chrome Extension](docs/chrome-extension.md).
+Read [Hosted Agent](https://yaniv256.github.io/actions.json/hosted-agent.html) and
+[Chrome Extension](https://yaniv256.github.io/actions.json/chrome-extension.html).
 
 ### I Want My Coding Agent To Operate A Website
 
@@ -61,8 +61,8 @@ actions are available, and then calls stored actions instead of rediscovering
 the page. From the user's point of view, you ask the coding agent to inspect the
 site, write the map, test it, and save the reusable actions.
 
-Read [Getting Started](docs/getting-started.md),
-[Bridge Architecture](docs/bridge-architecture.md), and the authoring skill at
+Read [Getting Started](https://yaniv256.github.io/actions.json/getting-started.html),
+[Bridge Architecture](https://yaniv256.github.io/actions.json/bridge-architecture.html), and the authoring skill at
 [skills/SKILL.md](skills/SKILL.md).
 
 ### I Want To Make My Website Agent-Ready
@@ -72,9 +72,9 @@ workflows, page context, product or documentation knowledge, navigation targets,
 and safe actions. A first-party action map gives agents the official context for
 how your website should be understood and operated.
 
-Read [actions.json Format](docs/actions-json-format.md),
-[Schema V1 Reference](docs/schema-v1-proposal.md), and
-[actions.json.storage](docs/actions-json-storage.md).
+Read [actions.json Format](https://yaniv256.github.io/actions.json/actions-json-format.html),
+[Schema V1 Reference](https://yaniv256.github.io/actions.json/schema-v1-proposal.html), and
+[actions.json.storage](https://yaniv256.github.io/actions.json/actions-json-storage.html).
 
 ### I Want To Test The Embed Path
 
@@ -83,7 +83,7 @@ JavaScript. This approximates a future first-party website embed, but it is less
 capable than the extension because host pages can block local transport, affect
 overlay styling, and require user consent for screenshots.
 
-Read [Getting Started](docs/getting-started.md) and
+Read [Getting Started](https://yaniv256.github.io/actions.json/getting-started.html) and
 [Runtime README](runtime/actions-json-runtime/README.md).
 
 ## Runtime And Bridge Model
@@ -109,7 +109,7 @@ agents still use the bridge.
 ## Install Or Try It
 
 For normal use, install release artifacts instead of building from source.
-Start with [Getting Started](docs/getting-started.md).
+Start with [Getting Started](https://yaniv256.github.io/actions.json/getting-started.html).
 
 For source development:
 
@@ -153,24 +153,24 @@ implementation-pending design.
 
 Start here:
 
-- [Documentation Index](docs/index.md)
-- [Getting Started](docs/getting-started.md)
-- [Hosted Agent](docs/hosted-agent.md)
-- [Chrome Extension](docs/chrome-extension.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [0.1.84 Release Notes](docs/release-notes/0.1.84.md)
+- [Documentation Index](https://yaniv256.github.io/actions.json/)
+- [Getting Started](https://yaniv256.github.io/actions.json/getting-started.html)
+- [Hosted Agent](https://yaniv256.github.io/actions.json/hosted-agent.html)
+- [Chrome Extension](https://yaniv256.github.io/actions.json/chrome-extension.html)
+- [Troubleshooting](https://yaniv256.github.io/actions.json/troubleshooting.html)
+- [0.1.84 Release Notes](https://yaniv256.github.io/actions.json/release-notes/0.1.84.html)
 
 Reference:
 
-- [actions.json Format](docs/actions-json-format.md)
-- [Schema V1 Reference](docs/schema-v1-proposal.md)
-- [Bridge Architecture](docs/bridge-architecture.md)
-- [Actions Bridge Protocol](docs/actions-bridge-protocol.md)
-- [Primitive Dictionary Architecture](docs/primitive-dictionary-architecture.md)
-- [Hosted Agent Tools](docs/hosted-agent-tools.md)
-- [actions.json.storage](docs/actions-json-storage.md)
-- [Storage Visibility Scopes](docs/storage-visibility-scopes.md)
-- [Repository Structure](docs/repo-structure.md)
+- [actions.json Format](https://yaniv256.github.io/actions.json/actions-json-format.html)
+- [Schema V1 Reference](https://yaniv256.github.io/actions.json/schema-v1-proposal.html)
+- [Bridge Architecture](https://yaniv256.github.io/actions.json/bridge-architecture.html)
+- [Actions Bridge Protocol](https://yaniv256.github.io/actions.json/actions-bridge-protocol.html)
+- [Primitive Dictionary Architecture](https://yaniv256.github.io/actions.json/primitive-dictionary-architecture.html)
+- [Hosted Agent Tools](https://yaniv256.github.io/actions.json/hosted-agent-tools.html)
+- [actions.json.storage](https://yaniv256.github.io/actions.json/actions-json-storage.html)
+- [Storage Visibility Scopes](https://yaniv256.github.io/actions.json/storage-visibility-scopes.html)
+- [Repository Structure](https://yaniv256.github.io/actions.json/repo-structure.html)
 
 ## Status And Boundaries
 
