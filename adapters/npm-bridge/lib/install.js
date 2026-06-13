@@ -7,10 +7,13 @@ const https = require('node:https');
 const { execFileSync } = require('node:child_process');
 const { assetSlug, downloadUrl, binaryName } = require('./platform');
 
-// Resolve the package version (used to pick the matching release).
+// The bridge binary version to download. This is pinned separately from the
+// package version so the wrapper can ship changes (e.g. the bundled dictionary)
+// without rebuilding identical bridge binaries. Falls back to the package
+// version if the pin isn't set.
 function packageVersion() {
   const pkg = require('../package.json');
-  return pkg.version;
+  return pkg.bridgeBinaryVersion || pkg.version;
 }
 
 // Where we cache the downloaded binary: alongside the package, keyed by version

@@ -1,7 +1,8 @@
 {
   "name": "@actions-json/bridge",
-  "version": "0.1.119",
-  "description": "Run the actions.json MCP bridge with npx — no Rust toolchain required. Downloads the prebuilt actions-json-mcp binary for your platform and runs it.",
+  "version": "0.1.122",
+  "bridgeBinaryVersion": "0.1.119",
+  "description": "Run the actions.json MCP bridge with npx — no Rust toolchain required. Downloads the prebuilt actions-json-mcp binary, bundles the primitive dictionary, and creates your storage workspace on first run.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -15,6 +16,8 @@
   "files": [
     "bin/",
     "lib/",
+    "dictionary/",
+    "template/",
     "README.md"
   ],
   "engines": {

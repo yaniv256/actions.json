@@ -1,0 +1,17 @@
+{
+  "protocol": "actions.json.storage.scope",
+  "version": "0.1.0",
+  "scope": "private",
+  "parent": "actions.json.storage",
+  "owner": {
+    "type": "person",
+    "id": "you"
+  },
+  "visibility": "private",
+  "default_policy": {
+    "observations": "store_freely",
+    "runs": "store_freely",
+    "overlays": "store_freely",
+    "action_maps": "draft_until_reviewed"
+  }
+}

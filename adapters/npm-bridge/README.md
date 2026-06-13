@@ -1,44 +1,38 @@
 # @actions-json/bridge
 
 Run the [actions.json](https://yaniv256.github.io/actions.json/) MCP bridge with
-`npx` — no Rust toolchain required. On first run this downloads the prebuilt
-`actions-json-mcp` binary for your platform from the GitHub release, caches it,
-and runs it with the arguments you pass.
+`npx` — no Rust toolchain, no setup. On first run it downloads the prebuilt
+`actions-json-mcp` binary for your platform, bundles the primitive dictionary
+(so you don't pass `--actions`), and scaffolds a storage workspace at
+`~/.actions-json/storage` (so you don't pass `--storage-root`).
 
 ## Usage
 
 ```bash
-npx @actions-json/bridge mcp \
-  --bind 0.0.0.0:17345 \
-  --actions /abs/path/to/overlay.actions.json \
-  --storage-root /abs/path/to/actions.json.storage
+npx @actions-json/bridge mcp
 ```
 
-Register it with a coding agent the same way — for Claude Code:
+Register it with a coding agent — Claude Code:
 
 ```bash
-claude mcp add actions-json -- \
-  npx -y @actions-json/bridge mcp \
-  --bind 0.0.0.0:17345 \
-  --actions /abs/path/to/overlay.actions.json \
-  --storage-root /abs/path/to/actions.json.storage
+claude mcp add actions-json -- npx -y @actions-json/bridge mcp
 ```
 
-For Codex (`~/.codex/config.toml`):
+Codex:
 
-```toml
-[mcp_servers.actions-json]
-command = "npx"
-args = [
-  "-y", "@actions-json/bridge", "mcp",
-  "--bind", "0.0.0.0:17345",
-  "--actions", "/abs/path/to/overlay.actions.json",
-  "--storage-root", "/abs/path/to/actions.json.storage",
-]
+```bash
+codex mcp add actions-json -- npx -y @actions-json/bridge mcp
 ```
 
-All arguments after the binary are passed straight through to `actions-json-mcp`.
-See [Getting Started](https://yaniv256.github.io/actions.json/getting-started.html).
+Overrides (the defaults are skipped when you pass your own):
+
+- `--storage-root <dir>` — use a different storage workspace. Or set
+  `ACTIONS_JSON_STORAGE`.
+- `--actions <file>` — use a custom primitive dictionary instead of the bundled
+  one.
+
+All arguments after the binary pass straight through to `actions-json-mcp`. See
+[Getting Started](https://yaniv256.github.io/actions.json/getting-started.html).
 
 ## Platforms
 
