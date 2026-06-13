@@ -24,22 +24,26 @@ It's **OpenAPI for website actions**: OpenAPI describes what a server can do;
 
 ## Quickstart
 
-Have a coding agent build and test an `actions.json` for a site — no toolchain,
-no clone. Register the bridge with [Claude Code](https://claude.ai/code):
+Clone the repo, then register the bridge with your coding agent
+([Claude Code](https://claude.ai/code)) from inside it:
 
 ```bash
+git clone https://github.com/yaniv256/actions.json.git
+cd actions.json
+
 claude mcp add actions-json -- \
   npx -y @actions-json/bridge mcp \
-  --bind 0.0.0.0:17345 \
-  --actions /abs/path/to/overlay.actions.json \
-  --storage-root /abs/path/to/actions.json.storage
+  --actions "$(pwd)/extensions/chrome-overlay-runtime/actions/overlay.actions.json"
 ```
 
-`npx` downloads the prebuilt bridge for your platform (linux-x64, macos-x64,
-macos-arm64, win-x64) and runs it. Then connect the
-[Chrome extension](https://github.com/yaniv256/actions.json/releases) to the
-bridge and take control of a tab — your agent loads the map and your OpenAI key
-into the browser for you.
+The `$(pwd)/...` fills in the path to the bundled action map from the repo you
+just cloned — nothing to edit. `npx` downloads the prebuilt bridge for your
+platform (linux-x64, macos-x64, macos-arm64, win-x64).
+
+Then install the [Chrome extension](https://github.com/yaniv256/actions.json/releases),
+connect it to the bridge, and take control of a tab. Ask your agent to explore a
+site and write an `actions.json` for it — the agent loads the map and your
+OpenAI key into the browser for you.
 
 Full walkthrough, plus the standalone-extension path: **[Getting
 Started](https://yaniv256.github.io/actions.json/getting-started.html)**.
