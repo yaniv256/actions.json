@@ -132,10 +132,7 @@ Packaging and integration adapters for agent ecosystems.
 
 ```text
 adapters/
-  claude-code-plugin/
-  codex/
-  openclaw/
-  pi-package/
+  npm-bridge/   @actions-json/bridge — the npx wrapper for the MCP bridge
 ```
 
 Adapters should point to or package the canonical skill and runtime artifacts.
