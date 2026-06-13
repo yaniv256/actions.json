@@ -1,34 +1,37 @@
 # @actions-json/bridge
 
 Run the [actions.json](https://yaniv256.github.io/actions.json/) MCP bridge with
-`npx` — no Rust toolchain required. On first run this downloads the prebuilt
-`actions-json-mcp` binary for your platform from the GitHub release, caches it,
-and runs it. The primitive dictionary (browser-control tool catalog) is bundled,
-so you don't pass `--actions`.
+`npx` — no Rust toolchain, no setup. On first run it downloads the prebuilt
+`actions-json-mcp` binary for your platform, bundles the primitive dictionary
+(so you don't pass `--actions`), and scaffolds a storage workspace at
+`~/.actions-json/storage` (so you don't pass `--storage-root`).
 
 ## Usage
 
 ```bash
-npx @actions-json/bridge mcp --storage-root /path/to/.storage
+npx @actions-json/bridge mcp
 ```
 
-Register it with a coding agent — for Claude Code:
+Register it with a coding agent — Claude Code:
 
 ```bash
-claude mcp add actions-json -- \
-  npx -y @actions-json/bridge mcp --storage-root /path/to/.storage
+claude mcp add actions-json -- npx -y @actions-json/bridge mcp
 ```
 
-For Codex:
+Codex:
 
 ```bash
-codex mcp add actions-json -- \
-  npx -y @actions-json/bridge mcp --storage-root /path/to/.storage
+codex mcp add actions-json -- npx -y @actions-json/bridge mcp
 ```
 
-All arguments after the binary pass straight through to `actions-json-mcp`. To
-use a custom primitive dictionary, pass your own `--actions <file>` and the
-bundled default is skipped. See
+Overrides (the defaults are skipped when you pass your own):
+
+- `--storage-root <dir>` — use a different storage workspace. Or set
+  `ACTIONS_JSON_STORAGE`.
+- `--actions <file>` — use a custom primitive dictionary instead of the bundled
+  one.
+
+All arguments after the binary pass straight through to `actions-json-mcp`. See
 [Getting Started](https://yaniv256.github.io/actions.json/getting-started.html).
 
 ## Platforms

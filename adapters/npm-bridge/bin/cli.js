@@ -9,6 +9,7 @@
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { ensureBinary } = require('../lib/install');
+const { ensureStorageRoot } = require('../lib/storage');
 
 // The primitive dictionary (browser-control tool catalog) ships with this
 // package — it's a fixed runtime file, not user config. When the caller runs a
@@ -17,13 +18,25 @@ const { ensureBinary } = require('../lib/install');
 const BUNDLED_ACTIONS = path.join(__dirname, '..', 'dictionary', 'overlay.actions.json');
 const SUBCOMMANDS_NEEDING_ACTIONS = new Set(['mcp', 'serve']);
 
-function withDefaultActions(args) {
-  const sub = args[0];
-  if (!SUBCOMMANDS_NEEDING_ACTIONS.has(sub)) return args;
-  if (args.includes('--actions')) return args;
-  if (args.includes('--help') || args.includes('-h')) return args;
-  // Insert right after the subcommand.
-  return [args[0], '--actions', BUNDLED_ACTIONS, ...args.slice(1)];
+function isRunSubcommand(args) {
+  return SUBCOMMANDS_NEEDING_ACTIONS.has(args[0]) &&
+    !args.includes('--help') && !args.includes('-h');
+}
+
+// Inject defaults the user shouldn't have to specify: the bundled primitive
+// dictionary (--actions) and a default storage root (--storage-root). Both
+// are skipped if the user passed their own.
+function withDefaults(args) {
+  if (!isRunSubcommand(args)) return args;
+  const out = [args[0]];
+  if (!args.includes('--actions')) {
+    out.push('--actions', BUNDLED_ACTIONS);
+  }
+  if (!args.includes('--storage-root')) {
+    out.push('--storage-root', ensureStorageRoot());
+  }
+  out.push(...args.slice(1));
+  return out;
 }
 
 async function main() {
@@ -36,7 +49,7 @@ async function main() {
     return;
   }
 
-  const args = withDefaultActions(process.argv.slice(2));
+  const args = withDefaults(process.argv.slice(2));
   const child = spawn(bin, args, { stdio: 'inherit' });
 
   // Forward termination signals so the bridge shuts down cleanly.
