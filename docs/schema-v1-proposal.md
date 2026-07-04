@@ -353,8 +353,9 @@ name concrete primitives instead.
 ```
 {% endraw %}
 
-Workflow root fields (all required except `output`): `version` (must be `1`),
-`expression_language` (must be `"jsonata"`), `steps`, `output`.
+Workflow root fields (all required except `output` and `x_state_machine`):
+`version` (must be `1`), `expression_language` (must be `"jsonata"`), `steps`,
+`output`. The optional `x_state_machine` annotation is described below.
 
 Step fields — this set is closed; validation rejects anything else:
 
@@ -385,6 +386,32 @@ Validation is strict: unknown workflow keys and unknown step fields are
 rejected with an error naming the step and the field, so typos fail at
 validation time instead of silently changing behavior at run time. Runtime
 limits bound step count, loop items, and expression/output sizes.
+
+#### `x_state_machine` (optional annotation)
+
+Some operations are not a flat sequence — they align several independent axes,
+each of which may or may not already be correct. Rescheduling a calendar event,
+for example, aligns a **date** axis and a **time** axis, and only the axis that
+is wrong should change. The optional `x_state_machine` field lets the map author
+describe that state model — the axes, their states, and the transitions — so the
+map's own logic and the operating agent reason about *which state each axis is
+in and what transition to make* instead of running the steps blindly.
+
+As an `x_`-prefixed extension field it is author-defined annotation: strict
+validation allows it, and the workflow's JSONata and the agent's guidance consume
+it. It is not a rigid engine-enforced sub-schema, which keeps the state model as
+expressive as the operation needs.
+
+#### Workflow failure classification
+
+When a workflow step fails, the runtime classifies the failure rather than
+returning a bare error. Each classified failure carries a `retryable` flag and a
+concrete `safe_recovery` hint — for example, "hide or collapse the overlay,
+return to a known page state, then retry the mutation," or "read the current
+state projection before retrying; the mutation may have partially landed." This
+lets an agent recover deliberately — retry only when it is safe, and verify state
+before re-running a mutation that may have partially succeeded — instead of
+blindly repeating a step.
 
 ### `state_projections` (implemented)
 

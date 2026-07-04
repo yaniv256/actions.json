@@ -106,7 +106,7 @@ export async function evaluateWorkflowValue(value, context, limits = DEFAULT_LIM
   return value;
 }
 
-const ALLOWED_WORKFLOW_KEYS = new Set(["version", "expression_language", "steps", "output"]);
+const ALLOWED_WORKFLOW_KEYS = new Set(["version", "expression_language", "steps", "output", "x_state_machine"]);
 const ALLOWED_STEP_KEYS = new Set([
   "id",
   "primitive",
@@ -296,9 +296,57 @@ function summarizeStep({ step, result, startedAt, skipped = false, settle = unde
   return summary;
 }
 
+function classifyWorkflowFailure({ step, result }) {
+  const cause = result?.error || {};
+  const causeCode = String(cause.code || "");
+  const message = String(cause.message || result?.error?.message || "");
+  const stepId = String(step?.id || "");
+  const primitive = String(step?.primitive || "");
+
+  if (/overlay|occlud|intercept/i.test(`${causeCode} ${message}`)) {
+    return {
+      failure_class: "overlay_interference",
+      failed_state: "mutation",
+      retryable: true,
+      recoverable: true,
+      safe_recovery: "Hide or collapse the actions.json overlay, return to a known page state, then retry the mutation.",
+    };
+  }
+  if (causeCode === "postcondition_failed" || /postcondition/i.test(stepId)) {
+    return {
+      failure_class: "postcondition_failed",
+      failed_state: "postcondition",
+      retryable: false,
+      recoverable: true,
+      safe_recovery: "Read the current state projection before retrying; the mutation may have partially landed.",
+    };
+  }
+  if (
+    causeCode.startsWith("workflow_retry_") ||
+    primitive.startsWith("locator.") ||
+    /find|verify|ready|badge|button|control/i.test(stepId)
+  ) {
+    return {
+      failure_class: "control_not_ready",
+      failed_state: "readiness",
+      retryable: true,
+      recoverable: true,
+      safe_recovery: "Retry from the nearest verified state boundary after waiting for the specific target control.",
+    };
+  }
+  return {
+    failure_class: "target_not_found",
+    failed_state: "precondition",
+    retryable: Boolean(cause.recoverable),
+    recoverable: Boolean(cause.recoverable),
+    safe_recovery: "Return to a known base state, verify the target identity, then retry only if the target is present.",
+  };
+}
+
 function workflowFailure({ step, result, steps }) {
   const causeCode = result?.error?.code || "";
   const code = causeCode.startsWith("workflow_retry_") ? causeCode : "workflow_step_failed";
+  const classification = classifyWorkflowFailure({ step, result });
   return {
     ok: false,
     error: {
@@ -307,6 +355,7 @@ function workflowFailure({ step, result, steps }) {
       primitive: step.primitive,
       message: result?.error?.message || `Workflow step ${step.id} failed.`,
       cause: result?.error || null,
+      ...classification,
     },
     steps,
   };

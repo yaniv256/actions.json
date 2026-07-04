@@ -322,6 +322,90 @@ test("workflow supports bounded scroll-until-visible retry loops", async () => {
   assert.deepEqual(result.output.value, { x: 100, y: 250 });
 });
 
+test("workflow scroll-until-visible can reset to board start and scan horizontally when caller passes zero x delta", async () => {
+  const primitiveCalls = [];
+  let readCount = 0;
+  const result = await executeWorkflowAction({
+    actionName: "trello.card.scroll_until_visible",
+    input: { card_title: "Record demo", scroll_delta_x: 0, scroll_delta_y: 0 },
+    workflow: {
+      version: 1,
+      expression_language: "jsonata",
+      steps: [
+        {
+          id: "scrollToStart",
+          primitive: "viewport.scroll",
+          args: {
+            delta_x: -6000,
+            delta_y: 0,
+            scope: { selector: "[data-testid='lists']", root_strategy: "scope" },
+          },
+          on_error: "continue",
+        },
+        {
+          id: "scrollTargetListToTop",
+          primitive: "viewport.scroll",
+          args: {
+            delta_x: 0,
+            delta_y: -6000,
+            scope: {
+              selector: "[data-testid='list-cards']",
+              text_contains: "{% input.card_title %}",
+              root_strategy: "scope",
+            },
+          },
+          on_error: "continue",
+        },
+        {
+          id: "findCard",
+          primitive: "locator.element_info",
+          args: {
+            locator: {
+              selector: "[data-testid='card-name'], a[href*='/c/']",
+              text_contains: "{% input.card_title %}",
+            },
+          },
+          on_error: "continue",
+          retry_until: "{% $exists(steps.findCard.output.clickable_center.x) %}",
+          max_attempts: 3,
+          after_each: {
+            primitive: "viewport.scroll",
+            args: {
+              delta_x: "{% input.scroll_delta_x ? input.scroll_delta_x : 900 %}",
+              delta_y: "{% input.scroll_delta_y ? input.scroll_delta_y : 520 %}",
+              scope: { selector: "[data-testid='lists']", root_strategy: "scope" },
+            },
+          },
+        },
+      ],
+      output: "{% steps.findCard.output.clickable_center %}",
+    },
+    async executePrimitive(call) {
+      primitiveCalls.push(call);
+      if (call.name === "locator.element_info") {
+        readCount += 1;
+        return {
+          ok: true,
+          output: {
+            clickable_center: readCount >= 2 ? { x: 420, y: 180 } : null,
+          },
+        };
+      }
+      return { ok: true, output: { moved: true } };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(
+    primitiveCalls.map((call) => call.name),
+    ["viewport.scroll", "viewport.scroll", "locator.element_info", "viewport.scroll", "locator.element_info"],
+  );
+  assert.equal(primitiveCalls[0].arguments.delta_x, -6000);
+  assert.equal(primitiveCalls[1].arguments.delta_y, -6000);
+  assert.equal(primitiveCalls[3].arguments.delta_x, 900);
+  assert.deepEqual(result.output.value, { x: 420, y: 180 });
+});
+
 test("workflow fails when retry loop exhausts without satisfying retry condition", async () => {
   const primitiveCalls = [];
   const result = await executeWorkflowAction({
@@ -380,6 +464,113 @@ test("workflow fails when retry loop exhausts without satisfying retry condition
       "locator.element_info",
     ],
   );
+});
+
+test("workflow failures include normalized class, failed state, recoverability, and recovery guidance", async () => {
+  const result = await executeWorkflowAction({
+    actionName: "trello.card.due_date.clear",
+    workflow: {
+      version: 1,
+      expression_language: "jsonata",
+      x_state_machine: {
+        states: ["precondition", "readiness", "mutation", "postcondition", "cleanup"],
+      },
+      steps: [
+        {
+          id: "findRemove",
+          primitive: "locator.element_info",
+          args: { locator: { selector: "[data-testid='date-range-picker'] button", text_contains: "Remove" } },
+          retry_until: "{% steps.findRemove.output.clickable_center.x != null %}",
+          max_attempts: 2,
+          after_each: {
+            primitive: "locator.wait_for",
+            args: {
+              locator: { selector: "[data-testid='date-range-picker'] button", text_contains: "Remove" },
+              state: "visible",
+              timeout_ms: 1000,
+            },
+          },
+        },
+      ],
+    },
+    async executePrimitive() {
+      return { ok: true, output: { candidates: [] } };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "workflow_retry_exhausted");
+  assert.equal(result.error.failure_class, "control_not_ready");
+  assert.equal(result.error.failed_state, "readiness");
+  assert.equal(result.error.retryable, true);
+  assert.equal(result.error.recoverable, true);
+  assert.match(result.error.safe_recovery, /retry/i);
+});
+
+test("workflow failures classify overlay interference from pointer failures", async () => {
+  const result = await executeWorkflowAction({
+    actionName: "overlay.blocked.click",
+    workflow: {
+      version: 1,
+      expression_language: "jsonata",
+      steps: [
+        {
+          id: "clickTarget",
+          primitive: "pointer.click",
+          args: { x: 10, y: 20 },
+        },
+      ],
+    },
+    async executePrimitive() {
+      return {
+        ok: false,
+        error: {
+          code: "overlay_interference",
+          message: "Click target is occluded by the actions overlay.",
+          recoverable: true,
+        },
+      };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.failure_class, "overlay_interference");
+  assert.equal(result.error.failed_state, "mutation");
+  assert.equal(result.error.retryable, true);
+  assert.match(result.error.safe_recovery, /overlay/i);
+});
+
+test("workflow failures classify postcondition failures as state verification failures", async () => {
+  const result = await executeWorkflowAction({
+    actionName: "card.verify.after.click",
+    workflow: {
+      version: 1,
+      expression_language: "jsonata",
+      steps: [
+        {
+          id: "verifyPostcondition",
+          primitive: "locator.element_info",
+          args: { locator: { selector: "[data-testid='card-name']" } },
+        },
+      ],
+    },
+    async executePrimitive() {
+      return {
+        ok: false,
+        error: {
+          code: "postcondition_failed",
+          message: "The card due date was still present.",
+          recoverable: true,
+        },
+      };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.failure_class, "postcondition_failed");
+  assert.equal(result.error.failed_state, "postcondition");
+  assert.equal(result.error.retryable, false);
+  assert.match(result.error.safe_recovery, /state projection/i);
 });
 
 test("workflow fails fast and identifies the failed step", async () => {
@@ -592,6 +783,26 @@ test("validateWorkflow rejects unrecognized top-level workflow keys", () => {
   assert.equal(result.ok, false);
   assert.equal(result.error.code, "invalid_workflow");
   assert.match(result.error.message, /cleanup/);
+});
+
+test("validateWorkflow accepts state-machine metadata for mutating workflow authoring", () => {
+  const result = validateWorkflow({
+    version: 1,
+    expression_language: "jsonata",
+    x_state_machine: {
+      states: ["precondition", "readiness", "mutation", "postcondition", "cleanup"],
+      overlay_safe: false,
+    },
+    steps: [
+      {
+        id: "hideOverlay",
+        primitive: "overlay.menu.hide",
+        on_error: "continue",
+      },
+    ],
+  });
+
+  assert.deepEqual(result, { ok: true });
 });
 
 test("validateWorkflow accepts every recognized field used together", () => {

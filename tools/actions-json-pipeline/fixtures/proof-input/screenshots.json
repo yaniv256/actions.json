@@ -1,0 +1,9 @@
+{
+  "screenshots": [
+    {
+      "path": "screenshots/card-open.png",
+      "purpose": "Shows the opened card after the workflow completed.",
+      "source": "manual validation"
+    }
+  ]
+}

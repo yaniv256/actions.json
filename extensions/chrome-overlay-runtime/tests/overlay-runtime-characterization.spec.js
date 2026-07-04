@@ -1228,6 +1228,60 @@ test("content runtime renders agent text responses as toast notifications", asyn
   await expect(page.locator("[data-actions-json-agent-toast]")).toContainText("I found two candidate cards.");
 });
 
+test("cost meter lives in the overlay panel and follows collapse", async ({ page }) => {
+  await installRuntime(page);
+
+  // Meter update BEFORE the menu exists: cached, applied when the menu opens.
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener(
+        {
+          type: "actions-json:cost-meter-update",
+          meter: { sessionUsd: 0.42, lastUsd: 0.0031, dayUsd: 1.5, cacheState: "ok" },
+        },
+        {},
+        resolve
+      )
+    );
+  });
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener({ type: "actions-json:open-menu-overlay" }, {}, resolve)
+    );
+  });
+
+  const menu = page.locator("#__actions_json_menu_overlay_host");
+  const meter = menu.locator("[data-cost-meter]");
+  await expect(meter).toContainText("session $0.42");
+  await expect(meter).toContainText("last $0.0031");
+  await expect(meter).toContainText("today $1.50");
+  await expect(meter).toHaveAttribute("data-cache-state", "ok");
+
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener(
+        {
+          type: "actions-json:cost-meter-update",
+          meter: { sessionUsd: 0.62, lastUsd: 0.2, dayUsd: 1.7, cacheState: "drain" },
+        },
+        {},
+        resolve
+      )
+    );
+  });
+  await expect(meter).toHaveAttribute("data-cache-state", "drain");
+  await expect(meter).toContainText("session $0.62");
+
+  // Collapse hides the meter with the body; expand restores it.
+  await menu.locator("[data-minimize]").click();
+  await expect(meter).toBeHidden();
+  await menu.locator("[data-minimize]").click();
+  await expect(meter).toBeVisible();
+});
+
 test("extension menu opens a single agent pane in the page overlay shell", async ({ page }) => {
   await installRuntime(page);
   await page.evaluate(async () => {
@@ -2554,7 +2608,7 @@ test("background hosted agent tools prefer the claimed active tab over the foreg
               id: 99,
               windowId: 9,
               title: "HeyCode",
-              url: "https://hey-code.ai/a/zara",
+              url: "https://example.com/app",
               active: true,
             },
           ];
@@ -2855,7 +2909,7 @@ test("background hosted claimed-tab tools execute against the registry without a
               id: 99,
               windowId: 9,
               title: "HeyCode",
-              url: "https://hey-code.ai/a/zara",
+              url: "https://example.com/app",
               active: true,
             },
           ];
@@ -4048,13 +4102,54 @@ test("extension implements advertised point and input primitives", async ({ page
       style="position:absolute;left:120px;top:260px;width:180px;height:36px"
       oninput="document.body.dataset.inputValue = this.value"
     />
+    <input
+      data-testid="controlled-text-target"
+      value="old controlled value"
+      style="position:absolute;left:320px;top:260px;width:180px;height:36px"
+    />
     <div
       data-testid="contenteditable-target"
       contenteditable="true"
       style="position:absolute;left:120px;top:320px;width:220px;min-height:40px;border:1px solid #999"
       oninput="document.body.dataset.editableText = this.textContent"
-    ></div>
+    >old editable text</div>
+    <div
+      data-testid="model-backed-editor"
+      contenteditable="true"
+      style="position:absolute;left:120px;top:380px;width:220px;min-height:40px;border:1px solid #999"
+    >old model text</div>
   `);
+  await page.evaluate(() => {
+    const editor = document.querySelector("[data-testid='model-backed-editor']");
+    window.__modelBackedEditorValue = editor.textContent;
+    editor.addEventListener("paste", (event) => {
+      const pasted = event.clipboardData?.getData("text/plain") || "";
+      event.preventDefault();
+      window.__modelBackedEditorValue = pasted;
+      editor.textContent = pasted;
+      editor.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        composed: true,
+        inputType: "insertFromPaste",
+        data: pasted,
+      }));
+    });
+    editor.addEventListener("input", () => {
+      document.body.dataset.modelBackedEditorDomText = editor.textContent;
+    });
+    const controlled = document.querySelector("[data-testid='controlled-text-target']");
+    window.__controlledInputBeforeInput = null;
+    window.__controlledInputValue = controlled.value;
+    controlled.addEventListener("beforeinput", (event) => {
+      window.__controlledInputBeforeInput = {
+        data: event.data,
+        inputType: event.inputType,
+      };
+    });
+    controlled.addEventListener("input", () => {
+      window.__controlledInputValue = controlled.value;
+    });
+  });
 
   await connectRuntime(page);
 
@@ -4107,6 +4202,30 @@ test("extension implements advertised point and input primitives", async ({ page
   });
   await expect(page.evaluate(() => document.querySelector("[data-testid='text-target']").value)).resolves.toBe("hello extension");
 
+  await callRuntimeAction(page, "extension-text-insert-controlled-input", "text.insert", {
+    text: "9:00 AM",
+    target: { selector: "[data-testid='controlled-text-target']" },
+    mode: "replace",
+  });
+  await expect.poll(() => actionOutput(page, "extension-text-insert-controlled-input")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "text.insert",
+      adapter: "extension",
+      value: {
+        inserted: true,
+        inserted_length: 7,
+        input_method: "native-value-setter+input",
+      },
+    },
+  });
+  await expect(page.evaluate(() => document.querySelector("[data-testid='controlled-text-target']").value)).resolves.toBe("9:00 AM");
+  await expect(page.evaluate(() => window.__controlledInputValue)).resolves.toBe("9:00 AM");
+  await expect(page.evaluate(() => window.__controlledInputBeforeInput)).resolves.toMatchObject({
+    data: "9:00 AM",
+    inputType: "insertReplacementText",
+  });
+
   await callRuntimeAction(page, "extension-text-insert-contenteditable", "text.insert", {
     text: "editable note",
     target: { selector: "[data-testid='contenteditable-target']" },
@@ -4121,6 +4240,28 @@ test("extension implements advertised point and input primitives", async ({ page
     },
   });
   await expect(page.evaluate(() => document.querySelector("[data-testid='contenteditable-target']").textContent)).resolves.toBe("editable note");
+  await expect(page.evaluate(() => document.body.dataset.editableText)).resolves.toBe("editable note");
+
+  await callRuntimeAction(page, "extension-text-insert-model-backed-editor", "text.insert", {
+    text: "model value",
+    target: { selector: "[data-testid='model-backed-editor']" },
+    mode: "replace",
+  });
+  await expect.poll(() => actionOutput(page, "extension-text-insert-model-backed-editor")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "text.insert",
+      adapter: "extension",
+      value: {
+        inserted: true,
+        inserted_length: 11,
+        input_method: "synthetic-paste",
+      },
+    },
+  });
+  await expect(page.evaluate(() => document.querySelector("[data-testid='model-backed-editor']").textContent)).resolves.toBe("model value");
+  await expect(page.evaluate(() => window.__modelBackedEditorValue)).resolves.toBe("model value");
+  await expect(page.evaluate(() => document.body.dataset.modelBackedEditorDomText)).resolves.toBe("model value");
 });
 
 test("extension executes supported primitives declared only in primitive dictionary", async ({ page }) => {
@@ -4290,7 +4431,7 @@ test("extension transfer buffer writes, reads, and inserts rendered data through
   await callRuntimeAction(page, "transfer-write", "transfer.write", {
     label: "linear-import",
     format: "application/json",
-    value: [{ title: "Fix Trello drag primitive", owner: "Zara" }],
+    value: [{ title: "Fix Trello drag primitive", owner: "Alex" }],
   });
   await expect.poll(() => actionOutput(page, "transfer-write")).toMatchObject({
     output: {
@@ -4329,7 +4470,7 @@ test("extension transfer buffer writes, reads, and inserts rendered data through
     },
   });
   await expect(page.evaluate(() => document.querySelector("[data-testid='trello-card']").value)).resolves.toBe(
-    "Fix Trello drag primitive - Zara",
+    "Fix Trello drag primitive - Alex",
   );
 
   await callRuntimeAction(page, "transfer-insert-contenteditable", "transfer.insert", {
@@ -4348,7 +4489,7 @@ test("extension transfer buffer writes, reads, and inserts rendered data through
     },
   });
   await expect(page.evaluate(() => document.querySelector("[data-testid='trello-description']").textContent)).resolves.toBe(
-    "Fix Trello drag primitive - Zara",
+    "Fix Trello drag primitive - Alex",
   );
 });
 
@@ -4464,6 +4605,14 @@ test("extension implements page, DOM, locator text, wait, and keyboard primitive
       },
     },
   });
+  // Matches must carry a ready-to-click point: hosted agents were clicking the
+  // bounding_box top-left corner (a miss) because no center was provided.
+  const observeMatch = (await actionOutput(page, "extension-dom-observe")).output.value.matches[0];
+  expect(observeMatch.clickable).toBe(true);
+  expect(observeMatch.clickable_center.x).toBeGreaterThan(observeMatch.bounding_box.left);
+  expect(observeMatch.clickable_center.x).toBeLessThan(observeMatch.bounding_box.right);
+  expect(observeMatch.clickable_center.y).toBeGreaterThan(observeMatch.bounding_box.top);
+  expect(observeMatch.clickable_center.y).toBeLessThan(observeMatch.bounding_box.bottom);
 
   await callRuntimeAction(page, "extension-dom-list-sections", "dom.list_sections", {
     selector: "section[data-testid='standard-carousel']",
@@ -5684,6 +5833,66 @@ test("locator.element_info clips clickable center to the visible viewport throug
       clickable_center: { x: 150, y: 5 },
     },
   });
+});
+
+test("locator.element_info scrolls clipped scroll-container targets into a clickable position", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [{ name: "locator.element_info", input_schema: { type: "object" } }],
+  });
+
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.setContent(`
+    <section
+      data-testid="modal-scroll"
+      style="position:absolute;left:100px;top:100px;width:260px;height:90px;overflow:auto;border:1px solid black"
+    >
+      <div style="height:170px"></div>
+      <button data-testid="save-button" style="display:block;width:180px;height:36px">Save</button>
+    </section>
+  `);
+
+  await connectRuntime(page);
+
+  await page.evaluate(() => {
+    window.__actionsJsonWebSocket.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "action_call",
+          call_id: "locator-scroll-container-call",
+          name: "locator.element_info",
+          arguments: { locator: { selector: "[data-testid='save-button']" } },
+        }),
+      })
+    );
+  });
+  const output = await readExtensionActionOutput(page, "locator-scroll-container-call");
+  const scrollTop = await page.locator("[data-testid='modal-scroll']").evaluate((element) => element.scrollTop);
+  const scrollBox = await page.locator("[data-testid='modal-scroll']").boundingBox();
+
+  expect(scrollTop).toBeGreaterThan(0);
+  expect(output).toMatchObject({
+    ok: true,
+    primitive: "locator.element_info",
+    adapter: "extension",
+    value: {
+      tag_name: "button",
+      clickable: true,
+      initial_visibility: expect.objectContaining({
+        state: "requires_scroll",
+        scroll_operation: expect.objectContaining({
+          target: "element",
+          delta_y: expect.any(Number),
+        }),
+      }),
+      visibility: expect.objectContaining({
+        state: "visible",
+        fully_visible: true,
+      }),
+    },
+  });
+  expect(output.value.initial_visibility.scroll_operation.delta_y).toBeGreaterThan(0);
+  expect(output.value.clickable_center.y).toBeGreaterThanOrEqual(scrollBox.y);
+  expect(output.value.clickable_center.y).toBeLessThanOrEqual(scrollBox.y + scrollBox.height);
 });
 
 async function readExtensionActionOutput(page, callId) {

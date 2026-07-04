@@ -9,6 +9,10 @@ const dictionaryPath = new URL("../src/primitives/dictionary.v1.json", import.me
 const requiredStage1Primitives = [
   "browser.claimed_tabs.activate",
   "browser.claimed_tabs.list",
+  "browser.navigate",
+  "browser.open_tab",
+  "browser.close_tab",
+  "browser.dismiss_dialog",
   "browser.screenshot",
   "pointer.move",
   "pointer.click",

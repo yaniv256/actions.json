@@ -1,7 +1,9 @@
 mcp/actions-json-mcp/target/
 node_modules/
 dist/
+.actions-json.local.json
 
 test-results/
 playwright-report/
 
+.specify/

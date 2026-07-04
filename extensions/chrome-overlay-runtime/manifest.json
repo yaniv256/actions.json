@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "actions.json Overlay Runtime",
-  "version": "0.1.119",
+  "version": "0.1.148",
   "description": "Experimental actions.json runtime that can render agent-provided HTML overlays on authorized tabs.",
   "action": {
     "default_popup": "popup.html",
@@ -11,8 +11,18 @@
     "service_worker": "src/background.js",
     "type": "module"
   },
-  "permissions": ["activeTab", "debugger", "offscreen", "scripting", "storage", "tabGroups", "tabs"],
-  "host_permissions": ["<all_urls>"],
+  "permissions": [
+    "activeTab",
+    "debugger",
+    "offscreen",
+    "scripting",
+    "storage",
+    "tabGroups",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "web_accessible_resources": [
     {
       "resources": [
@@ -23,7 +33,13 @@
         "src/agent/*.mjs",
         "src/agent/vendor/*.mjs"
       ],
-      "matches": ["<all_urls>"]
+      "matches": [
+        "<all_urls>"
+      ]
     }
-  ]
+  ],
+  "options_ui": {
+    "page": "src/options.html",
+    "open_in_tab": true
+  }
 }

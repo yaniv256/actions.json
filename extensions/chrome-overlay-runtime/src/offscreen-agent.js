@@ -83,6 +83,20 @@ function getManager() {
           state: manager?.getState?.() || null,
         }).catch(() => {});
       },
+      expenditureObserver({ record, meter }) {
+        if (record) {
+          chrome.runtime.sendMessage({
+            type: "actions-json:expenditure-record",
+            record,
+          }).catch(() => {});
+        }
+        if (meter) {
+          chrome.runtime.sendMessage({
+            type: "actions-json:cost-meter-update",
+            meter,
+          }).catch(() => {});
+        }
+      },
     });
   }
   return manager;

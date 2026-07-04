@@ -64,10 +64,17 @@ This repository contains the current public reference implementation for:
 - writing `actions.json` maps with an agent authoring skill;
 - running a Chrome extension that can host a GPT Realtime browser agent with
   your own OpenAI API key;
+- **driving several authorized tabs from one agent** — the agent moves between,
+  opens, and closes tabs and routes each action to the right one, so a workflow
+  can span Gmail, a calendar, and a CRM board in a single session;
 - loading `actions.json.storage` so the hosted agent can use site-specific
   context and actions;
 - exposing actions to external coding agents through a Model Context Protocol
   (MCP) bridge;
+- supervising the hosted agent event-driven, learning of each response, tool
+  call, and stall the moment it happens (`runtime.agent.await_event`);
+- tracking the hosted agent's per-response cost live, with optional persistence
+  of usage records to your own cloud storage;
 - rendering in-page overlays, launchers, screenshots, and structured reports.
 
 A bookmarklet/embed path (running from page JavaScript with no extension) is
@@ -182,7 +189,6 @@ extensions/chrome-overlay-runtime/
 mcp/actions-json-mcp/         MCP bridge for external agents
 examples/                     Public examples
 adapters/npm-bridge/          @actions-json/bridge — the npx wrapper for the MCP bridge
-specs/                        Spec Kit feature work and task records
 scripts/                      Packaging and validation scripts
 tests/                        Repository-level tests
 ```

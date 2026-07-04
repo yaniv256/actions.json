@@ -1,11 +1,15 @@
 {
   "scripts": {
     "build:storage-bookmarklet": "node runtime/actions-json-runtime/bookmarklet/build-bookmarklet-url.mjs",
+    "test:pipeline": "node --test tools/actions-json-pipeline/tests/*.test.mjs",
     "test:runtime": "node --test runtime/actions-json-runtime/tests/*.test.mjs && npx playwright test runtime/actions-json-runtime/tests/*.spec.mjs",
     "test:overlay-runtime": "playwright test extensions/chrome-overlay-runtime/tests/overlay-runtime-characterization.spec.js"
   },
   "devDependencies": {
     "@playwright/test": "1.60.0",
     "terser": "^5.48.0"
+  },
+  "dependencies": {
+    "jsonata": "^2.2.1"
   }
 }

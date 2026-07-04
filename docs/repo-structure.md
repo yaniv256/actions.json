@@ -1,8 +1,3 @@
----
-title: Repository Structure
-nav_order: 9
----
-
 # Repository Structure
 
 This repository is the public source tree for `actions.json` documentation,
@@ -27,7 +22,6 @@ actions.json/
   examples/
   scripts/
   tests/
-  specs/
 ```
 
 Generated directories such as `dist/`, `node_modules/`, `test-results/`, and
@@ -173,15 +167,6 @@ Repository-level tests that do not belong inside one package.
 Package-specific tests may live beside their package, such as runtime tests
 under `runtime/actions-json-runtime/` or extension tests under
 `extensions/chrome-overlay-runtime/`.
-
-## `specs/`
-
-Spec Kit feature work and implementation task records.
-
-These documents are useful for contributors working on active implementation,
-but they are not the first place a user should learn the product. Public docs
-should summarize stable outcomes rather than require readers to reconstruct the
-spec history.
 
 ## Packaging Rule
 

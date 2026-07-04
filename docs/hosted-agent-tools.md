@@ -50,6 +50,15 @@ When the agent chooses one listed action, the agent-facing request is:
 The action must come from a site map that matches the current page. Unknown or
 unmatched actions should fail without executing unrelated site maps.
 
+An `actions.site` call may carry a `timeout_ms` to bound how long the dispatch
+waits before failing — useful for a slow or hanging site action so the call
+returns a timeout instead of blocking indefinitely.
+
+When a tool result is larger than the bridge's inline limit, it is spilled to a
+file and the response returns a path to it instead of the full payload, so a
+large DOM snapshot or session log does not blow the response budget. The inline
+limit is adjustable with `bridge.payloads.configure`.
+
 ## Storage-Backed Context Instead Of actions.context
 
 The current v1 hosted-agent surface does not include a separate
@@ -76,24 +85,64 @@ author decide which knowledge is official, reviewed, and callable.
 When stored actions are missing or insufficient, the hosted agent can use
 direct primitives exposed by the extension runtime.
 
-Common direct tools include:
+Agents should prefer stored actions. Primitives are for exploration, repair, or
+cases where no reviewed site action exists. They fall into these groups.
 
-- `browser.screenshot`: capture the visible authorized tab as image input;
-- `dom.list_sections`: list visible page sections;
-- `browser.extract_elements`: extract structured data from visible element
-  sets;
-- `locator.element_info`: find element geometry and clickable centers;
+**Observe the page**
+
+- `page.info`: basic information about the current page;
+- `dom.list_sections`: list rendered page sections with headings and viewport
+  visibility;
+- `dom.observe.visible`: observe visible DOM candidates matching a selector or
+  text query;
+- `dom.snapshot_text`: return a text snapshot of visible page content;
+- `browser.extract_elements`: extract structured data from visible element sets;
+- `browser.screenshot`: capture the visible authorized tab as image input.
+
+**Resolve and locate**
+
+- `locator.element_info`: resolve a locator to visible element geometry and a
+  recommended clickable center;
+- `locator.text_content`: resolve a locator and return its visible text;
+- `locator.wait_for`: wait for a locator to reach a visible or attached state.
+
+**Act on the page**
+
+- `pointer.move` / `pointer.click` / `pointer.double_click`: move a visible
+  pointer and click at viewport coordinates;
+- `pointer.drag`: drag from one point or locator to another;
 - `viewport.scroll`: scroll the viewport or a scoped scroll container;
-- `pointer.click`: click a viewport point;
-- `browser.claimed_tabs.list`: list tabs the user has authorized for
-  `actions.json` control;
-- `browser.claimed_tabs.activate`: switch to an already-authorized tab;
+- `text.insert`: insert text into the focused editable target or a requested
+  editable locator;
+- `keyboard.press`: dispatch a key or modifier chord to the focused element.
+
+**Manage tabs and dialogs** (see [Claimed Tabs And Tab Lifecycle](#claimed-tabs-and-tab-lifecycle))
+
+- `browser.navigate`, `browser.open_tab`, `browser.close_tab`;
+- `browser.claimed_tabs.list`, `browser.claimed_tabs.activate`;
+- `browser.dismiss_dialog`: dismiss a native JS dialog (alert/confirm/prompt/
+  beforeunload) that is blocking a claimed tab, recovering a wedged tab.
+
+**Move content between tabs** (see [Transfer Buffer](#transfer-buffer))
+
+- `transfer.write`, `transfer.read`, `transfer.insert`, `transfer.clear`.
+
+**Storage, overlay, and session**
+
+- `storage.read_file`: read a declared text file from the loaded storage bundle;
+- `overlay.open`, `overlay.close`, `overlay.register_launcher`, and the
+  `overlay.menu.*` controls (see [Overlay Menu Control](#overlay-menu-control));
+- `runtime.session.name`, `runtime.session.finalize_tabs`,
+  `runtime.session.log`, `runtime.agent.memory_clear`.
+
+**Privileged / authoring**
+
 - `browser.run_javascript`: run declared page-context JavaScript where allowed;
 - `debug.run_javascript`: authoring-only privileged fallback through the Chrome
   debugger.
 
-Agents should prefer stored actions. Primitives are for exploration, repair, or
-cases where no reviewed site action exists.
+Agents should prefer stored actions. Direct primitives require a
+`policy_exception_report` (below).
 
 ### Policy Exception Reports
 
@@ -146,11 +195,11 @@ overlay instead. For click-heavy operations, hide the overlay first, operate,
 then show it again (stored site actions can encode this hide-operate-unhide
 sequence themselves).
 
-## Claimed Tabs
+## Claimed Tabs And Tab Lifecycle
 
 The extension can manage more than one user-authorized tab. This lets a hosted
-agent or external coding agent switch between pages the user has already taken
-control of without asking the user to reauthorize every tab.
+agent or external coding agent switch between and manage pages the user has taken
+control of without reauthorizing every tab.
 
 From the user's point of view:
 
@@ -158,12 +207,48 @@ From the user's point of view:
 2. Use the extension popup and choose **Take control of this tab** on each one.
 3. Ask the agent to switch to the relevant authorized tab when needed.
 
-Agent-facing flow:
+Agent-facing flow for switching between existing tabs:
 
 1. Call `browser.claimed_tabs.list`.
 2. Choose the intended tab from the returned URL/title metadata.
 3. Call `browser.claimed_tabs.activate` with that tab id.
 4. Refresh current-site actions before operating the newly active page.
+
+### Tab-lifecycle primitives
+
+The agent can also move and manage tabs directly, as standalone steps between
+actions (these are tab-lifecycle operations, not workflow steps):
+
+- `browser.navigate`: navigate a claimed tab to a URL (or reload it) and
+  reconnect its runtime;
+- `browser.open_tab`: open a new tab, auto-claim it, and return a ready-to-drive
+  runtime;
+- `browser.close_tab`: close a claimed tab (defaults to the active tab; refuses
+  to close the last remaining claimed tab);
+- `browser.dismiss_dialog`: dismiss a native dialog that has wedged a tab.
+
+### Routing when several tabs are connected
+
+When more than one runtime is connected, a tool call chooses its target by
+`target_runtime_id` (an exact runtime id) or `target_url_contains` (a URL
+substring; it errors if the substring matches more than one tab). If neither is
+given, calls route to the designated **active tab**. An external coding agent can
+set that default with `browser.active_tab.set`; if the active tab disconnects,
+the bridge adopts a remaining connected runtime rather than erroring.
+
+## Transfer Buffer
+
+For moving content between tabs without resending a full payload each time, the
+runtime keeps an extension-local transfer buffer:
+
+- `transfer.write`: store text or structured JSON under a label;
+- `transfer.read`: read a stored item's metadata or payload by label or id;
+- `transfer.insert`: render a stored item and insert it into a target editable
+  element (the payload is not re-sent through the model);
+- `transfer.clear`: clear one item or all items in the session.
+
+This is the mechanism behind cross-tab authoring flows — capture on one page,
+insert on another.
 
 ## Blocked Primitives And Site Policy
 

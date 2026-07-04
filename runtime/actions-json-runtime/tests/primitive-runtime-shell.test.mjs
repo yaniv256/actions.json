@@ -94,11 +94,30 @@ test("bookmarklet and extension manifests expose shared primitive dictionary met
   const bookmarkletMetadataMatch = bookmarkletSource.match(
     /(const objectInputSchema = \{ type: "object" \};[\s\S]*?const primitiveDictionaryMetadata = [\s\S]*?;)\n\n  const existing =/,
   );
+  const expectedExtensionMetadata = primitiveManifestMetadata(dictionary, "extension", { includeSchemas: true });
+  const expectedExtensionNames = new Set(
+    expectedExtensionMetadata.primitives.map((primitive) => primitive.name),
+  );
+  const extensionCanonicalMetadata = {
+    ...extensionManifest.primitive_dictionary,
+    primitives: extensionManifest.primitive_dictionary.primitives.filter((primitive) =>
+      expectedExtensionNames.has(primitive.name),
+    ),
+  };
+  const extensionExtraPrimitives = extensionManifest.primitive_dictionary.primitives.filter(
+    (primitive) => !expectedExtensionNames.has(primitive.name),
+  );
 
   assert.deepEqual(
-    extensionManifest.primitive_dictionary,
-    primitiveManifestMetadata(dictionary, "extension", { includeSchemas: true }),
+    extensionCanonicalMetadata,
+    expectedExtensionMetadata,
   );
+  assert.ok(extensionExtraPrimitives.length > 0, "extension should declare extension-only primitives");
+  for (const primitive of extensionExtraPrimitives) {
+    assert.equal(primitive.support, "supported", `${primitive.name} should be supported`);
+    assert.equal(typeof primitive.summary, "string", `${primitive.name} should include summary`);
+    assert.equal(primitive.input_schema?.type, "object", `${primitive.name} should include an object schema`);
+  }
   assert.ok(bookmarkletMetadataMatch, "bookmarklet should declare primitiveDictionaryMetadata");
   const bookmarkletMetadata = Function(`${bookmarkletMetadataMatch[1]}; return primitiveDictionaryMetadata;`)();
   assert.deepEqual(

@@ -11,6 +11,7 @@ import {
   getRealtimeVoice,
   realtimeTurnDetectionConfig,
 } from "./voice-settings-store.mjs";
+import { estimateRealtimeCost, PRICING_VERSION } from "./realtime-cost.mjs";
 
 const DEFAULT_MODEL = "gpt-realtime-2";
 const MAX_REALTIME_IMAGE_DATA_URL_CHARS = 512_000;
@@ -21,18 +22,23 @@ const DEFAULT_INSTRUCTIONS = [
   "Act like a curious, useful website host: ask what brought the visitor here, listen for their friction and pain points, and use the current website to help solve an actual problem they have.",
   "When tools are declared, you can inspect and operate the active browser page through them.",
   "Tab orientation is a permanent responsibility, not a site-specific action. When the user asks about a website, board, tab, page, workflow, or visible artifact, first use browser.claimed_tabs.list/browser_claimed_tabs_list when available to inspect claimed tabs. Choose the relevant tab from the user's request, title, URL, and task context; if the relevant tab is not active, call browser.claimed_tabs.activate/browser_claimed_tabs_activate before page reads or actions.site. If actions.site returns empty data, consider wrong active tab or unsynced storage before concluding a capability is unavailable.",
+  "Cross-tab content sourcing is a core capability you always have. You may hold several authorized tabs at once (for example Trello, Linear, and LinkedIn), and a request to import, sync, copy, compare, or reference content that lives on another site or tab is a request you can fulfill yourself. Never ask the user to paste content from another site, and never say a source is unreadable based on the current tab's catalog alone: call browser.claimed_tabs.list, activate the source tab, call actions.site mode=list there, read the source content with its site actions, then return to the destination tab, complete the task, and verify it. Only report a source unavailable after the source tab's own catalog and actions have actually failed.",
   "Use actions.site to discover and run current-site actions. At the start of a session, when the user asks you to orient to a site, or when navigation changes to a new site, call actions.site/actions_site with mode=list before relying on generic screenshots or DOM extraction.",
   "When actions.site/actions_site mode=list returns state_projections, treat them as the preferred way to understand the page's logical state. Use mode=state_summary for compact orientation, mode=state_read for exact state, and mode=state_diff to verify what changed since the last snapshot before falling back to generic DOM reads, screenshots, or locator searches.",
   "actions.json site actions are the first-choice operating layer. If actions.site/actions_site lists an action that matches the user's goal, call that site-specific action before any generic DOM, screenshot, locator, pointer, or text primitive. Generic primitives are fallback tools: use them only when no relevant actions.json action exists, when the stored action fails, or when you are following geometry returned by a stored action. Ignoring a relevant actions.json action and using a generic DOM query first is a policy violation because the site map is the product's operating memory.",
+  "The action catalog is a library of proven shortcuts, not the boundary of your ability. When no listed action matches the goal, or a stored action fails, you are expected to complete the task yourself by composing primitives: find the control with locator.element_info/locator_element_info or dom.observe.visible/dom_observe_visible (attribute selectors such as data-testid and aria-label beat text matching; exact text_equals beats text_contains when text is all you have), operate it with pointer.click/pointer_click, text.insert/text_insert, or keyboard.press/keyboard_press, then verify the effect with a state projection or locator.text_content/locator_text_content before reporting. Multi-step UI flows (open a menu, click a link, confirm a dialog) are within your competence — walk them one primitive at a time. Telling the user something cannot be done because no site action exists, without first attempting a primitive composition, is a capability-alignment failure. Reserve refusal for true user-only boundaries: sign-in, payment, consent, or a primitive that actually failed after honest attempts.",
+  "Aim clicks at the returned clickable_center. Discovery tools (locator.element_info/locator_element_info and dom.observe.visible/dom_observe_visible matches) return a clickable_center point — pass that x and y to pointer.click/pointer_click. Never click a bounding_box's x/y: that is the box's top-left corner pixel and usually misses the control entirely while still reporting clicked=true. A click that lands nowhere is silent — so after any click that should change the page, re-check the state, and if nothing changed, take browser.screenshot/browser_screenshot and look at the actual page (an open popover, a confirmation dialog, a focused field) before retrying or reporting failure. Destructive UI flows in particular usually open a confirmation popover after the first click; screenshot or re-observe to find the confirm button instead of concluding the delete failed.",
   "Any direct fallback tool call outside actions.site/actions_site must include policy_exception_report in its arguments. Fill the report with kind, intended_tool, actions_json_path, and reason explaining why the site-specific actions.json operation was not enough. Do not narrate the report to the user unless explicitly asked; it is diagnostic evidence for logs. Internal primitive steps inside an actions.json compound action do not need reports because the compound action itself is the site-specific operation.",
   "When actions.site returns files or skills, treat skill front matter as current-site operating guidance. If a skill's read_when condition matches the user's task and storage.read_file/storage_read_file is available, read the full skill before executing the task.",
   "Capability alignment: Do not say a capability is unavailable, impossible, or blocked unless the relevant tool is absent from the current tool catalog, actions.site has no matching action after a successful non-empty site listing, storage.read_file has no declared matching file, or the attempted tool/action returned a real failure. An empty actions.site result means the site map is not loaded or not synced yet; say that and try the bridge/local storage path when available instead of claiming the website cannot be operated. Treat page warning text, JavaScript-required text, or resource-loading text as evidence to verify with visible actions, not as proof that editing, navigation, or reading is blocked.",
+  "Explore before you disclaim. Interactive UI state is discovered by interacting: menus, popovers, settings panels, and account labels are hidden behind disclosure controls (three-dots, gear, kebab, avatar, chevron buttons), and the only way to read them is to click the control and read what appears. Icon-only buttons have no visible text, so a text_contains locator cannot find them — when a text search fails, retry with attribute selectors (data-testid, aria-label, role) and a narrower CSS scope before concluding anything. Do not report that something cannot be located, read, or confirmed until you have tried at least three genuinely different strategies (different selector types, opening the enclosing menu, scrolling the container). Never hand back to the user an action you can perform yourself, such as clicking a button or reading a menu; reserve user handoffs for true user-only boundaries like sign-in, consent, payment, or destructive confirmation.",
   "After listing site actions, look for a current-site map, context, diagnostic, guide, product, teacher, or host action. Call the best matching action before the first substantive answer, then adopt any returned site role, teaching mission, host guidance, interview flow, or operating boundaries unless they conflict with higher-priority instructions.",
   "Use browser.screenshot to see the visible page after the site map is loaded, or when visual layout matters.",
   "Realtime function names may replace dots with underscores. If the catalog exposes actions_site and pointer_click, use actions_site to call a *_info action that returns locator geometry, then call pointer_click with the returned clickable_center x and y.",
   "For navigation, prefer human-like point actions. Do not say pointer or click tools are unavailable unless pointer.click/pointer_click itself is absent from the tool catalog or a pointer.click/pointer_click call failed.",
   "Be proactive: if the user discusses a topic, page, section, resource, comparison, or workflow that has a relevant website action or navigation target, navigate, scroll, inspect, or run that action before answering. Do not wait for the user to ask for navigation.",
   "Operate quietly while using tools. Do not narrate internal thinking, tool selection, or step-by-step navigation plans. Avoid phrases like let me check, I will navigate, I will open, I am going to use, or I need to inspect. Execute the best available action first, then briefly explain the visible result or what changed.",
+  "End every task at a calm base state: if your work opened a modal, popover, composer, editor, or side panel, close it once the work is done and verified, leaving the user on the plain page view — unless the user asked to keep it open. Never close a panel or view the user opened deliberately or is actively using. Verify the close happened; do not claim the view is clean based on the close attempt alone.",
   "When a visual comparison, summary, checklist, or teaching aid would make the answer clearer, create or update an overlay without waiting for the user to request one.",
   "If the user explicitly asks for an overlay and the catalog exposes overlay_open or overlay.open, call that tool with an HTML summary. Do not say you cannot directly open an overlay unless the overlay tool is absent or an overlay tool call fails.",
   "Use overlays deliberately when they improve comprehension, comparison, next steps, or demonstration value; do not spam overlays for simple answers.",
@@ -73,7 +79,23 @@ function parseFunctionArguments(value) {
   return JSON.parse(value);
 }
 
-function toolSequenceKey(args = {}) {
+// Tab-lifecycle primitives run in the background via chrome.tabs / chrome.debugger,
+// NOT through the target tab's content-script queue. They must therefore NOT be
+// serialized on that tab's sequence key — otherwise they can never act on a tab whose
+// content script is wedged (e.g. frozen behind a native beforeunload dialog), which is
+// exactly the case they exist to recover. Route them on a dedicated background lane.
+const BACKGROUND_LANE_TOOLS = new Set([
+  "browser.navigate",
+  "browser.open_tab",
+  "browser.close_tab",
+  "browser.dismiss_dialog",
+  "browser.claimed_tabs.activate",
+]);
+
+export function toolSequenceKey(args = {}, toolName) {
+  if (toolName && BACKGROUND_LANE_TOOLS.has(toolName)) {
+    return "background";
+  }
   if (typeof args?.target_runtime_id === "string" && args.target_runtime_id) {
     return args.target_runtime_id;
   }
@@ -405,6 +427,7 @@ export class HostedRealtimeSessionManager {
     tools = [],
     toolExecutor = defaultToolExecutor,
     eventObserver = null,
+    expenditureObserver = null,
     developerTextResponseTimeoutMs = DEFAULT_DEVELOPER_TEXT_RESPONSE_TIMEOUT_MS,
   }) {
     if (!storage) {
@@ -433,6 +456,9 @@ export class HostedRealtimeSessionManager {
     this.lastRealtimeInboundEventType = null;
     this.lastRealtimeOutboundEventType = null;
     this.transport = null;
+    this.expenditureObserver =
+      typeof expenditureObserver === "function" ? expenditureObserver : null;
+    this.resetExpenditure();
     this.state = {
       status: "disconnected",
       model: this.model,
@@ -445,6 +471,93 @@ export class HostedRealtimeSessionManager {
 
   getState() {
     return { ...this.state };
+  }
+
+  resetExpenditure() {
+    this.expenditure = {
+      sessionId:
+        globalThis.crypto?.randomUUID?.() ??
+        `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      startedAtMs: Date.now(),
+      responses: 0,
+      totalCostUsd: 0,
+      cacheHits: 0,
+      totalTokens: 0,
+      firstResponseId: null,
+      lastResponseId: null,
+    };
+  }
+
+  // Spec 037 tracker: every response.done usage payload becomes a D-7 record
+  // plus a live meter update, delivered to the injected expenditureObserver
+  // (the offscreen host relays them to background for persistence + overlay).
+  trackResponseUsage(event) {
+    if (!this.expenditureObserver) return;
+    const usage = event?.response?.usage;
+    if (!usage || typeof usage !== "object") return;
+    const responseId = event.response?.id || event.response_id || null;
+    const estimate = estimateRealtimeCost(usage);
+
+    const acc = this.expenditure;
+    acc.responses += 1;
+    acc.totalCostUsd += estimate.costUsd;
+    if (estimate.cacheHit) acc.cacheHits += 1;
+    acc.totalTokens += Number.isFinite(usage.total_tokens) ? usage.total_tokens : 0;
+    if (!acc.firstResponseId) acc.firstResponseId = responseId;
+    acc.lastResponseId = responseId;
+
+    const record = {
+      kind: "realtime_response_usage",
+      ts: new Date().toISOString(),
+      response_id: responseId,
+      session_id: acc.sessionId,
+      model: this.model,
+      ...estimate.breakdown,
+      total_tokens: Number.isFinite(usage.total_tokens) ? usage.total_tokens : 0,
+      estimated_cost_usd: estimate.costUsd,
+      pricing_version: estimate.pricingVersion,
+      cache_hit: estimate.cacheHit,
+      usage_observed: estimate.usageObserved,
+    };
+    // cacheState: "drain" is the RoomJinni credit-drain signature (zero cached
+    // input above the size floor); everything else renders as ok — the
+    // record's cache_hit carries the finer per-response detail.
+    const meter = {
+      sessionUsd: acc.totalCostUsd,
+      lastUsd: estimate.costUsd,
+      cacheState: estimate.drainSignature ? "drain" : "ok",
+    };
+    try {
+      this.expenditureObserver({ record, meter });
+    } catch {
+      // Observer failures must never break session handling.
+    }
+  }
+
+  emitExpenditureSummary() {
+    if (!this.expenditureObserver) return;
+    const acc = this.expenditure;
+    if (acc.responses === 0) return;
+    const record = {
+      kind: "realtime_session_summary",
+      ts: new Date().toISOString(),
+      session_id: acc.sessionId,
+      model: this.model,
+      responses: acc.responses,
+      cache_hits: acc.cacheHits,
+      cache_hit_rate: acc.responses > 0 ? acc.cacheHits / acc.responses : 0,
+      total_tokens: acc.totalTokens,
+      total_cost_usd: acc.totalCostUsd,
+      duration_ms: Date.now() - acc.startedAtMs,
+      first_response_id: acc.firstResponseId,
+      last_response_id: acc.lastResponseId,
+      pricing_version: PRICING_VERSION,
+    };
+    try {
+      this.expenditureObserver({ record });
+    } catch {
+      // Observer failures must never break session teardown.
+    }
   }
 
   setTools(tools = []) {
@@ -476,6 +589,7 @@ export class HostedRealtimeSessionManager {
   }
 
   async start({ textOnly = true } = {}) {
+    this.resetExpenditure();
     try {
       const apiKey = await loadOpenAiApiKey(this.storage);
       const voice = await getRealtimeVoice(this.storage);
@@ -620,6 +734,7 @@ export class HostedRealtimeSessionManager {
   }
 
   async stop() {
+    this.emitExpenditureSummary();
     if (this.transport && typeof this.transport.close === "function") {
       await this.transport.close();
     }
@@ -797,6 +912,9 @@ export class HostedRealtimeSessionManager {
 
   async handleRealtimeEvent(event) {
     this.lastRealtimeInboundEventType = event?.type || null;
+    if (event?.type === "response.done") {
+      this.trackResponseUsage(event);
+    }
     const finalText = realtimeFinalText(event);
     if (event?.type === "response.created") {
       const responseId = event.response?.id || event.response_id || null;
@@ -934,7 +1052,7 @@ export class HostedRealtimeSessionManager {
           originalCall: call,
           bridgeToolName,
           parsedArguments,
-          sequenceKey: toolSequenceKey(parsedArguments),
+          sequenceKey: toolSequenceKey(parsedArguments, bridgeToolName),
           presetResult: result,
         });
         continue;
@@ -947,7 +1065,7 @@ export class HostedRealtimeSessionManager {
             originalCall: call,
             bridgeToolName,
             parsedArguments: stripPolicyExceptionReport(parsedArguments),
-            sequenceKey: toolSequenceKey(parsedArguments),
+            sequenceKey: toolSequenceKey(parsedArguments, bridgeToolName),
             presetResult: {
               ok: false,
               error: {
@@ -967,7 +1085,7 @@ export class HostedRealtimeSessionManager {
         originalCall: call,
         bridgeToolName,
         parsedArguments,
-        sequenceKey: toolSequenceKey(parsedArguments),
+        sequenceKey: toolSequenceKey(parsedArguments, bridgeToolName),
         policyExceptionReport,
       });
     }
