@@ -31,6 +31,15 @@ The project has three cooperating pieces:
 The extension and bookmarklet should share the same primitive dictionary and
 runtime contract. They differ only in host capability.
 
+Do not use privileged extension-only debugger APIs as the stable implementation
+of generic actions. `chrome.debugger`, screenshots, and debugger-world
+evaluation are diagnostic capabilities, not the final semantics of a site action
+or generic primitive. A generic primitive such as `text.insert` must have a
+portable JavaScript-level behavior that can also run in bookmarklet/embed
+runtimes. If an operation requires extension-only privileges, expose it as an
+explicit debug or nonportable capability and do not let site actions depend on
+it for normal operation.
+
 ## Bridge Address Selection
 
 Choose the bridge address based on where the browser runtime actually runs.
@@ -468,6 +477,17 @@ using those coordinates. If navigation fails, inspect `runtime.session.log` by
 boundary before changing prompts, adding primitives, or falling back to
 JavaScript navigation.
 
+A clickable coordinate is not proof of activation. Some controls only respond
+after the page has entered a hover, focus, expanded, or otherwise armed state.
+When a locator resolves with `fully_visible: true` and `clickable: true` but the
+postcondition does not change, do not keep trying nearby coordinates. Identify
+the minimal human-observable activation sequence, such as
+`overlay.menu.hide -> locator.element_info -> pointer.move -> pointer.click ->
+state projection`, then encode that sequence in the site action and verify it
+through the hosted Realtime agent. The action output should report which
+activation steps ran so later investigations can distinguish "could not find
+the control" from "found it but did not activate it."
+
 If a model-facing tool fails with `unknown_action`, `bridge_tool_call_failed`,
 `Failed to fetch`, or a missing required parameter, treat that as a contract
 failure until proven otherwise. Check the bridge tool list, the shipped
@@ -506,26 +526,71 @@ Correct loop:
    `actions.json` and neighboring skill before calling the work complete. Score
    the user's actual capability, not just selector count. A high site-map score
    is not enough if the agent still cannot do the job a visitor expects.
-8. **Iterate until the target score is met**: repair every gap found by the
+8. **Run the production pipeline for durable maps**: before demo, shared, or
+   public preparation, run the offline pipeline from the repo checkout:
+
+   ```bash
+   node tools/actions-json-pipeline/bin/actions-json.js audit <map-or-site-folder>
+   node tools/actions-json-pipeline/bin/actions-json.js score <map-or-site-folder>
+   node tools/actions-json-pipeline/bin/actions-json.js package <map-or-site-folder>
+   node tools/actions-json-pipeline/bin/actions-json.js promotion-prep <map-or-site-folder>
+   ```
+
+   Use `audit` to catch broad selectors, weak mutating-workflow
+   postconditions, and missing declared files. Use `score` to combine
+   mechanical findings with explicit agent/operator readiness judgments. Use
+   `package` after validation runs to preserve the tested map, task list,
+   action log, failures/fixes, score report, accepted gaps, and important
+   screenshot metadata beside the site map. Use `promotion-prep` to create the
+   review bundle before any shared or public copy.
+9. **Iterate until the target score is met**: repair every gap found by the
    score, sync/reload storage, retest through stored actions, and score again.
    Continue until the map reaches the declared quality target, normally at least
    95/100 for production or demo use.
-9. **Reload/sync storage**: push the updated site map to the runtime without
+   For mutating workflows, the mechanical audit must be clean for state-machine
+   shape: no `missing_overlay_invariant`, `missing_mutation_readiness`,
+   `retry_condition_mismatch`, `missing_postcondition`, `weak_postcondition`,
+   or `broad_selector` findings on the mutation path. These are not cosmetic
+   score nits; each corresponds to a known failure mode where an agent can click
+   the wrong surface, wait for the wrong condition, or claim success without the
+   user's requested state changing.
+10. **Reload/sync storage**: push the updated site map to the runtime without
    restarting the bridge.
-10. **Retest using stored actions only**: the proof is that the agent can repeat
+11. **Retest using stored actions only**: the proof is that the agent can repeat
    the workflow without the debugger.
-11. **Record evidence**: update observations/runs/items/overlays so the next
+12. **Harvest failures into authoring principles**: when an action fails, do not
+   treat it only as a local selector or timing bug. First name the general
+   authoring lesson: what assumption was unsafe, what state boundary was
+   unproven, what postcondition was missing, or what workflow shape invited the
+   failure. If the lesson applies beyond the current site, update this skill or
+   the relevant reusable authoring guidance before reworking the site map. Then
+   implement the concrete fix from the improved principle and retest. If the fix
+   fails, iterate on the principle, not just the selector.
+13. **Record evidence**: update observations/runs/items/overlays so the next
    agent can see what was tested and why. For validation runs, use
    `skills/references/run-evidence-template.md` — every success claim names its
    evidence, failures link to the matching failure pattern, and `untested` is
    mandatory.
-12. **Promote or sync public artifacts**: when guidance is reusable and safe,
-   mirror it into the public skill/storage surface rather than leaving it only
-   in private scratch space.
+14. **Promote or sync public artifacts**: when guidance is reusable and safe,
+   first run `promotion-prep` and review redaction/attribution status. Shared or
+   public writes are outside v1 automation and require explicit operator
+   approval. Then mirror approved guidance into the public skill/storage surface
+   rather than leaving it only in private scratch space.
 
 Do not solve the user's task with `debug.run_javascript` and stop there. That
 creates a one-off success and loses the learning. The debugger's output is raw
 material for an `actions.json` action.
+
+### Pipeline Findings Are Map Work, Not Runtime Work
+
+Treat production-pipeline findings as action-map quality signals. Fix broad
+selectors by scoping the map. Fix weak postconditions by adding state-backed
+verification. Fix missing declared files by creating or removing the declaration.
+
+Do not use pipeline findings to paper over runtime or bridge failures. If a
+primitive is missing from MCP `tools/list`, the bridge launched with an old
+manifest, the extension handler is stale, or runtime routing is broken, repair
+that contract at the runtime/bridge layer before changing the site map.
 
 ### Compound Workflow Actions
 
@@ -542,6 +607,174 @@ Use workflow actions for common patterns:
 - scroll until a target becomes visible, then return its geometry;
 - open a composer, insert text, press Enter, then verify with a read action;
 - repeat a read action over a bounded list of candidates.
+
+### Workflows Are State Machines, Not Optimistic Macros
+
+Do not write a mutating workflow as one long hopeful script that assumes every
+prior click produced the intended UI state. A workflow that resets page state,
+finds an object, opens it, opens a nested editor, mutates it, closes it, and
+claims success without proved boundaries is fragile even if it passes once.
+
+Design mutating workflows as explicit state machines:
+
+1. **Precondition**: prove the starting surface. If the page might be on a modal,
+   route, popover, drawer, or horizontally scrolled region, add an action or
+   step that returns to the intended surface and then verifies that surface.
+   `Escape` or `Back` is not a state reset unless a read step proves the result.
+   A prose precondition in the action description is not enough. If an action
+   depends on a route, modal, editor, popover, selected object, active tab, or
+   scroll region, declare it in `workflow.x_state_machine.requires_state` and
+   assert the same selector/text in a pre-mutation `locator.wait_for`,
+   `locator.element_info`, or `locator.text_content` step.
+   If a workflow is completing, checking off, closing, or otherwise updating an
+   item that lives on an owner surface, the owner surface is part of the
+   precondition. For example, a validation checklist item lives on the validation
+   card, not on the temporary card created while doing the validation. Remember
+   the owner identity before navigating away, return to it before the completion
+   mutation, and assert that the exact item exists on the owner surface before
+   clicking anything.
+2. **Readiness**: prove the specific next control exists before mutating it.
+   Container readiness is not control readiness: a card title being visible does
+   not prove the `Dates` badge, `Remove` button, save button, or target menu item
+   is mounted and clickable.
+3. **Transition**: perform one visible operation from a proved state, such as
+   opening a card, composer, menu, popover, or editor. Bind pointer coordinates
+   to the readiness step's `clickable_center`; do not click constants or broad
+   candidate lists and hope downstream filtering picked the right target.
+4. **Postcondition**: immediately read the new state with a locator, text read,
+   candidate action, or state projection that proves the transition occurred and
+   proves the target object is the intended object.
+5. **Next transition**: only continue after the postcondition succeeds. If it
+   fails, stop with a useful failure rather than clicking the next control in a
+   stale state.
+6. **Cleanup/recovery**: leave the page in a known state for the next call, and
+   make the failure boundary recoverable. Close popovers/modals that the next
+   call would otherwise inherit, and restore agent-owned overlays only after the
+   mutation/postcondition boundary.
+7. **Final verification**: for user-visible mutations, verify the logical state
+   changed through a state projection or equivalent read. A clicked button,
+   successful workflow result, or closed modal is not enough.
+
+Editor and rich-text actions need stricter identity than ordinary buttons:
+
+- Do not fall back from a semantic editor locator to generic
+  `textarea`/`[contenteditable='true']` within a modal. That can type into a
+  title, comment box, checklist item, search field, or another rich-text surface.
+- The text insertion target must itself carry semantic identity: `aria-label`,
+  `placeholder`, `data-testid`, a known editor-body class, or a verified wrapper
+  specific to the intended field. If the site has separate title/body editors,
+  prove which one is active before typing.
+- Rich-text replacement must follow the browser/editor editing path. Do not
+  clear `textContent` on a contenteditable and then insert text; controlled
+  editors such as ProseMirror/Atlassian Editor can show the mutated DOM while
+  keeping a different internal document model, so Save commits stale or empty
+  state. Replace by focusing the semantic editor, selecting the editor contents,
+  inserting text through a native/user-equivalent input path when available, and
+  verifying the saved projection after the component's own commit control runs.
+- For portable runtimes, prefer JavaScript-level editor event surfaces before
+  DOM mutation. A synthetic `paste`/`beforeinput` path that the editor handles is
+  more likely to update the editor's internal model than direct `textContent`
+  replacement. Extension-only debugger input can be used to diagnose a page, but
+  it must not become the final implementation of a generic primitive or site
+  action.
+- Commit controls must be scoped to the same component as the editor. A generic
+  `button` with text `Save` inside a modal is not enough when the modal can
+  contain description, checklist, comment, label, and date editors. Prefer a
+  component-specific commit selector such as a field-specific `data-testid` or
+  an adjacent control inside the verified editor wrapper, and treat commit
+  settle timeouts as failures rather than recoverable noise.
+- After opening an editor, assert the editor body state before `text.insert`;
+  after insertion, assert the associated Save/commit control or a verified
+  autosave signal before claiming success.
+- Treat a pre-save DOM observation as an intermediate diagnostic, not a pass
+  condition. The action contract is only satisfied after the site commit
+  boundary has run and a reopened modal, refreshed projection, or other
+  persisted state surface contains the exact requested value.
+- If navigation, route change, modal close, or lost selectors occur between
+  steps, stop at that boundary. Re-open/re-align and reassert
+  `requires_state`; do not keep executing mutation steps against stale state.
+
+When supported by the runtime, add `workflow.x_state_machine` metadata with the
+states the workflow implements (`precondition`, `readiness`, `mutation`,
+`postcondition`, `cleanup`, `recovery`) so reviewers and mechanical audit tools
+can distinguish deliberate state transitions from click transcripts.
+
+Prefer small composable actions for repeated UI boundaries:
+
+- `surface.ensure_open` or `surface.reset_and_verify`;
+- `object.open_by_identity`;
+- `object.editor.open_and_verify`;
+- `editor.mutate`;
+- `object.verify_state` or a state projection read.
+
+Then expose a higher-level recipe or orchestration action only after the smaller
+actions are independently validated and their preconditions are documented. If a
+high-level action is still useful, it should call or inline the same proved
+state boundaries and should be validated by repeated consecutive calls, because
+single-call validation does not expose stale route/modal/popover state.
+
+The Trello due-date clear failure is the canonical warning pattern: an action
+that worked once failed under repeated calls because it assumed `Escape` returned
+from `/c/...` card routes to a clean board state and assumed the existing
+due-date badge would be visible before opening the date popover. The right fix is
+not "add another retry"; it is to make route/modal reset, card identity,
+date-editor opening, removal, and board-state verification separate proved
+boundaries.
+
+Do not make an internal selector the identity of a user-visible control when the
+page already exposes a logical value. Internal attributes such as `data-testid`
+are useful fast paths, but they can vary by layout, route, account state,
+responsive breakpoint, or component implementation. For stateful controls, carry
+the visible state fact from a projection or prior read into the action, then
+select the control by that visible fact and geometry. Examples: choose a due-date
+button by the visible date text (`Jun 18`) rather than only by Trello's internal
+date-badge test id; choose a move-list option by the visible list name rather
+than by option order; choose a label by visible label text/color rather than a
+generated DOM id. Treat internal selectors as accelerators, not the proof of
+identity.
+
+Resolve semantic user intent to exact state before parameterized mutations.
+Users say "the matching validation item", "the next unfinished task", "the
+relevant row", or "that contact"; mutating actions usually need exact strings,
+ids, positions, or visible labels. Do not let the model invent those parameters
+from the user's phrasing. Provide a low-token projection for the current surface
+that lists the candidate entities with exact user-visible text and state, then
+instruct the agent to copy an exact value from that projection into the mutation
+action. Keep the mutator strict: if the exact item is absent, it should fail
+rather than click a nearby or paraphrased target. The Trello checklist failure is
+the canonical example: "mark the matching validation item complete" must first
+read unchecked checklist items, bind the completed work to an exact checklist
+item string, and only then call the exact checklist completer.
+
+Treat validation and progress markers as evidence gates, not bookkeeping. A
+checkbox, status label, progress badge, or "validated" field must only be
+mutated after the underlying requested operation has succeeded and a projection
+proves the requested outcome. If the agent cannot perform or verify the
+underlying operation, it should report the blocker and leave the marker
+unchanged. Provide a repair action for false positives when the UI supports it
+(for example, unchecking a validation item), but do not rely on repair as the
+normal path. The Trello Linear-import failure is the canonical example: the
+agent could not see or import a Linear task, yet checked the Linear validation
+item; the fix is to gate checklist completion on verified import evidence and
+provide an exact `uncomplete` recovery action.
+
+When a task depends on provenance, keyword matches are not evidence. "Imported
+from Linear", "copied from LinkedIn", "synced from email", and similar claims
+require a source projection that carries origin evidence: a source URL, issue
+key, profile URL, transfer-buffer record, copied payload, or authorized source
+tab state. A target app record whose title merely contains the source product's
+name is not enough. Encode provenance-bearing projections and make completion
+or validation actions depend on them instead of letting the model infer origin
+from matching words.
+
+Cross-tab workflows must discover capabilities on the source surface before
+refusing. A destination catalog such as Trello cannot prove whether Linear or
+LinkedIn body-read actions exist. For transfer tasks, the agent must list
+claimed tabs, activate the source tab, inspect that source site's `actions.site`
+catalog, and attempt the relevant source projection before saying source details
+are unavailable. Encode this explicitly in destination-site guidance, because a
+hosted agent may otherwise see only the destination actions and prematurely
+refuse.
 
 Workflow v1 uses JSONata expression slots for data binding. Use whole-string
 expression slots only:
@@ -657,6 +890,69 @@ next to the site actions. A state projection turns DOM records into compact
 logical JSON that the agent can use for orientation, verification, and deltas.
 Use this when screenshots or raw DOM reads would be expensive, ambiguous, or
 too page-shaped for the task.
+
+Projection coverage is a first-class part of authoring an `actions.json`, not a
+nice-to-have after the click paths work. For every important state the map can
+navigate into, the map should also provide a named, low-token projection or
+read action that tells the agent what is currently true in that state. A board
+needs a board projection; an opened card needs a card-detail projection; a
+popover needs a popover projection; a modal editor needs an editor projection.
+If the agent can open a state but cannot inspect it structurally, the map is
+not complete for that state.
+
+This is the replacement for screenshot-driven operation. Screenshots are useful
+evidence during authoring, but they are token-heavy and visually ambiguous.
+The finished map should let the hosted agent orient itself with compact JSON:
+identity, visible controls, selected values, editable fields, rows/items, and
+any truncation or virtualization limits. A projection that only returns "some
+text from the modal" is not enough when the state has separate logical parts
+the agent must act on, such as title, list, labels, due date, description,
+checklists, and comments.
+
+Spatial coverage is part of projection coverage. Build site-specific
+projections from reusable spatial primitives instead of hand-inventing geometry
+for every site. The runtime should provide standard building blocks such as
+viewport bounds, clipping containers, scroll ranges, visible rectangles,
+scroll-reachable targets, and progressive-loading frontiers. The site projection
+then translates those generic facts into domain language: Trello lists/cards,
+options rows, conversations, table pages, or modal fields.
+
+A robust projection does not only say what is visible right now; it
+distinguishes three layers:
+
+1. **Clickable now**: controls/items whose visible rect is large enough for a
+   user-like pointer click.
+2. **Scroll-reachable now**: rendered controls/items outside the current clipped
+   region, with the scroll container, axis, and delta needed to bring them fully
+   into view.
+3. **Load frontier**: scroll boundaries or virtualized regions where more
+   content is expected to appear only after scrolling, with `complete: false`
+   and a reason such as `virtualized`, `infinite_scroll`, or
+   `collapsed_until_scrolled`.
+
+When a locator fails, do not collapse these into `target_not_found`. First ask
+whether the element is absent, rendered-but-clipped, partially visible, or
+blocked behind a load frontier. Good actions expose that geometry to the agent
+so it can make one measured scroll, then verify visibility before clicking.
+
+Author state coverage alongside navigation:
+
+1. For each state in `states[]`, add at least one projection or read action that
+   answers "what can the agent see and decide from here?"
+2. For each mutating action, name the projection that proves the postcondition.
+3. For each nested surface opened by an action, add a matching projection before
+   declaring the action reliable.
+4. Include coverage metadata when the page virtualizes or collapses data:
+   `complete: true/false`, visible item counts, expected counts when visible,
+   and a clear `truncation_reason` instead of silently returning partial state.
+   If the page hides completed rows, filters items, or virtualizes long lists,
+   the projection must say so explicitly and must not let the agent infer that
+   missing rows are absent. A checklist projection that returns only mounted
+   rows must expose the visible count, known total/progress when available, the
+   filter/collapse state, and a next action for revealing or scrolling more
+   rows.
+5. Prefer several focused projections over one giant raw text dump. The goal is
+   low-token situational awareness at every step of navigation.
 
 Use the standard stack:
 
@@ -798,6 +1094,80 @@ selector each (`list-wrapper`, `list-card`) with anchored field sub-selectors
 cut the state from over 32 KB to 8.9 KB with exact entity counts, and diffs
 of a single card creation produced exactly two patch operations.
 
+### Validate Through The Hosted Realtime Agent
+
+Direct MCP calls prove that a primitive or stored action can execute. They do
+not prove that a GPT Realtime user-facing agent can choose the right operation,
+sequence it correctly, recover from intermediate state, and explain the result
+honestly. For any action map meant for the hosted voice agent, the acceptance
+test is a conversation with the hosted Realtime agent.
+
+Treat this as the normal development cycle for production-grade maps:
+
+1. Write or update the projections and actions.
+2. Sync storage into the connected runtime.
+3. Start or restart the hosted Realtime agent in text-only mode when doing
+   developer validation.
+4. Send a user-style task prompt with `runtime.agent.user_message`.
+5. Read `runtime.session.log` and inspect transcripts, tool calls, tool
+   outputs, and failures.
+6. Assign blame at three levels: the local map/action line, the abstract
+   anti-pattern, and the authoring style principle that would have prevented it.
+7. Update the authoring principle or site-specific skill when a general lesson
+   exists, then update the action map.
+8. Repeat with a fresh user-style prompt until the hosted agent completes the
+   task reliably and verifies its own result through projections.
+
+Restart the hosted validation session after changing action descriptions,
+available actions, neighboring skills, or projection names. `storage.sync`
+updates what the runtime can execute, but an already-running model may continue
+from old catalog context, old plans, or old failure memories. A same-session
+retry is useful for recovery testing; it is not a clean discovery test for a
+new or renamed operating surface.
+
+User-style means the prompt should sound like a real user, not like an
+actions.json author. Do not tell the hosted agent DOM selectors, primitive
+names, action names, projection names, internal IDs, or the expected tool
+sequence unless the test is explicitly a diagnostic catalog test. A real user
+says, "Move the Record demo card to today" or "Read the checklist on this card
+and do each item." They do not say, "Call `trello.card.detail.read`, then scroll
+`.window main` by 500 pixels." If the agent only succeeds with internal hints,
+the map or prompt context is still incomplete.
+
+Build a user-task regression set from the real work the agent is expected to do.
+Each test prompt should describe the desired outcome, the relevant public object
+name, and any safety boundary a user would know, such as "do not edit the demo
+card." It should not describe how the agent should navigate, which action to
+call, what selector to use, or which projection will prove success. The point of
+the test is to verify the hosted agent's judgment over the map, not the
+author's memory of the map internals.
+
+When the goal is reliability, test the same way the product will be used:
+simulate a human asking for real work in ordinary language. The test prompt
+should not mention internal operation names, DOM element names, action-map
+terminology, workflow steps, or state-projection labels. If the task is "clear
+the due dates from these three cards," ask exactly that; do not ask the agent to
+call the due-date clearer, open the date popover, inspect a named projection, or
+use a particular selector. The reliable unit is the whole hosted-agent loop:
+user intent to agent interpretation to projection-based orientation to action
+selection to verified website state.
+
+Keep the loop honest by making the hosted agent do the operation. Do not perform
+the website task yourself through direct MCP calls and then count that as
+validation. Direct calls are for diagnosis, mechanism discovery, and proving a
+candidate fix before encoding it. The acceptance run is the hosted agent
+receiving a normal user request, choosing actions from the catalog, using
+projections to orient itself, mutating only the intended state, and reporting
+what it verified. If the hosted agent needs a detailed script from the author,
+the `actions.json` is not yet an operating surface.
+
+After each failure, extract the reusable failure mode. The output should not be
+only "selector X was wrong"; it should name the robust interaction style the map
+must teach. Examples: "opened state needs its own projection," "batch work needs
+an external queue," "custom selects require selected-option verification,"
+"offscreen content requires a named scroll action for the correct container."
+Encode the principle first when it generalizes, then encode the local fix.
+
 ### Adversarial Scoring Rubric
 
 Every non-trivial site map needs an explicit quality score. Write the score in
@@ -853,7 +1223,11 @@ have checked whether the website map is missing state, preconditions, or a
 portable path.
 
 Route from the symptom you are seeing to the pattern that explains it before
-proposing any fix:
+proposing any fix. This table is a menu of candidates, not a lookup that returns
+one answer: a single symptom row often lists several patterns because the symptom
+is generic and the causes are many. Read *Explanation Attractors* below before
+committing to any one of them — the discipline there is what keeps this table
+from becoming a machine for confirming your first guess.
 
 | Symptom | Read first |
 |---------|-----------|
@@ -869,6 +1243,16 @@ proposing any fix:
 | The agent plans a multi-item job, does one or two items, and declares it done | Batch Jobs Stall Without An External Queue |
 | A model-facing tool returns `unknown_action` or a missing-parameter error | Verify Tool Availability By Contract (above) |
 | The agent hunts a page section with repeated small scrolls | Scroll With Measured Targets |
+| `verified: false` on a mutation that visibly succeeded | Normalize Whitespace At Verification Boundaries; Verify URLs By Href, Never By Visible Text |
+| A pasted URL is missing from every text projection of the page | Verify URLs By Href, Never By Visible Text |
+| Open-by-key/id fails on a page where a link to the target is plainly visible | Bind Targets By Canonical Attributes, Not Rendered Text |
+| Click on a `fully_visible` element does nothing and the overlay is already hidden | The Overlay Occludes The Page It Operates (site-native sticky occluders) |
+| A screenshot shows the content but a DOM read of the same page returns empty/boilerplate | Suspect The Frame Before The Load: Reads Are Scoped To One Document |
+| A projection/read returns 0 items on a page that visibly has them, right after an in-page navigation | Suspect The Frame Before The Load; Navigation Is Often Stateful |
+| A synthetic keystroke fires `keydown`/`keyup` but no text appears | Synthetic Keyboard Does Not Insert Text; Use `text.insert` |
+| A field's value is set and visible but is lost/blank in the saved record | Some Widgets Commit From An Async Model, Not The DOM Value |
+| The same author action succeeds once and fails once with nothing changed | Flaky Means A Race Or Dirty State, Not A New Theory |
+| Recovering a wedged tab drops other tabs | Do Not Force A Reconnect To Recover One Tab (in Runtime Hosts) |
 
 ### Navigation Is Often Stateful
 
@@ -1091,6 +1475,21 @@ postcondition still falls through to the restore. Verify the un-occlusion before
 encoding: hide the overlay, then confirm `elementFromPoint` at the target's
 center now returns the target element.
 
+The occluder is not always the overlay. Sites have their own sticky headers,
+toolbars, and floating bars that cover controls when an inner container is
+scrolled — and `locator.element_info` reports geometry only, so a covered
+control still reads `fully_visible: true` with an empty `clipped_by`. Trello's
+card modal is the canonical example: with the modal's inner `main` scrolled
+down, the sticky title header sits over the Description "Edit" button, and
+`pointer.click` at its center lands on the header. When a click on a
+"fully visible" element does nothing and the overlay is already hidden, check
+`elementFromPoint` for a *site* element on top, then encode a scroll-to-known-
+position step (for example `viewport.scroll` with a large negative `delta_y`
+scoped to the correct inner scroller) before the find/click sequence. Beware
+nested scrollers when scoping that scroll: a combined selector list resolves in
+document order, so `"[role='dialog'] main, [role='dialog']"` scopes to the
+outer dialog, not `main` — scope to the actual scrolled container only.
+
 ### Postconditions Must Assert The Specific Result, Not "Something Happened"
 
 A mutating action that opens or selects a specific object must verify that **the
@@ -1116,6 +1515,87 @@ locator (`[data-testid='card-back-name']` with `text_contains: "{% input.title
 honest result in the action's `output` (for example a boolean
 `card_back_open`) so the caller or recipe can gate on it, rather than reporting
 unconditional success.
+
+Verification reads must also bind target identity. A broad board, list, table,
+or page projection that returns `ok` but omits the target object is not
+verification. If a workflow creates a card in `Next Up`, a later board read that
+only returns `Backlog` and `To Do` cannot prove the card exists, even if the
+creation action itself returned success. The verifying output must contain the
+exact title, source URL or provenance marker when relevant, and expected
+container when placement matters. If the projection is spatially partial, either
+scroll/read until the target appears or use a title-scoped verification action
+that navigates to the target; otherwise report verification as incomplete.
+
+For parameterized mutations, bind every requested parameter in the proof. A
+date action that was asked for "tomorrow at 9:00 AM" has not succeeded because
+some due-date badge exists; it must prove the concrete day and time, or fail
+before any follow-on action can mark validation complete. A label action must
+prove the requested label, a move action must prove the requested destination,
+and an editor action must prove the requested saved text. If a required
+sub-step fails, the recipe must stop at that boundary. Do not let the agent save
+partial state and then complete a checklist item from a weaker, generic
+projection.
+
+If an action returns both transport success and a domain-specific verification
+field, the verification field governs the user claim. `ok: true` means the
+workflow ran; `verified: false` means the requested state was not proven. For
+long text writes where the UI projection can truncate, add a short
+`verify_contains`/sentinel parameter and verify that distinctive substring
+instead of pretending a full-body comparison passed.
+
+For controlled inputs, prove the framework-observed value, not just the DOM
+property you changed. React-style inputs can briefly show a value that the
+application model later discards. A text primitive or site action should emit
+native-value-setter/input semantics and a state projection should read the
+field's committed `value`; the final mutation should then verify the saved
+application state after the control's own Save/commit operation.
+
+### Bind Targets By Canonical Attributes, Not Rendered Text
+
+When an element carries a canonical identity attribute — an `href` containing
+an issue key, an `id`, a `data-testid` with the object key — bind the locator
+to that attribute alone. Do not add a `text_contains` for the same identity:
+rendered text varies by surface while the attribute does not. A Linear issue
+link shows `ACT-111` in an issues list but shows only the issue *title* in a
+relations/related-issues section; a locator that demands both
+`a[href*='/issue/ACT-111']` and `text_contains: "ACT-111"` fails on the second
+surface even though the link is right there, and the failure classifier may
+blame something else entirely (the overlay, visibility). Over-binding is as
+real a failure mode as ambiguity. Tighten the attribute instead: append a
+delimiter so prefixes cannot alias (`/issue/ACT-11/` does not match
+`/issue/ACT-111/`). Reserve `text_contains` for elements whose only identity
+is their text.
+
+### Verify URLs By Href, Never By Visible Text
+
+Rich-text surfaces convert pasted URLs into titled smart links: Trello renders
+`https://linear.app/...ACT-111...` as "ACT-111: Prepare …" and a homepage URL
+as the page's `<title>`. The raw URL text is *gone* from every text projection
+— `modal_text`, `dom.snapshot_text`, full-body reads — while the URL survives
+intact as the anchor's `href`. Consequences for authoring:
+
+- A text sentinel (`verify_contains`) must be **URL-free**. A sentinel that
+  embeds the source URL verifies `false` forever after the site unfurls it,
+  even though the save succeeded — and a false-negative verification teaches
+  the agent to re-run the mutation, which overwrites the saved formatting.
+- Source-provenance checks (the Linear URL on a synced card) need a dedicated
+  **link projection**: extract the anchors in the description/body scope with
+  their `text` and `href` fields and match the href. Give every site map whose
+  workflows write URLs into rich text such a projection.
+
+### Normalize Whitespace At Verification Boundaries
+
+A sentinel copied from a source document carries newlines; a DOM text
+projection is space-joined and can carry non-breaking or zero-width characters
+that print like spaces. A literal `$contains` across those two representations
+fails on identical content. Any verification that compares agent-supplied text
+against projected page text must collapse whitespace on **both** sides first
+(`$replace(x, /[\s\u200B\u200C\u200D\uFEFF\u00A0]+/, ' ')`), in every layer
+that compares — the workflow output expression *and* the state postcondition;
+fixing one and not the other leaves the action failing with a different
+message. Locator `text_contains` matching already normalizes, so a workflow
+can pass its locator step and still fail a literal output comparison on the
+same text: two layers, two verdicts, one string.
 
 ### Scroll Both Axes; A Container Can Hold An Off-Screen Element
 
@@ -1244,6 +1724,304 @@ After diagnosing a failure, update the relevant `actions.json` file immediately.
 The new action should encode the missing precondition or state transition, not
 just the final endpoint. Then sync storage and repeat the user's workflow using
 only stored actions.
+
+### Explanation Attractors: The Reasoning Bug Behind The Wrong Stories
+
+> **Yaniv's Rule (the maximum-pain principle).** When several explanations
+> compete, rank them by how much each *hurts to accept*, and test the most
+> painful one first. Pain is a proxy for truth. In debugging, the sharpest form
+> of that pain is embarrassment: the most personally embarrassing explanation —
+> usually that you were stupid in your own actions — is the most likely one, so
+> start by trying to eliminate it.
+
+The general principle is bigger than debugging: **truth and pain are positively
+correlated.** Not because truth must hurt, but because the mind routes around
+pain — comfort is the bias — so the explanation you are motivated to avoid is the
+one your comfort-seeking already filtered out before you noticed. Whatever
+survived that flinch and still stings is precisely where you have not been
+looking. So the painful candidate is not merely *tolerable* as an answer; its
+pain is *evidence for* it. Rank by hurt, test the top of that list first.
+
+**Why the pain is evidence (the suppression-tax argument).** A painful
+explanation reaches your awareness only after paying a tax: comfort-seeking
+suppressed its felt probability *before* it could surface. What you notice is
+roughly (true probability) × (a suppression factor well below 1 for anything
+that hurts). So the very fact that a painful hypothesis got conceived *at all* —
+against that headwind — means its true probability had to be large enough to
+overcome the penalty. The pain is a headwind; anything that crossed the line
+despite it was running far faster than it looks. Felt salience *understates* a
+painful hypothesis, so correct upward: the more it hurt and the more surely you
+still thought it, the higher you rank it.
+
+**It is a gradient, not a switch — and that is the advance.** "It's your fault,
+not the tool" is a binary: once you accept it is you, it falls silent and gives
+no further direction. The maximum-pain principle keeps resolving *inside* the set
+of causes that are all your own. When five candidates are all your mistake, they
+are not equal — one paints you as merely careless, one as negligent, one as
+having fooled yourself for an hour. The same suppression tax applies within the
+group, so rank those five by how bad each would make you look and test the worst
+one first. This is the move no prior adage makes: it gives you a direction even
+after "whose fault" has already been answered.
+
+That is the whole section in one line, and it is operational: **the wince is a
+proxy for probability.** You do not have to reason your way through priors and
+biases in the moment — just ask, of the candidates on the table, *which one would
+hurt most to admit?* and test that one first. In website mapping the pain is
+almost always embarrassment (you clicked the wrong spot, read the wrong frame,
+never checked your own write); in larger work it wears other faces — cost, loss,
+"the thing I built is the thing that is broken," "I was the bottleneck." Same
+razor, different flavors of hurt, all pointing the same direction. The wince is
+the signal.
+
+It is Murphy's Law's debugging cousin: not "anything that can go wrong will," but
+"of the ways it went wrong, the one you'd least like to own is the one to check
+first." Its nearest named ancestor is the 1980s adage *Select Isn't Broken* (The
+Pragmatic Programmer) — "it's always your fault, not the OS/library" — but that
+one is dated to a Solaris syscall nobody debugs anymore, and it only asserts *it
+is you*. Yaniv's Rule keeps the truth and drops the mustiness: it gives the
+operational ranking key (rank by pain, test the most painful first) and it
+travels — it lands the same on a soft-nav iframe, a DPR coordinate bug, or a
+model confabulating a tool call as it did on a Solaris box. Everything below is
+why this rule is true and how to run it.
+
+Before the instruments, name the failure honestly, because it is upstream of any
+one wrong guess. The bug is not "I picked a bad hypothesis." The bug is the
+**shape of the reasoning**:
+
+1. A symptom appears ("my clicks are ignored," "the projection is empty").
+2. One explanation surfaces that *would* account for it ("trusted-input wall,"
+   "the page didn't load").
+3. It fits. The "that explains it" click fires, and the search **stops there.**
+
+Every step of that is a trap. An explanation that *would* account for the symptom
+is not evidence the explanation is *true* — it is one member of a large set of
+causes that would all produce the same symptom. "Clicks are ignored" is
+consistent with: wrong coordinates (DPR scaling), an occluding overlay, a
+response-ack stall (the click worked, the reply didn't return), the wrong frame,
+a disabled control, a not-yet-hydrated handler, and a trusted-input gate — among
+others. Picking the first one that fits and moving on skips the only step that
+matters: **discriminating among the candidates.**
+
+Worse, the explanations you reach for first are not random. They are
+**attractors in explanation space** — low-effort, high-availability stories that
+your prior turns and training make cheap to generate: "trusted input,"
+"React-controlled," "still loading," "the selector changed." Their availability
+is exactly why they are so often wrong: you produce them *because they are easy
+to produce*, not because this page earned them. The tell that you are caught in
+an attractor is that **you have offered this same explanation before and it was
+refuted before** — and you reached for it anyway. If a hypothesis has failed you
+in the past, its prior is *lower*, not higher; the pull you feel toward it is a
+bias to correct, not a signal to follow.
+
+There is a common thread running through the attractors, and it is the real tell:
+**they all blame something other than the operator.** "The site rejects synthetic
+clicks," "the page didn't load," "the tab is hung," "the field is controlled,"
+"the selector drifted" — every one puts the fault in the website, the browser, or
+the framework. Not one of them is "I clicked the wrong coordinates," "I read the
+wrong frame," "I typed the value but never verified it landed," "I saved before
+it committed," "I sequenced two actions and left a popover open." The bias is not
+toward *simple* explanations; it is toward **exculpatory** ones. That is why they
+survive refutation: accepting the true cause means accepting that the operator —
+you — did the wrong thing. Use this as a razor. When two explanations both fit
+the symptom, the one that blames the page is the one to distrust first, and the
+one that implicates your own last action is the one to test first — precisely
+because it is the one you are motivated not to look at. Point the first
+experiment at your own move.
+
+The discipline that breaks the attractor is not a mindset, it is an artifact you
+**write down** before you touch an instrument: a short list of candidate causes,
+explicitly ranked. Producing the list defeats sufficiency-stopping (you cannot
+stop at the first item if the step is "list several"); ranking it defeats the
+exculpatory pull (the story you *want* is forced to compete on paper against the
+one that blames your own move). Do it literally, every time:
+
+1. **List at least three distinct causes** that would produce this symptom. If
+   you can only think of one, you are not done — the symptom is generic and the
+   causes are many. "Clicks ignored," "read empty," "value not saved" each have a
+   standard menu; write the menu, not the first item. Include at least one cause
+   that is *your own last action* (wrong coordinates, wrong frame, unverified
+   insert, save-before-commit, a stale popover) — it belongs on every list.
+2. **Rank them by Yaniv's Rule — most embarrassing first:**
+   - the candidate you would **most wince to admit** (you clicked the wrong
+     spot, read the wrong frame, never checked your own write) goes to the
+     **front**. The wince is the proxy for probability; do not discount it,
+     rank *by* it;
+   - any explanation that **blames the page/browser/framework** — the ones that
+     cost you no embarrassment — moves toward the **back**, and any you have
+     **had refuted before** (this session or in memory) goes to the very back —
+     a refuted hypothesis has a *lower* prior;
+   - strike outright any story that needs an **implausible magnitude** to be
+     true. "The page hadn't loaded" after *nineteen seconds* is disqualified on
+     its face: pages do not take nineteen seconds to render a list a reload
+     paints in two. A story that needs an unlikely quantity is falsifying itself.
+3. **Test from the top of the ranked list** with the experiment below — not from
+   the explanation that feels right.
+
+Worked example — symptom: "my clicks on the event are ignored."
+
+| Rank | Candidate | Why here |
+|------|-----------|----------|
+| 1 | I clicked the wrong coordinates (DPR/scaled screenshot) | my own move; cheap to check with one geometry read |
+| 2 | An overlay/occluder is intercepting the click | my own setup; check with a hit-test |
+| 3 | The click executed but the response ack stalled | my read of "ignored" may be wrong; screenshot verifies |
+| 4 | The control is disabled / not yet wired | page state; check the element |
+| 5 | ~~The site rejects synthetic/untrusted clicks~~ | blames the page **and** refuted before → back of the line, likely struck |
+
+The attractor ("untrusted clicks") is exactly the one that would have been tried
+first by instinct; the ranking puts it last, on evidence, where it belongs.
+- **Pick the experiment that splits the field.** Choose the single observation
+  that eliminates the most candidates at once. A screenshot splits "didn't load"
+  from "loaded but I can't read it." A frame dump splits "wrong frame" from
+  "wrong selector." Do not run the test that merely *confirms* your favorite —
+  run the one that could *kill* it.
+
+Only then reach for an instrument. The instruments below are how you execute the
+discriminating experiment; the enumeration above is what tells you which one to
+run and stops you from confirming an attractor instead of testing it.
+
+### Measure The Failure Before You Explain It
+
+The most expensive authoring failure is not a broken selector — it is a
+**confident wrong story about why something broke.** A plausible cause
+("the field is React-controlled," "the page is still loading," "synthetic input
+is untrusted," "the selector changed") costs nothing to say and sends the next
+hour in the wrong direction. Every one of the following real diagnoses was
+reached only *after* discarding a tidy-sounding theory that turned out to be
+fiction. The pattern is consistent enough to be a rule:
+
+> When a page operation fails, the real cause is almost always mundane and in a
+> different place than your first story. Instrument first; theorize never.
+
+Anti-pattern tells — if you catch yourself doing any of these, stop and measure:
+
+- Naming a mechanism you have not observed ("it's React state", "trusted-input
+  wall", "the SPA is still hydrating"). You are pattern-matching training data,
+  not reading this page.
+- Explaining an **intermittent** failure with a **deterministic** cause. If the
+  same action worked once and failed once with nothing else changed, the cause
+  is a race or dirty state, not a property of the widget (see below).
+- Concluding "the page did not load" or "the element does not exist" while a
+  screenshot shows the content plainly. A screenshot that contradicts your read
+  is the single loudest signal that you are looking in the wrong place — usually
+  the wrong **frame** or the wrong **document** (see below).
+- Reusing a hypothesis that a previous investigation already disproved.
+
+The cheap instruments, in order of reach for:
+
+1. `browser.screenshot` — does the page actually show what you think? A
+   screenshot that disagrees with a DOM read is decisive: trust neither the read
+   nor your story until you reconcile them.
+2. A frame/context dump — `window === window.top`, `window.frames.length`, and
+   the body length + a known target string per frame. Content rendered into a
+   child frame is invisible to a top-document query.
+3. Event recorders — attach listeners for `keydown`/`beforeinput`/`input`/
+   `change` and read back which fired with what value. This distinguishes "the
+   value was never set" from "the value was set but not committed."
+4. Read the framework, do not assume it — `Object.keys(el)` reveals
+   `__reactProps$…` / `__reactFiber$…` if the element is React, and their
+   absence if it is not. Do not attribute behavior to a framework the page is
+   not using.
+
+Ground every "it broke because X" in one of these observations before you write
+a fix. A fix built on an unmeasured cause is a guess wearing a lab coat.
+
+Case review — every one of these was a *confidently stated* cause that the
+evidence killed. The column that mattered was always the last one:
+
+| Symptom | The invented story (wrong) | The measured cause (right) |
+|---------|----------------------------|-----------------------------|
+| Clicks on a calendar event landed on empty grid | "The site rejects synthetic clicks / trusted-input wall" | Screenshot returned at devicePixelRatio 2; click coords were 2× off. Halve DPR-2 screenshot coords, or use `clickable_center`. |
+| Time-widget interaction timed out every tool call | "The tab is hung / modals wedge the runtime" | The tab was fine; only the response **ack** stalled. Background screenshot kept working; the clicks executed. Verify by screenshot, not by the response code. |
+| Calendar event saved with no title | "The title is a React-controlled input that ignores synthetic value" | The page is not even React. `text.insert` set the value and fired `input`; the save committed from an **async model** and fired before it ingested — a race. Blur + settle before save. |
+| Same insert→save worked once, failed once | "Google resists synthetic text on save" | Intermittent ⇒ race/dirty-state, not a widget property. The instrumented run added just enough delay to win the race. |
+| Move-card action failed at its list step | "The list combobox selector drifted" (partly) plus no theory for the flakiness | Two things: the readiness selector wanted a `--control` child that only exists on the board select; **and** a prior open popover dirtied state. Fix the selector; start clean. |
+| Voice agent said it could not see LinkedIn messages | "The maps or the agent are broken" | The agent routed `actions.site` to the **wrong (wedged) active tab**; hosted tools route to the claimed active tab, not the start target. Make the target tab active. |
+| Three of four tabs dropped off the bridge | "`claimed_tabs.activate` cascaded a reconnect and killed them" (stated as fact) | Unproven — no disconnect log existed. Built persistent lifecycle logging; the log later showed activate causes only a **brief** all-tab reconnect, permanent loss only when a tab was already wedged. |
+| LinkedIn inbox projection returned 0 conversations the user could plainly see | (1) "soft-nav never loaded" → (2) "still loading after 19s" → (3) "selector mismatch" | All three wrong. The whole list rendered **inside a `/preload/` child iframe**; the projection queried the top document (an empty shell). A frame walk found 20 items in `frames[1]`. Wrong frame, not load/timing/selector. |
+
+The throughline: a screenshot, a frame dump, an event recorder, or a lifecycle
+log answered each one in a single call. The stories cost far more than the
+measurement would have.
+
+### Suspect The Frame Before The Load: Reads Are Scoped To One Document
+
+A projection or DOM read runs against **one document** — the top document of the
+runtime, unless the read explicitly traverses frames. Modern SPAs (LinkedIn
+observed) sometimes render a whole view, list and all, **inside a child iframe**
+(e.g. `…/preload/?_bprMode=vanilla`) that is painted over the viewport. The user
+sees a full UI; a top-document query sees an empty shell (`document.body`
+reduced to a few boilerplate characters, target selectors returning 0).
+
+Diagnose it, do not theorize it:
+
+1. Screenshot the page. If content is visible but the read is empty, this
+   pattern is the leading suspect — not "still loading," not "wrong selector."
+2. Walk the frames: for each of `window.frames`, read `location.href`, the body
+   length, and whether a known target string (a name, a heading) is present.
+   The frame that contains the target is where the content lives.
+3. If the content lives in a same-origin child frame, the map is broken because
+   the read is frame-blind, not because the site is broken.
+
+Fixes, preferred order: (a) make the read/projection frame-aware so it queries
+the same-origin child frame that holds the content — confirm the projection
+engine's `source: dom` can traverse child frames before relying on it; or
+(b) reach the view through a **full page load** rather than an in-page (soft)
+navigation, so the view renders into the top document and no preload frame
+exists. This is why a full reload "fixes" an empty read while more waiting never
+does — the reload removes the frame split, it does not give a slow page more
+time.
+
+### Synthetic Keyboard Does Not Insert Text; Use `text.insert`
+
+`keyboard.press` dispatches `keydown` and `keyup` and nothing else. On a normal
+input, a *trusted* keydown carries a browser default action that inserts the
+character and emits `input`; a *synthetic* keydown has no such default. Measured
+result on a plain text input: `keydown`/`keyup` fire, `.value` stays empty, no
+`input` event. So keyboard-typing a value into a field does not work through the
+portable runtime — use `text.insert`, which sets the value via the native value
+setter and dispatches `beforeinput`/`input`/`change`. Reserve `keyboard.press`
+for real key semantics (Enter to submit, Escape to close, Tab to move focus),
+not for entering text.
+
+### Some Widgets Commit From An Async Model, Not The DOM Value
+
+A field can show your typed value in `.value`, survive a blur, and still save
+blank — because the widget commits from an **internal model that ingests the
+`input` event asynchronously**, and the save fired before that model caught up.
+The tell is that it is **intermittent**: the identical insert→save sequence
+persists the value when something slowed the path down (instrumentation, an
+extra read) and drops it on the fast path. This is a race, not a "trusted input"
+wall and not (necessarily) a framework-controlled input — verify what the page
+actually is before naming a cause.
+
+When a set-then-commit action loses its value intermittently, make the commit
+deterministic in the action itself:
+
+1. `text.insert` the value.
+2. Dispatch `input` and `change`, then blur the field, to force the widget's
+   model to ingest the value.
+3. Add a real settle (a few hundred ms) or an explicit `locator.wait_for` on a
+   state that only appears after the commit, before the save click.
+4. Verify the saved record through a read/projection, never from the field's
+   own `.value` — the field is exactly the surface that lies here.
+
+### Flaky Means A Race Or Dirty State, Not A New Theory
+
+If an action fails, and you change nothing, and it now succeeds — or vice versa —
+you have a **race** or **residual state**, and inventing a per-attempt cause
+("maybe the selector shifted," "maybe React re-rendered") is the wrong move.
+Two mundane sources cover most cases:
+
+- **Left-over UI state.** A prior attempt left a popover, menu, or modal open, so
+  the next attempt's first click toggled the wrong thing. The fix is caller
+  discipline — start each attempt from a known-clean state — not a blunt
+  `Escape` inside the action, which can dismiss the very surface the action needs
+  (e.g. closing the card modal a move action depends on).
+- **A commit/render race** (see the async-model pattern above).
+
+Confirm which by re-running from a verified-clean state. If it then succeeds
+every time, the action is correct and the discipline belongs in how it is
+sequenced, not in a new hypothesis about the widget.
 
 ## Primitive Policy
 

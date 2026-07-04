@@ -99,6 +99,7 @@ export function buildRealtimeToolCatalog({ dictionary, host = "extension", block
         "List or call actions.json actions available for the current website.",
         "Do not assume site-specific actions are globally available; call mode=list for the active page first.",
         "For mode=call, put the site action name in the 'action' parameter and its inputs in 'arguments', for example {\"mode\": \"call\", \"action\": \"site.do.thing\", \"arguments\": {}}.",
+        "Prefer state-machine actions or composable recipes for recoverable mutations; failures may include failure_class, failed_state, retryable, and safe recovery guidance.",
       ].join(" "),
       parameters: ACTIONS_SITE_PARAMETERS,
     }),

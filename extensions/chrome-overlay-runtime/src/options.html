@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>actions.json — Options</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 560px; margin: 2rem auto; padding: 0 1rem; color: #1f2328; }
+      h1 { font-size: 1.3rem; }
+      h2 { font-size: 1.05rem; margin-top: 2rem; }
+      label { display: block; margin-top: 0.8rem; font-weight: 600; font-size: 0.9rem; }
+      input { width: 100%; padding: 0.45rem; margin-top: 0.25rem; box-sizing: border-box; font-family: inherit; }
+      .warn { background: #fff8c5; border: 1px solid #d4a72c66; border-radius: 6px; padding: 0.6rem 0.8rem; font-size: 0.85rem; margin-top: 1rem; }
+      .note { color: #59636e; font-size: 0.85rem; margin-top: 0.4rem; }
+      button { margin-top: 1rem; margin-right: 0.5rem; padding: 0.5rem 1rem; font-size: 0.9rem; cursor: pointer; }
+      #status, #usage-status { margin-top: 0.8rem; font-size: 0.9rem; min-height: 1.2em; }
+      .ok { color: #1a7f37; }
+      .err { color: #cf222e; }
+    </style>
+  </head>
+  <body>
+    <h1>actions.json extension options</h1>
+
+    <h2>Cloud storage (S3)</h2>
+    <p class="note">
+      Persists expenditure records and other extension data as JSONL objects in
+      your own bucket. Leave empty to disable persistence — the live cost meter
+      works either way.
+    </p>
+    <label>Bucket <input id="bucket" autocomplete="off" /></label>
+    <label>Region <input id="region" placeholder="eu-west-1" autocomplete="off" /></label>
+    <label>Key prefix <input id="prefix" placeholder="actions-json" autocomplete="off" /></label>
+    <label>Access key ID <input id="accessKeyId" autocomplete="off" /></label>
+    <label>Secret access key <input id="secretAccessKey" type="password" autocomplete="off" /></label>
+    <div class="warn">
+      Use an IAM key limited to this one bucket and prefix (PutObject +
+      ListBucket only). The key is stored in extension local storage on this
+      machine — scope it so that is an acceptable place for it to live.
+    </div>
+    <button id="save">Save</button>
+    <button id="test">Test write</button>
+    <div id="status"></div>
+
+    <h2>OpenAI usage-read key (optional)</h2>
+    <p class="note">
+      Enables the tracking-error readout (our estimates vs. actual charges).
+      Create a restricted admin key with only the <code>api.usage.read</code>
+      scope. Without it, everything else works and no OpenAI usage calls are
+      made.
+    </p>
+    <label>Usage-read admin key <input id="usageReadKey" type="password" autocomplete="off" /></label>
+    <button id="save-usage">Save key</button>
+    <div id="usage-status"></div>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

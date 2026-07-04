@@ -216,6 +216,271 @@
       }
     },
     {
+      "name": "browser.navigate",
+      "version": 1,
+      "stage": 1,
+      "summary": "Navigate a claimed tab to a URL (or reload it) and reconnect its runtime.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": [
+        "browser.tabs",
+        "browser.claimed_tabs"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Destination URL. Required unless reload is true."
+          },
+          "reload": {
+            "type": "boolean",
+            "description": "Reload the current tab instead of navigating."
+          },
+          "tab_id": {
+            "type": "integer",
+            "description": "Claimed tab id. Omit for the active claimed tab."
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "navigated": {
+            "type": "boolean"
+          },
+          "tab": {
+            "type": "object"
+          }
+        }
+      },
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
+      },
+      "errors": [
+        "capability_unavailable",
+        "target_not_found",
+        "permission_denied"
+      ],
+      "conformance": {
+        "fixture": null,
+        "assertions": [
+          "structured_result_or_capability_error"
+        ]
+      }
+    },
+    {
+      "name": "browser.open_tab",
+      "version": 1,
+      "stage": 1,
+      "summary": "Open a new browser tab, auto-claim it, and return a ready-to-drive runtime.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": [
+        "browser.tabs",
+        "browser.claimed_tabs"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "URL to open. Defaults to a blank page."
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Foreground the new tab. Default true."
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "tab_id": {
+            "type": "integer"
+          },
+          "runtime_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
+      },
+      "errors": [
+        "capability_unavailable",
+        "target_not_found",
+        "permission_denied"
+      ],
+      "conformance": {
+        "fixture": null,
+        "assertions": [
+          "structured_result_or_capability_error"
+        ]
+      }
+    },
+    {
+      "name": "browser.close_tab",
+      "version": 1,
+      "stage": 1,
+      "summary": "Close a claimed tab (defaults to active); refuses to close the last remaining claimed tab.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": [
+        "browser.tabs",
+        "browser.claimed_tabs"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tab_id": {
+            "type": "integer",
+            "description": "Claimed tab id. Omit for the active claimed tab."
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "closed_tab_id": {
+            "type": "integer"
+          },
+          "active_tab_id": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      },
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
+      },
+      "errors": [
+        "capability_unavailable",
+        "target_not_found",
+        "permission_denied"
+      ],
+      "conformance": {
+        "fixture": null,
+        "assertions": [
+          "structured_result_or_capability_error"
+        ]
+      }
+    },
+    {
+      "name": "browser.dismiss_dialog",
+      "version": 1,
+      "stage": 1,
+      "summary": "Dismiss a native JS dialog (alert/confirm/prompt/beforeunload) blocking a claimed tab via CDP; recovers a wedged tab.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": [
+        "browser.tabs",
+        "browser.claimed_tabs"
+      ],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tab_id": {
+            "type": "integer",
+            "description": "Claimed Chrome tab id whose dialog to dismiss. Omit for the active claimed tab."
+          },
+          "accept": {
+            "type": "boolean",
+            "description": "Accept (true, default) or cancel (false) the dialog. For a beforeunload 'Leave site?' confirm, accept=true leaves the page, accept=false stays."
+          },
+          "prompt_text": {
+            "type": "string",
+            "description": "Text to enter for a prompt() dialog. Ignored for other dialog types."
+          }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "dismissed": {
+            "type": "boolean"
+          },
+          "tab_id": {
+            "type": "integer"
+          },
+          "accept": {
+            "type": "boolean"
+          }
+        }
+      },
+      "adapters": {
+        "extension": {
+          "support": "supported"
+        },
+        "embed": {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
+      },
+      "errors": [
+        "capability_unavailable",
+        "target_not_found",
+        "permission_denied"
+      ],
+      "conformance": {
+        "fixture": null,
+        "assertions": [
+          "structured_result_or_capability_error"
+        ]
+      }
+    },
+    {
       "name": "pointer.move",
       "version": 1,
       "stage": 1,
@@ -1534,7 +1799,7 @@
       "name": "locator.element_info",
       "version": 1,
       "stage": 1,
-      "summary": "Resolve a locator to visible element geometry and a recommended clickable center.",
+      "summary": "Resolve a locator to visible element geometry and a recommended clickable center. When multiple visible elements match, return all candidates and mark the result ambiguous instead of making an arbitrary choice.",
       "capability_class": "portable",
       "portable": true,
       "capabilities": [

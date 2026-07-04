@@ -1,0 +1,8 @@
+{
+  "actions": [
+    {
+      "action": "good.card.open",
+      "result": "ok"
+    }
+  ]
+}

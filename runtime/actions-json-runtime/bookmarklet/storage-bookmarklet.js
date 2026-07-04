@@ -128,7 +128,7 @@
       },
     ],
   };
-  const primitiveDictionaryMetadata = { version: 1, stage: 1, host: "embed", primitives: [["browser.screenshot","unsupported","capability_unavailable","privileged",false],["browser.claimed_tabs.list","unsupported","capability_unavailable","privileged",false],["browser.claimed_tabs.activate","unsupported","capability_unavailable","privileged",false],["pointer.move","supported",null,"portable",true],["pointer.click","supported",null,"portable",true],["pointer.double_click","supported",null,"portable",true],["pointer.drag","supported",null,"portable",true],["viewport.scroll","supported",null,"portable",true],["storage.read_file","unsupported","capability_unavailable","privileged",false],["text.insert","supported",null,"portable",true],["keyboard.press","partial","trusted_key_events_unavailable","mixed",false],["transfer.insert","unsupported","capability_unavailable","privileged",false],["transfer.clear","unsupported","capability_unavailable","privileged",false],["transfer.read","unsupported","capability_unavailable","privileged",false],["transfer.write","unsupported","capability_unavailable","privileged",false],["clipboard.write","unsupported","capability_unavailable","privileged",false],["clipboard.read","unsupported","capability_unavailable","privileged",false],["runtime.session.name","unsupported","capability_unavailable","privileged",false],["runtime.session.finalize_tabs","unsupported","capability_unavailable","privileged",false],["page.info","supported",null,"portable",true],["dom.observe.visible","supported",null,"portable",true],["dom.snapshot_text","supported",null,"portable",true],["dom.list_sections","supported",null,"portable",true],["locator.element_info","supported",null,"portable",true],["locator.text_content","supported",null,"portable",true],["locator.wait_for","supported",null,"portable",true],["overlay.open","supported",null,"privileged",false],["overlay.register_launcher","supported",null,"privileged",false],["overlay.close","supported",null,"privileged",false]].map(([name, support, reason, capability_class, portable]) => ({ name, support, reason, capability_class, portable })) };
+  const primitiveDictionaryMetadata = { version: 1, stage: 1, host: "embed", primitives: [["browser.screenshot","unsupported","capability_unavailable","privileged",false],["browser.claimed_tabs.list","unsupported","capability_unavailable","privileged",false],["browser.claimed_tabs.activate","unsupported","capability_unavailable","privileged",false],["browser.navigate","unsupported","capability_unavailable","privileged",false],["browser.open_tab","unsupported","capability_unavailable","privileged",false],["browser.close_tab","unsupported","capability_unavailable","privileged",false],["browser.dismiss_dialog","unsupported","capability_unavailable","privileged",false],["pointer.move","supported",null,"portable",true],["pointer.click","supported",null,"portable",true],["pointer.double_click","supported",null,"portable",true],["pointer.drag","supported",null,"portable",true],["viewport.scroll","supported",null,"portable",true],["storage.read_file","unsupported","capability_unavailable","privileged",false],["text.insert","supported",null,"portable",true],["keyboard.press","partial","trusted_key_events_unavailable","mixed",false],["transfer.insert","unsupported","capability_unavailable","privileged",false],["transfer.clear","unsupported","capability_unavailable","privileged",false],["transfer.read","unsupported","capability_unavailable","privileged",false],["transfer.write","unsupported","capability_unavailable","privileged",false],["clipboard.write","unsupported","capability_unavailable","privileged",false],["clipboard.read","unsupported","capability_unavailable","privileged",false],["runtime.session.name","unsupported","capability_unavailable","privileged",false],["runtime.session.finalize_tabs","unsupported","capability_unavailable","privileged",false],["page.info","supported",null,"portable",true],["dom.observe.visible","supported",null,"portable",true],["dom.snapshot_text","supported",null,"portable",true],["dom.list_sections","supported",null,"portable",true],["locator.element_info","supported",null,"portable",true],["locator.text_content","supported",null,"portable",true],["locator.wait_for","supported",null,"portable",true],["overlay.open","supported",null,"privileged",false],["overlay.register_launcher","supported",null,"privileged",false],["overlay.close","supported",null,"privileged",false]].map(([name, support, reason, capability_class, portable]) => ({ name, support, reason, capability_class, portable })) };
 
   const existing = document.getElementById(ROOT_ID);
   if (existing) {
@@ -1303,7 +1303,7 @@
       } else if (message.name === "browser.extract_elements") {
         output = await extractElements(message.arguments || {});
       } else if (message.name === "locator.element_info") {
-        output = locatorElementInfo(message.arguments || {});
+        output = await locatorElementInfo(message.arguments || {});
       } else if (message.name === "locator.text_content") {
         output = locatorTextContent(message.arguments || {});
       } else if (message.name === "locator.wait_for") {
@@ -1319,7 +1319,7 @@
       } else if (message.name === "viewport.scroll") {
         output = await viewportScroll(message.arguments || {});
       } else if (message.name === "text.insert") {
-        output = textInsert(message.arguments || {});
+        output = await textInsert(message.arguments || {});
       } else if (message.name === "keyboard.press") {
         output = keyboardPress(message.arguments || {});
       } else if (message.name === "page.info") {
@@ -1384,9 +1384,10 @@
     };
   }
 
-  function locatorElementInfo(args = {}) {
+  async function locatorElementInfo(args = {}) {
     const locator = args.locator;
-    const element = resolveSingleVisibleLocator(locator);
+    const renderedCandidates = resolveLocatorCandidates(locator).filter(isElementRendered);
+    const element = renderedCandidates[0] || null;
     if (!element) {
       return primitiveError(
         "locator.element_info",
@@ -1395,8 +1396,18 @@
         { locator },
       );
     }
+    const visibility = await ensureElementInView(element, { auto_scroll: args.auto_scroll ?? args.autoScroll ?? true });
+    if (!visibility.current.clickable) {
+      return primitiveError("locator.element_info", "target_not_actionable", "Element matched the locator but is not currently clickable.", {
+        locator,
+        initial_visibility: publicVisibility(visibility.initial),
+        visibility: publicVisibility(visibility.current),
+        scroll_operations_performed: visibility.performed.map(publicScrollOperation),
+      });
+    }
     const rect = element.getBoundingClientRect();
-    const visibleRect = visibleRectFor(element) || rect;
+    const visibleRect = visibility.current.visible_rect || rect;
+    const visibleCandidates = renderedCandidates.filter(isElementVisible);
     return primitiveSuccess("locator.element_info", {
       locator,
       tag_name: element.tagName.toLowerCase(),
@@ -1415,6 +1426,12 @@
         x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
         y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2,
       },
+      clickable: visibility.current.clickable,
+      visibility: publicVisibility(visibility.current),
+      initial_visibility: publicVisibility(visibility.initial),
+      ambiguous: visibleCandidates.length > 1,
+      candidate_count: visibleCandidates.length,
+      scroll_operations_performed: visibility.performed.map(publicScrollOperation),
     });
   }
 
@@ -1432,7 +1449,7 @@
     }
     let candidates = [];
     if (typeof locator.selector === "string" && locator.selector.trim()) {
-      candidates = queryRelative(document, locator.selector.trim());
+      candidates = queryRelative(document, locator.selector.trim(), { visible_only: false });
     } else {
       candidates = Array.from(document.querySelectorAll("button, a, input, textarea, select, [role], [aria-label], [data-testid], [data-test], [data-actions-json-target]"));
     }
@@ -2059,7 +2076,77 @@
     });
   }
 
-  function textInsert(args = {}) {
+  function waitForEditableHandlers() {
+    return new Promise((resolve) => {
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => resolve());
+        return;
+      }
+      setTimeout(resolve, 0);
+    });
+  }
+
+  function selectEditableContents(target, mode) {
+    const selection = window.getSelection?.();
+    const range = document.createRange();
+    const textNodes = [];
+    const walker = document.createTreeWalker(target, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        return node.nodeValue && node.nodeValue.length > 0
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT;
+      },
+    });
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) textNodes.push(node);
+    if (textNodes.length > 0) {
+      const first = textNodes[0];
+      const last = textNodes[textNodes.length - 1];
+      if (mode === "append") {
+        range.setStart(last, last.nodeValue.length);
+        range.collapse(true);
+      } else {
+        range.setStart(first, 0);
+        range.setEnd(last, last.nodeValue.length);
+      }
+    } else {
+      range.selectNodeContents(target);
+      if (mode === "append") range.collapse(false);
+    }
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    return selection?.toString?.() || "";
+  }
+
+  function syntheticClipboardEvent(text) {
+    let clipboardData = null;
+    if (typeof DataTransfer === "function") {
+      clipboardData = new DataTransfer();
+      clipboardData.setData("text/plain", text);
+      clipboardData.setData("text/html", text.replace(/[&<>"]/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        "\"": "&quot;",
+      }[char])));
+    }
+    let event;
+    try {
+      event = new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        clipboardData,
+      });
+    } catch (_error) {
+      event = new Event("paste", { bubbles: true, cancelable: true, composed: true });
+    }
+    if (clipboardData && !event.clipboardData) {
+      Object.defineProperty(event, "clipboardData", { value: clipboardData });
+    }
+    return event;
+  }
+
+  async function textInsert(args = {}) {
     const text = String(args.text ?? "");
     const target = document.activeElement;
     if (!isEditableElement(target)) {
@@ -2068,19 +2155,60 @@
       });
     }
 
+    const mode = args.mode === "replace" ? "replace" : "append";
     if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
-      const start = Number.isInteger(target.selectionStart) ? target.selectionStart : target.value.length;
-      const end = Number.isInteger(target.selectionEnd) ? target.selectionEnd : start;
-      target.value = `${target.value.slice(0, start)}${text}${target.value.slice(end)}`;
+      const start = mode === "replace" ? 0 : Number.isInteger(target.selectionStart) ? target.selectionStart : target.value.length;
+      const end = mode === "replace" ? target.value.length : Number.isInteger(target.selectionEnd) ? target.selectionEnd : start;
+      const beforeInputType = mode === "replace" ? "insertReplacementText" : "insertText";
+      target.dispatchEvent(new InputEvent("beforeinput", {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        inputType: beforeInputType,
+        data: text,
+      }));
+      const nextValue = `${target.value.slice(0, start)}${text}${target.value.slice(end)}`;
+      const prototype = Object.getPrototypeOf(target);
+      const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+      const ownValueSetter = Object.getOwnPropertyDescriptor(target, "value")?.set;
+      const valueSetter = prototypeValueSetter || ownValueSetter;
+      if (valueSetter) {
+        valueSetter.call(target, nextValue);
+      } else {
+        target.value = nextValue;
+      }
       const cursor = start + text.length;
       target.setSelectionRange?.(cursor, cursor);
     } else {
-      document.execCommand?.("insertText", false, text);
-      if (target.textContent === "") target.textContent = text;
+      const beforePasteText = target.textContent || "";
+      const selectedText = selectEditableContents(target, mode);
+      document.dispatchEvent(new Event("selectionchange", { bubbles: false }));
+      await waitForEditableHandlers();
+      const pasteEvent = syntheticClipboardEvent(text);
+      const dispatched = target.dispatchEvent(pasteEvent);
+      await waitForEditableHandlers();
+      const afterPasteText = target.textContent || "";
+      if (!dispatched || pasteEvent.defaultPrevented || afterPasteText !== beforePasteText) {
+        target.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+        return primitiveSuccess("text.insert", {
+          inserted: true,
+          inserted_length: text.length,
+          input_method: "synthetic-paste",
+          selected_text_length: selectedText.length,
+          selection_sync: "selectionchange+animation-frame",
+        });
+      }
+      selectEditableContents(target, mode);
+      const inserted = document.execCommand?.("insertText", false, text);
+      if (!inserted) target.textContent = mode === "append" ? `${target.textContent || ""}${text}` : text;
     }
     target.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertText", data: text }));
     target.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
-    return primitiveSuccess("text.insert", { inserted: true, inserted_length: text.length });
+    return primitiveSuccess("text.insert", {
+      inserted: true,
+      inserted_length: text.length,
+      input_method: target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement ? "native-value-setter+input" : undefined,
+    });
   }
 
   function keyboardPress(args = {}) {
@@ -2185,12 +2313,7 @@
 
   function isElementVisible(element) {
     if (!element || !(element instanceof Element)) return false;
-    const rect = element.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return false;
-    if (rect.bottom < 0 || rect.right < 0) return false;
-    if (rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
-    const style = window.getComputedStyle(element);
-    return style.visibility !== "hidden" && style.display !== "none";
+    return Boolean(visibleRectFor(element));
   }
 
   function isElementRendered(element) {
@@ -2199,6 +2322,242 @@
     if (rect.width <= 0 || rect.height <= 0) return false;
     const style = window.getComputedStyle(element);
     return style.visibility !== "hidden" && style.display !== "none";
+  }
+
+  function rectFromClientRect(rect) {
+    return {
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height,
+      left: rect.left,
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.bottom,
+    };
+  }
+
+  function rectWidth(rect) {
+    return Math.max(0, rect.right - rect.left);
+  }
+
+  function rectHeight(rect) {
+    return Math.max(0, rect.bottom - rect.top);
+  }
+
+  function rectArea(rect) {
+    return rectWidth(rect) * rectHeight(rect);
+  }
+
+  function intersectRects(a, b) {
+    const left = Math.max(a.left, b.left);
+    const top = Math.max(a.top, b.top);
+    const right = Math.min(a.right, b.right);
+    const bottom = Math.min(a.bottom, b.bottom);
+    if (right <= left || bottom <= top) return null;
+    return { left, top, right, bottom, width: right - left, height: bottom - top, x: left, y: top };
+  }
+
+  function viewportRect() {
+    return {
+      left: 0,
+      top: 0,
+      right: window.innerWidth,
+      bottom: window.innerHeight,
+      width: window.innerWidth,
+      height: window.innerHeight,
+      x: 0,
+      y: 0,
+    };
+  }
+
+  function overflowClips(value) {
+    return value && value !== "visible" && value !== "clip";
+  }
+
+  function elementLabel(element) {
+    if (!(element instanceof Element)) return null;
+    const id = element.id ? `#${element.id}` : "";
+    const testId = element.getAttribute("data-testid");
+    const testLabel = testId ? `[data-testid="${testId}"]` : "";
+    const className = typeof element.className === "string" && element.className.trim()
+      ? `.${element.className.trim().split(/\s+/).slice(0, 3).join(".")}`
+      : "";
+    return `${element.tagName.toLowerCase()}${id}${testLabel}${className}`;
+  }
+
+  function clippingAncestorsFor(element) {
+    const ancestors = [];
+    let parent = element?.parentElement || null;
+    while (parent && parent !== document.documentElement) {
+      const style = window.getComputedStyle(parent);
+      if (overflowClips(style.overflowX) || overflowClips(style.overflowY) || overflowClips(style.overflow)) {
+        const rect = parent.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          ancestors.push({
+            element: parent,
+            rect: rectFromClientRect(rect),
+            overflow_x: style.overflowX,
+            overflow_y: style.overflowY,
+            scroll_left: parent.scrollLeft,
+            scroll_top: parent.scrollTop,
+            max_scroll_left: Math.max(0, parent.scrollWidth - parent.clientWidth),
+            max_scroll_top: Math.max(0, parent.scrollHeight - parent.clientHeight),
+            label: elementLabel(parent),
+          });
+        }
+      }
+      parent = parent.parentElement;
+    }
+    return ancestors;
+  }
+
+  function scrollOperationFor(element, geometry) {
+    if (!geometry?.rendered) return null;
+    const rect = geometry.bounding_box;
+    const padding = 8;
+    for (const ancestor of geometry.clipping_ancestors || []) {
+      let deltaX = 0;
+      let deltaY = 0;
+      if (rect.left < ancestor.rect.left + padding) deltaX = rect.left - ancestor.rect.left - padding;
+      else if (rect.right > ancestor.rect.right - padding) deltaX = rect.right - ancestor.rect.right + padding;
+      if (rect.top < ancestor.rect.top + padding) deltaY = rect.top - ancestor.rect.top - padding;
+      else if (rect.bottom > ancestor.rect.bottom - padding) deltaY = rect.bottom - ancestor.rect.bottom + padding;
+      const canScrollX = ancestor.max_scroll_left > 0 && deltaX !== 0;
+      const canScrollY = ancestor.max_scroll_top > 0 && deltaY !== 0;
+      if (canScrollX || canScrollY) {
+        return {
+          target: "element",
+          target_element: ancestor.element,
+          target_label: ancestor.label,
+          delta_x: canScrollX ? deltaX : 0,
+          delta_y: canScrollY ? deltaY : 0,
+          current_scroll_x: ancestor.scroll_left,
+          current_scroll_y: ancestor.scroll_top,
+          max_scroll_x: ancestor.max_scroll_left,
+          max_scroll_y: ancestor.max_scroll_top,
+        };
+      }
+    }
+    const viewport = viewportRect();
+    let deltaX = 0;
+    let deltaY = 0;
+    if (rect.left < viewport.left + padding) deltaX = rect.left - viewport.left - padding;
+    else if (rect.right > viewport.right - padding) deltaX = rect.right - viewport.right + padding;
+    if (rect.top < viewport.top + padding) deltaY = rect.top - viewport.top - padding;
+    else if (rect.bottom > viewport.bottom - padding) deltaY = rect.bottom - viewport.bottom + padding;
+    if (deltaX !== 0 || deltaY !== 0) {
+      return {
+        target: "window",
+        delta_x: deltaX,
+        delta_y: deltaY,
+        current_scroll_x: window.scrollX,
+        current_scroll_y: window.scrollY,
+        max_scroll_x: Math.max(0, document.documentElement.scrollWidth - window.innerWidth),
+        max_scroll_y: Math.max(0, document.documentElement.scrollHeight - window.innerHeight),
+      };
+    }
+    return null;
+  }
+
+  function visibilityGeometryFor(element) {
+    const rendered = isElementRendered(element);
+    const rect = element instanceof Element ? rectFromClientRect(element.getBoundingClientRect()) : null;
+    if (!rendered || !rect) {
+      return {
+        state: "not_rendered",
+        rendered: false,
+        visible: false,
+        clickable: false,
+        fully_visible: false,
+        bounding_box: rect,
+        visible_rect: null,
+        visible_ratio: 0,
+        scroll_operation: null,
+      };
+    }
+    let visibleRect = intersectRects(rect, viewportRect());
+    const clippingAncestors = clippingAncestorsFor(element);
+    const clippedBy = [];
+    for (const ancestor of clippingAncestors) {
+      const before = visibleRect;
+      visibleRect = visibleRect ? intersectRects(visibleRect, ancestor.rect) : null;
+      if (!before || !visibleRect || rectArea(visibleRect) < rectArea(before)) {
+        clippedBy.push({
+          target_label: ancestor.label,
+          rect: ancestor.rect,
+          overflow_x: ancestor.overflow_x,
+          overflow_y: ancestor.overflow_y,
+        });
+      }
+    }
+    const area = rectArea(rect);
+    const visibleArea = visibleRect ? rectArea(visibleRect) : 0;
+    const visibleRatio = area > 0 ? visibleArea / area : 0;
+    const fullyVisible = visibleRatio >= 0.98;
+    const clickable = Boolean(visibleRect && rectWidth(visibleRect) >= 8 && rectHeight(visibleRect) >= 8);
+    const geometry = {
+      state: fullyVisible ? "visible" : "requires_scroll",
+      rendered: true,
+      visible: Boolean(visibleRect),
+      clickable,
+      fully_visible: fullyVisible,
+      bounding_box: rect,
+      visible_rect: visibleRect,
+      visible_ratio: visibleRatio,
+      clipped_by: clippedBy,
+      clipping_ancestors: clippingAncestors,
+    };
+    geometry.scroll_operation = fullyVisible ? null : scrollOperationFor(element, geometry);
+    return geometry;
+  }
+
+  function publicVisibility(geometry) {
+    if (!geometry) return null;
+    const { clipping_ancestors: _ancestors, ...publicGeometry } = geometry;
+    if (publicGeometry.scroll_operation?.target_element) {
+      const { target_element: _targetElement, ...publicOperation } = publicGeometry.scroll_operation;
+      publicGeometry.scroll_operation = publicOperation;
+    }
+    return publicGeometry;
+  }
+
+  function publicScrollOperation(operation) {
+    if (!operation) return null;
+    const { target_element: _targetElement, ...publicOperation } = operation;
+    return publicOperation;
+  }
+
+  async function performScrollOperation(operation) {
+    if (!operation) return false;
+    if (operation.target === "window") {
+      window.scrollBy({ left: operation.delta_x, top: operation.delta_y, behavior: "instant" });
+    } else if (operation.target === "element") {
+      if (!(operation.target_element instanceof Element)) return false;
+      operation.target_element.scrollBy({ left: operation.delta_x, top: operation.delta_y, behavior: "instant" });
+    } else {
+      return false;
+    }
+    await sleep(50);
+    return true;
+  }
+
+  async function ensureElementInView(element, options = {}) {
+    const initial = visibilityGeometryFor(element);
+    let current = initial;
+    const performed = [];
+    if (options.auto_scroll !== false && (!current.fully_visible || !current.clickable)) {
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        if (!current.scroll_operation) break;
+        const operation = current.scroll_operation;
+        const moved = await performScrollOperation(operation);
+        if (!moved) break;
+        performed.push(operation);
+        current = visibilityGeometryFor(element);
+        if (current.fully_visible && current.clickable) break;
+      }
+    }
+    return { initial, current, performed };
   }
 
   function isRectInViewport(rect) {
@@ -2211,13 +2570,7 @@
   }
 
   function visibleRectFor(element) {
-    const rect = element.getBoundingClientRect();
-    const left = Math.max(0, rect.left);
-    const top = Math.max(0, rect.top);
-    const right = Math.min(window.innerWidth, rect.right);
-    const bottom = Math.min(window.innerHeight, rect.bottom);
-    if (right <= left || bottom <= top) return null;
-    return { left, top, right, bottom };
+    return visibilityGeometryFor(element).visible_rect;
   }
 
   function selectorListFrom(input, fallback = []) {
@@ -2281,7 +2634,8 @@
     return scopeElement;
   }
 
-  function queryRelative(rootElement, selector) {
+  function queryRelative(rootElement, selector, options = {}) {
+    const visibleOnly = options.visible_only ?? options.visibleOnly ?? true;
     const rootNode = rootElement || document;
     const matches = [];
     for (const part of String(selector || "").split(",")) {
@@ -2302,7 +2656,8 @@
         // Invalid selectors are ignored so one bad field rule does not abort the action.
       }
     }
-    return Array.from(new Set(matches)).filter(isElementVisible);
+    const uniqueMatches = Array.from(new Set(matches));
+    return visibleOnly ? uniqueMatches.filter(isElementVisible) : uniqueMatches;
   }
 
   function readAttributeValue(element, attribute) {

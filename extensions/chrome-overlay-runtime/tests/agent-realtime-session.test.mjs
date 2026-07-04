@@ -436,6 +436,12 @@ test("hosted realtime session sends injected realtime tool declarations", async 
   assert.match(sessionUpdate.session.instructions, /Generic primitives are fallback tools/i);
   assert.match(sessionUpdate.session.instructions, /policy violation/i);
   assert.match(sessionUpdate.session.instructions, /policy_exception_report/i);
+  assert.match(sessionUpdate.session.instructions, /not the boundary of your ability/i);
+  assert.match(sessionUpdate.session.instructions, /composing primitives/i);
+  assert.match(sessionUpdate.session.instructions, /capability-alignment failure/i);
+  assert.match(sessionUpdate.session.instructions, /Aim clicks at the returned clickable_center/i);
+  assert.match(sessionUpdate.session.instructions, /Never click a bounding_box's x\/y/i);
+  assert.match(sessionUpdate.session.instructions, /if nothing changed, take browser\.screenshot/i);
   assert.match(sessionUpdate.session.instructions, /Do not narrate the report/i);
   const initialResponse = transportFactory.transports[0].events.find((event) => event.type === "response.create");
   assert.match(initialResponse.response.instructions, /visual overlay/i);

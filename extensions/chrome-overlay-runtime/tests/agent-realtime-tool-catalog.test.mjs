@@ -8,6 +8,22 @@ import {
   filterRealtimeToolsForBlockedPrimitives,
 } from "../src/agent/realtime-tool-catalog.mjs";
 
+test("realtime tool catalog exposes tab-lifecycle primitives to the hosted agent", async () => {
+  const dictionary = await loadPrimitiveDictionary();
+  const tools = buildRealtimeToolCatalog({ dictionary, host: "extension" });
+  const byName = new Map(tools.map((tool) => [tool.name, tool]));
+
+  for (const name of ["browser.navigate", "browser.open_tab", "browser.close_tab"]) {
+    const tool = byName.get(name);
+    assert.ok(tool, `${name} must be advertised to the extension host`);
+    assert.equal(tool.type, "function");
+    assert.equal(tool.parameters.type, "object");
+  }
+  assert.equal(byName.get("browser.navigate").parameters.properties.url.type, "string");
+  assert.equal(byName.get("browser.open_tab").parameters.properties.url.type, "string");
+  assert.equal(byName.get("browser.close_tab").parameters.properties.tab_id.type, "integer");
+});
+
 test("realtime tool catalog exposes stable actions.site and browser.screenshot tools", async () => {
   const dictionary = await loadPrimitiveDictionary();
   const tools = buildRealtimeToolCatalog({ dictionary, host: "extension" });
@@ -20,6 +36,8 @@ test("realtime tool catalog exposes stable actions.site and browser.screenshot t
   const actionsSite = tools.find((tool) => tool.name === "actions.site");
   assert.equal(actionsSite.type, "function");
   assert.match(actionsSite.description, /current website/);
+  assert.match(actionsSite.description, /state-machine/i);
+  assert.match(actionsSite.description, /safe recovery/i);
   assert.deepEqual(actionsSite.parameters.properties.mode.enum, ["list", "call", "state_read", "state_summary", "state_diff"]);
   assert.equal(actionsSite.parameters.properties.action.type, "string");
   assert.equal(actionsSite.parameters.properties.projection_name.type, "string");

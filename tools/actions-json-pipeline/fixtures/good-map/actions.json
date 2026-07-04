@@ -1,0 +1,96 @@
+{
+  "protocol": "actions.json",
+  "name": "good.fixture",
+  "x_actions": {
+    "files": [
+      {
+        "id": "good-skill",
+        "path": "SKILL.md",
+        "kind": "skill"
+      }
+    ]
+  },
+  "state_projections": [
+    {
+      "name": "good.cards",
+      "snapshot": {
+        "version": 1,
+        "source": "dom",
+        "extract": []
+      },
+      "postconditions": {
+        "good.card.open": {
+          "projection": "good.cards",
+          "verify": {
+            "language": "jsonata",
+            "expression": "{% state.cards[id=input.card_id].open = true %}"
+          }
+        }
+      }
+    }
+  ],
+  "tools": [
+    {
+      "name": "good.card.find",
+      "description": "Find a scoped card.",
+      "input_schema": {
+        "type": "object"
+      },
+      "x_actions": {
+        "handler": "locator.element_info",
+        "binding": {
+          "arguments": {
+            "locator": {
+              "selector": "[data-testid='card-name']"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "good.card.open",
+      "description": "Open a card with state verification.",
+      "input_schema": {
+        "type": "object"
+      },
+      "workflow": {
+        "version": 1,
+        "expression_language": "jsonata",
+        "x_state_machine": {
+          "states": [
+            "precondition",
+            "readiness",
+            "mutation",
+            "postcondition",
+            "cleanup"
+          ]
+        },
+        "steps": [
+          {
+            "id": "hideOverlay",
+            "primitive": "overlay.menu.hide",
+            "on_error": "continue"
+          },
+          {
+            "id": "findCard",
+            "primitive": "locator.element_info",
+            "args": {
+              "locator": {
+                "selector": "[data-testid='card-name']",
+                "text_contains": "{% input.card_title %}"
+              }
+            }
+          },
+          {
+            "id": "click",
+            "primitive": "pointer.click",
+            "args": {
+              "x": "{% steps.findCard.output.clickable_center.x %}",
+              "y": "{% steps.findCard.output.clickable_center.y %}"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

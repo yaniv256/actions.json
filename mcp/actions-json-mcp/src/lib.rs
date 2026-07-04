@@ -103,12 +103,174 @@ struct AppState {
     catalog: Arc<Mutex<ActionCatalog>>,
     storage_root: Option<PathBuf>,
     runtimes: Arc<Mutex<HashMap<String, RuntimeClient>>>,
+    // The agent-manageable default tab. When more than one runtime is connected
+    // and a call carries no explicit target, routing falls back to this runtime
+    // instead of erroring. Set by browser.active_tab.set and
+    // browser.claimed_tabs.activate; defaulted to the first runtime to connect.
+    active_runtime_id: Arc<Mutex<Option<String>>>,
     pending: Arc<Mutex<HashMap<String, PendingCall>>>,
     last_replay_summary: Arc<Mutex<Option<Value>>>,
     last_credential_hydration: Arc<Mutex<Option<Value>>>,
     last_storage_hydration: Arc<Mutex<Option<Value>>>,
     pending_storage_hydrations: Arc<Mutex<HashMap<String, String>>>,
     payload: Arc<Mutex<PayloadSpillConfig>>,
+    // Spec 038: per-runtime queue of hosted-agent OUTPUT events (responses,
+    // tool calls/results, refusals, lifecycle) forwarded by the extension over
+    // the WebSocket. runtime.agent.await_event drains this so the supervising
+    // MCP client learns each event event-driven instead of polling the log.
+    agent_event_queues: Arc<Mutex<HashMap<String, AgentEventQueue>>>,
+}
+
+const AGENT_EVENT_QUEUE_CAP: usize = 1000;
+
+#[derive(Clone)]
+struct AgentEvent {
+    seq: u64,
+    ts: String,
+    kind: String,
+    payload: Value,
+}
+
+struct AgentEventQueue {
+    events: std::collections::VecDeque<AgentEvent>,
+    next_seq: u64,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl Default for AgentEventQueue {
+    fn default() -> Self {
+        AgentEventQueue {
+            events: std::collections::VecDeque::new(),
+            next_seq: 0,
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+}
+
+impl AppState {
+    /// Append one agent-output event to a runtime's queue and wake any waiter.
+    async fn push_agent_event(&self, runtime_id: &str, ts: String, kind: String, payload: Value) {
+        let notify = {
+            let mut map = self.agent_event_queues.lock().await;
+            let queue = map.entry(runtime_id.to_string()).or_default();
+            let seq = queue.next_seq;
+            queue.next_seq += 1;
+            queue.events.push_back(AgentEvent { seq, ts, kind, payload });
+            // Evict oldest to fit the cap, then record ONE marker summarizing
+            // how many were dropped. (The marker itself is bounded by the cap:
+            // we reserve a slot for it, so a full queue keeps CAP-1 real events
+            // plus the marker — no runaway growth.)
+            if queue.events.len() > AGENT_EVENT_QUEUE_CAP {
+                let overflow = queue.events.len() - AGENT_EVENT_QUEUE_CAP;
+                // Drop `overflow` oldest, plus one more to leave room for the marker.
+                let to_drop = overflow + 1;
+                let mut dropped = 0u64;
+                for _ in 0..to_drop {
+                    if queue.events.pop_front().is_some() {
+                        dropped += 1;
+                    }
+                }
+                let dropped_seq = queue.next_seq;
+                queue.next_seq += 1;
+                queue.events.push_back(AgentEvent {
+                    seq: dropped_seq,
+                    ts: String::new(),
+                    kind: "events_dropped".to_string(),
+                    payload: json!({ "count": dropped }),
+                });
+            }
+            queue.notify.clone()
+        };
+        notify.notify_waiters();
+    }
+}
+
+/// Handle an inbound `agent_event` WebSocket item from the extension.
+async fn ingest_agent_event(state: &AppState, item: &Value) {
+    let Some(runtime_id) = item.get("runtime_id").and_then(Value::as_str) else {
+        return;
+    };
+    let ts = item
+        .get("ts")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let kind = item
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let payload = item.get("payload").cloned().unwrap_or(Value::Null);
+    state.push_agent_event(runtime_id, ts, kind, payload).await;
+}
+
+/// Drain events with seq > cursor, blocking up to timeout_ms, then reporting
+/// idle. cursor = -1 means "from the start of the retained queue".
+async fn await_agent_event(
+    state: &AppState,
+    runtime_id: &str,
+    cursor: i64,
+    timeout_ms: u64,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    // Grab the notify handle once up front; the Notify is stable per runtime.
+    let notify = {
+        let mut map = state.agent_event_queues.lock().await;
+        map.entry(runtime_id.to_string()).or_default().notify.clone()
+    };
+    loop {
+        // Register the wait future BEFORE the ready-check, so a push that fires
+        // notify_waiters() between the check and the await is not lost (tokio
+        // Notify only wakes futures already registered at notify time). If an
+        // event is already ready we return without ever awaiting `notified`.
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
+        {
+            let map = state.agent_event_queues.lock().await;
+            let queue = map.get(runtime_id).expect("queue ensured above");
+            let ready: Vec<Value> = queue
+                .events
+                .iter()
+                .filter(|e| (e.seq as i64) > cursor)
+                .map(|e| {
+                    json!({
+                        "seq": e.seq,
+                        "ts": e.ts,
+                        "kind": e.kind,
+                        "payload": e.payload,
+                    })
+                })
+                .collect();
+            if !ready.is_empty() {
+                let new_cursor = queue.events.iter().map(|e| e.seq).max().unwrap_or(0);
+                return json!({
+                    "events": ready,
+                    "cursor": new_cursor,
+                    "idle": false,
+                });
+            }
+        }
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return json!({
+                "events": [],
+                "cursor": cursor,
+                "idle": true,
+                "silent_ms": timeout_ms,
+            });
+        }
+        if tokio::time::timeout(remaining, notified).await.is_err() {
+            return json!({
+                "events": [],
+                "cursor": cursor,
+                "idle": true,
+                "silent_ms": timeout_ms,
+            });
+        }
+    }
 }
 
 const DEFAULT_PAYLOAD_INLINE_LIMIT_BYTES: usize = 50_000;
@@ -225,6 +387,42 @@ fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
+}
+
+/// Append one JSON line describing a runtime connection lifecycle event to a
+/// persistent log under the storage root. This survives browser page reloads and
+/// bridge restarts, so a disconnect can be investigated after the fact — the
+/// live `/runtimes` view keeps no history of *why* a tab dropped.
+///
+/// Best-effort: any IO error is reported to stderr and swallowed so logging can
+/// never break the connection lifecycle.
+fn append_lifecycle_log(storage_root: Option<&std::path::Path>, entry: Value) {
+    let Some(root) = storage_root else {
+        return;
+    };
+    let dir = root.join("logs");
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        eprintln!("lifecycle log: failed to create {}: {error}", dir.display());
+        return;
+    }
+    let path = dir.join("bridge-lifecycle.jsonl");
+    let mut line = entry.to_string();
+    line.push('\n');
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(mut file) => {
+            use std::io::Write as _;
+            if let Err(error) = file.write_all(line.as_bytes()) {
+                eprintln!("lifecycle log: failed to write {}: {error}", path.display());
+            }
+        }
+        Err(error) => {
+            eprintln!("lifecycle log: failed to open {}: {error}", path.display());
+        }
+    }
 }
 
 fn action_call_message(
@@ -1162,6 +1360,502 @@ mod tests {
         );
     }
 
+    // --- Multi-runtime routing: active tab + per-command override ---
+
+    fn two_runtime_state() -> AppState {
+        state_from_catalog(
+            ActionCatalog {
+                base_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                map_paths: Vec::new(),
+                manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_action_names: HashSet::new(),
+            },
+            vec![
+                RuntimeSeed {
+                    runtime_id: "rt-lab".to_string(),
+                    url: Some("https://lab651.com/".to_string()),
+                },
+                RuntimeSeed {
+                    runtime_id: "rt-trello".to_string(),
+                    url: Some("https://trello.com/b/abc".to_string()),
+                },
+            ],
+            None,
+        )
+    }
+
+    fn empty_state() -> AppState {
+        state_from_catalog(
+            ActionCatalog {
+                base_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                map_paths: Vec::new(),
+                manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_action_names: HashSet::new(),
+            },
+            Vec::new(),
+            None,
+        )
+    }
+
+    // ---- Spec 038: agent-event queue + await_event ----
+
+    #[tokio::test]
+    async fn agent_event_push_assigns_monotonic_seq() {
+        let state = empty_state();
+        state
+            .push_agent_event("rt-1", "t0".into(), "transcript".into(), json!({"text":"a"}))
+            .await;
+        state
+            .push_agent_event("rt-1", "t1".into(), "tool".into(), json!({"name":"x","ok":true}))
+            .await;
+        let map = state.agent_event_queues.lock().await;
+        let queue = map.get("rt-1").expect("queue exists");
+        let seqs: Vec<u64> = queue.events.iter().map(|e| e.seq).collect();
+        assert_eq!(seqs, vec![0, 1]);
+        assert_eq!(queue.next_seq, 2);
+    }
+
+    #[tokio::test]
+    async fn agent_event_queue_cap_evicts_with_marker() {
+        let state = empty_state();
+        for i in 0..(AGENT_EVENT_QUEUE_CAP + 5) {
+            state
+                .push_agent_event("rt-1", format!("t{i}"), "transcript".into(), json!({"i": i}))
+                .await;
+        }
+        let map = state.agent_event_queues.lock().await;
+        let queue = map.get("rt-1").unwrap();
+        assert!(queue.events.len() <= AGENT_EVENT_QUEUE_CAP + 1);
+        assert!(queue.events.iter().any(|e| e.kind == "events_dropped"));
+    }
+
+    #[tokio::test]
+    async fn ingest_agent_event_lands_in_runtime_queue() {
+        let state = empty_state();
+        ingest_agent_event(
+            &state,
+            &json!({
+                "type": "agent_event", "runtime_id": "rt-9", "ts": "2026-07-04T00:00:00Z",
+                "kind": "transcript", "payload": {"role":"assistant","text":"done"}
+            }),
+        )
+        .await;
+        let map = state.agent_event_queues.lock().await;
+        let event = &map.get("rt-9").unwrap().events[0];
+        assert_eq!(event.kind, "transcript");
+        assert_eq!(event.payload["text"], "done");
+    }
+
+    #[tokio::test]
+    async fn ingest_agent_event_ignores_missing_runtime_id() {
+        let state = empty_state();
+        ingest_agent_event(&state, &json!({ "type": "agent_event" })).await;
+        assert!(state.agent_event_queues.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn await_event_returns_backlog_immediately() {
+        let state = empty_state();
+        state
+            .push_agent_event("rt-1", "t0".into(), "transcript".into(), json!({"text":"a"}))
+            .await;
+        state
+            .push_agent_event("rt-1", "t1".into(), "transcript".into(), json!({"text":"b"}))
+            .await;
+        let out = await_agent_event(&state, "rt-1", -1, 5000).await;
+        assert_eq!(out["events"].as_array().unwrap().len(), 2);
+        assert_eq!(out["cursor"], 1);
+        assert_eq!(out["idle"], false);
+    }
+
+    #[tokio::test]
+    async fn await_event_respects_cursor() {
+        let state = empty_state();
+        for i in 0..3 {
+            state
+                .push_agent_event("rt-1", format!("t{i}"), "transcript".into(), json!({"i": i}))
+                .await;
+        }
+        // Already saw seq 0 and 1; only seq 2 should return.
+        let out = await_agent_event(&state, "rt-1", 1, 5000).await;
+        let events = out["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["seq"], 2);
+        assert_eq!(out["cursor"], 2);
+    }
+
+    #[tokio::test]
+    async fn await_event_blocks_then_wakes_on_push() {
+        let state = empty_state();
+        let waiter_state = state.clone();
+        let handle =
+            tokio::spawn(async move { await_agent_event(&waiter_state, "rt-1", -1, 5000).await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        state
+            .push_agent_event("rt-1", "t0".into(), "tool".into(), json!({"name":"x","ok":true}))
+            .await;
+        let out = handle.await.unwrap();
+        assert_eq!(out["events"].as_array().unwrap().len(), 1);
+        assert_eq!(out["idle"], false);
+    }
+
+    #[tokio::test]
+    async fn await_event_does_not_miss_a_push_racing_the_wait() {
+        // Regression: a push firing notify_waiters() in the window between the
+        // ready-check and the await must still wake the waiter. Repeat to make a
+        // lost-wakeup flake surface.
+        for _ in 0..50 {
+            let state = empty_state();
+            let waiter_state = state.clone();
+            let handle = tokio::spawn(async move {
+                await_agent_event(&waiter_state, "rt-1", -1, 3000).await
+            });
+            // No sleep — race the push against the waiter's first ready-check.
+            state
+                .push_agent_event("rt-1", "t".into(), "tool".into(), json!({"name":"x","ok":true}))
+                .await;
+            let out = handle.await.unwrap();
+            assert_eq!(out["idle"], false, "waiter must observe the racing push, not time out");
+            assert_eq!(out["events"].as_array().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn await_event_times_out_idle() {
+        let state = empty_state();
+        state
+            .push_agent_event("rt-1", "t0".into(), "transcript".into(), json!({"text":"a"}))
+            .await;
+        // Caller is caught up (cursor = last seq 0), no new events → idle.
+        let out = await_agent_event(&state, "rt-1", 0, 1000).await;
+        assert_eq!(out["idle"], true);
+        assert_eq!(out["events"].as_array().unwrap().len(), 0);
+        assert!(out["silent_ms"].as_u64().unwrap() >= 900);
+    }
+
+    #[tokio::test]
+    async fn await_event_advertised_on_both_surfaces() {
+        let state = empty_state();
+        let catalog = state.catalog.lock().await;
+        let advertised = catalog.manifest["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "runtime.agent.await_event");
+        let site = catalog.site_manifest["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "runtime.agent.await_event");
+        assert!(advertised, "await_event must be in the advertised manifest");
+        assert!(site, "await_event must be in the site manifest");
+    }
+
+    #[tokio::test]
+    async fn await_event_end_to_end_burst_gap_wake() {
+        let state = empty_state();
+        // Burst of 3 while nobody is awaiting.
+        for i in 0..3 {
+            ingest_agent_event(
+                &state,
+                &json!({"type":"agent_event","runtime_id":"rt-1","ts":format!("t{i}"),
+                        "kind":"transcript","payload":{"i":i}}),
+            )
+            .await;
+        }
+        let out = await_agent_event(&state, "rt-1", -1, 1000).await;
+        assert_eq!(out["events"].as_array().unwrap().len(), 3);
+        let cursor = out["cursor"].as_i64().unwrap();
+
+        // Caught up → idle.
+        let idle = await_agent_event(&state, "rt-1", cursor, 1000).await;
+        assert_eq!(idle["idle"], true);
+
+        // A blocked waiter wakes on the next event.
+        let waiter_state = state.clone();
+        let handle = tokio::spawn(async move {
+            await_agent_event(&waiter_state, "rt-1", cursor, 5000).await
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        ingest_agent_event(
+            &state,
+            &json!({"type":"agent_event","runtime_id":"rt-1","ts":"t3",
+                    "kind":"refusal","payload":{"tool":"x","reason":"y"}}),
+        )
+        .await;
+        let woke = handle.await.unwrap();
+        assert_eq!(woke["events"].as_array().unwrap().len(), 1);
+        assert_eq!(woke["events"][0]["kind"], "refusal");
+    }
+
+    fn bare_call(name: &str) -> ResolvedToolCall {
+        ResolvedToolCall {
+            name: name.to_string(),
+            arguments: json!({}),
+            target_runtime_id: None,
+            target_url_contains: None,
+            timeout_ms: default_timeout_ms(),
+            static_output: None,
+        }
+    }
+
+    #[test]
+    fn routing_meta_args_are_stripped_before_schema_validation() {
+        // A generic tool with additionalProperties:false must accept a routed
+        // call carrying target_url_contains inside arguments (the only carrier
+        // an MCP client has) without rejecting it as undeclared.
+        let tool = json!({
+            "name": "dom.snapshot_text",
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": { "selector": { "type": "string" } }
+            }
+        });
+        let request = ToolCallRequest {
+            name: "dom.snapshot_text".to_string(),
+            arguments: json!({
+                "selector": "main",
+                "target_url_contains": "lab651.com",
+                "policy_exception_report": {
+                    "kind": "generic",
+                    "intended_tool": "dom.snapshot_text",
+                    "actions_json_path": "none",
+                    "reason": "Routed exploration during map authoring."
+                }
+            }),
+            target_runtime_id: None,
+            target_url_contains: Some("lab651.com".to_string()),
+            timeout_ms: default_timeout_ms(),
+        };
+        let prepared = validate_and_prepare_direct_tool_arguments(&tool, &request).unwrap();
+        // Both the routing key and the policy report are gone; the real argument survives.
+        assert_eq!(prepared, json!({ "selector": "main" }));
+    }
+
+    #[test]
+    fn advertised_schema_declares_routing_meta_fields() {
+        let tool = json!({
+            "name": "dom.snapshot_text",
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": { "selector": { "type": "string" } }
+            }
+        });
+        let schema = advertised_input_schema_for_tool(&tool);
+        let props = &schema["properties"];
+        assert_eq!(props["target_runtime_id"]["type"].as_str(), Some("string"));
+        assert_eq!(props["target_url_contains"]["type"].as_str(), Some("string"));
+        // The original property is preserved.
+        assert_eq!(props["selector"]["type"].as_str(), Some("string"));
+    }
+
+    #[test]
+    fn advertised_schema_does_not_clobber_existing_target_url_contains() {
+        // actions.site already declares target_url_contains with its own wording.
+        let manifest = site_actions_tool_manifest();
+        let advertised = advertised_input_schema_for_tool(&manifest);
+        let desc = advertised["properties"]["target_url_contains"]["description"]
+            .as_str()
+            .unwrap_or("");
+        assert!(desc.contains("site catalog"));
+    }
+
+    #[tokio::test]
+    async fn select_runtime_falls_back_to_active_tab_when_ambiguous() {
+        let state = two_runtime_state();
+        // Default active tab is the first-seeded runtime.
+        let chosen = select_runtime(&state, &bare_call("storage.list")).await.unwrap();
+        assert!(chosen.runtime_id == "rt-lab" || chosen.runtime_id == "rt-trello");
+
+        // Explicitly make Trello active; a bare call now routes there.
+        *state.active_runtime_id.lock().await = Some("rt-trello".to_string());
+        let chosen = select_runtime(&state, &bare_call("storage.list")).await.unwrap();
+        assert_eq!(chosen.runtime_id, "rt-trello");
+    }
+
+    #[tokio::test]
+    async fn explicit_target_overrides_active_tab() {
+        let state = two_runtime_state();
+        *state.active_runtime_id.lock().await = Some("rt-trello".to_string());
+        let mut call = bare_call("storage.list");
+        call.target_url_contains = Some("lab651.com".to_string());
+        let chosen = select_runtime(&state, &call).await.unwrap();
+        assert_eq!(chosen.runtime_id, "rt-lab");
+    }
+
+    #[tokio::test]
+    async fn select_runtime_errors_when_ambiguous_and_no_active() {
+        let state = two_runtime_state();
+        *state.active_runtime_id.lock().await = None;
+        let result = select_runtime(&state, &bare_call("storage.list")).await;
+        let error = match result {
+            Ok(client) => panic!("expected ambiguity error, got runtime {}", client.runtime_id),
+            Err(error) => error,
+        };
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(
+            error.1["routing_trace"]["decision"].as_str(),
+            Some("ambiguous_without_target")
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnecting_active_runtime_adopts_remaining_runtime() {
+        let state = two_runtime_state();
+        {
+            let mut runtimes = state.runtimes.lock().await;
+            runtimes
+                .get_mut("rt-lab")
+                .expect("seeded lab runtime")
+                .connection_id = "connection-2".to_string();
+            let (tx, _rx) = mpsc::unbounded_channel::<Message>();
+            runtimes.insert(
+                "rt-docs".to_string(),
+                RuntimeClient {
+                    runtime_id: "rt-docs".to_string(),
+                    connection_id: "connection-2".to_string(),
+                    runtime_key: None,
+                    authorization_id: None,
+                    extension_version: None,
+                    url: Some("https://docs.example.com/".to_string()),
+                    tab: None,
+                    replay: None,
+                    connected_at_ms: now_ms(),
+                    last_seen_ms: now_ms(),
+                    tx,
+                },
+            );
+        }
+        *state.active_runtime_id.lock().await = Some("rt-trello".to_string());
+
+        let disconnected_runtime_ids =
+            Arc::new(Mutex::new(HashSet::from(["rt-trello".to_string()])));
+        remove_runtimes_for_connection(
+            &state,
+            &disconnected_runtime_ids,
+            "test-connection",
+            "test",
+        )
+        .await;
+
+        let chosen = select_runtime(&state, &bare_call("storage.list"))
+            .await
+            .expect("bare calls should route to an adopted active runtime");
+        assert!(chosen.runtime_id == "rt-lab" || chosen.runtime_id == "rt-docs");
+        let active = state.active_runtime_id.lock().await.clone();
+        assert!(active.as_deref() == Some("rt-lab") || active.as_deref() == Some("rt-docs"));
+    }
+
+    #[tokio::test]
+    async fn disconnect_writes_persistent_lifecycle_log() {
+        // A dropped tab is invisible in /runtimes after the fact; the persistent
+        // JSONL log is the only durable record of which tab dropped and why.
+        let root = tempdir().unwrap();
+        let state = state_from_catalog(
+            ActionCatalog {
+                base_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                map_paths: Vec::new(),
+                manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_action_names: HashSet::new(),
+            },
+            vec![RuntimeSeed {
+                runtime_id: "rt-trello".to_string(),
+                url: Some("https://trello.com/b/abc".to_string()),
+            }],
+            Some(root.path().to_path_buf()),
+        );
+        // Seed matches the default connection id used by state_from_catalog seeds.
+        let connection_id = state
+            .runtimes
+            .lock()
+            .await
+            .get("rt-trello")
+            .expect("seeded runtime")
+            .connection_id
+            .clone();
+
+        let dropped = Arc::new(Mutex::new(HashSet::from(["rt-trello".to_string()])));
+        remove_runtimes_for_connection(&state, &dropped, &connection_id, "receive_loop_ended").await;
+
+        let log_path = root.path().join("logs").join("bridge-lifecycle.jsonl");
+        let contents = std::fs::read_to_string(&log_path)
+            .expect("lifecycle log file should exist after a disconnect");
+        let last = contents
+            .lines()
+            .last()
+            .expect("at least one lifecycle log line");
+        let entry: Value = serde_json::from_str(last).expect("log line is valid JSON");
+        assert_eq!(entry["event"], "disconnect");
+        assert_eq!(entry["reason"], "receive_loop_ended");
+        assert_eq!(entry["remaining_runtimes"], 0);
+        assert_eq!(
+            entry["runtimes"][0]["tab_url"],
+            "https://trello.com/b/abc",
+            "the dropped tab's url must be recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_active_tab_set_selects_by_url_and_reads_back() {
+        let state = two_runtime_state();
+        let set = browser_active_tab_set_call(
+            state.clone(),
+            ToolCallRequest {
+                name: "browser.active_tab.set".to_string(),
+                arguments: json!({ "url_contains": "trello.com" }),
+                target_runtime_id: None,
+                target_url_contains: None,
+                timeout_ms: default_timeout_ms(),
+            },
+        )
+        .await
+        .unwrap();
+        let set_out = set.0.output.clone().unwrap();
+        assert_eq!(set_out["active_runtime_id"].as_str(), Some("rt-trello"));
+
+        // A bare read (no selector) returns the current active tab.
+        let read = browser_active_tab_set_call(
+            state.clone(),
+            ToolCallRequest {
+                name: "browser.active_tab.set".to_string(),
+                arguments: json!({}),
+                target_runtime_id: None,
+                target_url_contains: None,
+                timeout_ms: default_timeout_ms(),
+            },
+        )
+        .await
+        .unwrap();
+        let read_out = read.0.output.clone().unwrap();
+        assert_eq!(read_out["active_runtime_id"].as_str(), Some("rt-trello"));
+    }
+
+    #[tokio::test]
+    async fn browser_active_tab_set_rejects_unknown_url() {
+        let state = two_runtime_state();
+        let error = browser_active_tab_set_call(
+            state,
+            ToolCallRequest {
+                name: "browser.active_tab.set".to_string(),
+                arguments: json!({ "url_contains": "example.org" }),
+                target_runtime_id: None,
+                target_url_contains: None,
+                timeout_ms: default_timeout_ms(),
+            },
+        )
+        .await;
+        let error = match error {
+            Ok(_) => panic!("expected NOT_FOUND for unknown url_contains"),
+            Err(error) => error,
+        };
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+    }
+
     #[test]
     fn actions_site_manifest_advertises_timeout_ms() {
         let manifest = site_actions_tool_manifest();
@@ -1817,6 +2511,254 @@ async fn bridge_payloads_configure_call(
     }))
 }
 
+fn browser_active_tab_set_tool_manifest() -> Value {
+    json!({
+        "name": "browser.active_tab.set",
+        "description": "Set or read the agent-managed active tab (default runtime). When more than one browser tab is connected, calls that carry no target_runtime_id / target_url_contains route to this active tab. Pass runtime_id to choose by exact runtime id, or url_contains to choose the connected tab whose URL contains that substring. Omit both to read the current active tab and the connected runtimes. Per-call routing fields still override the active tab for that one call.",
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "runtime_id": {
+                    "type": "string",
+                    "description": "Runtime id (from actions-json://bridge/runtimes) to make active."
+                },
+                "url_contains": {
+                    "type": "string",
+                    "description": "Make active the connected tab whose URL contains this substring. Errors if it matches more than one runtime."
+                }
+            }
+        }
+    })
+}
+
+async fn browser_active_tab_set_call(
+    state: AppState,
+    request: ToolCallRequest,
+) -> Result<Json<ToolCallResponse>, (StatusCode, Json<Value>)> {
+    let call_id = Uuid::new_v4().to_string();
+    let arguments = request.arguments.as_object().cloned().unwrap_or_default();
+    if let Some(unexpected) = arguments
+        .keys()
+        .find(|key| *key != "runtime_id" && *key != "url_contains")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "invalid_input",
+                "browser.active_tab.set accepts only runtime_id or url_contains.",
+                json!({ "unexpected_argument": unexpected }),
+            ),
+        ));
+    }
+
+    let runtimes = state.runtimes.lock().await;
+    let requested_id = arguments.get("runtime_id").and_then(Value::as_str);
+    let requested_url = arguments.get("url_contains").and_then(Value::as_str);
+
+    // With no selector, this is a read of the current active tab.
+    let resolved_id: Option<String> = if let Some(id) = requested_id {
+        if !runtimes.contains_key(id) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                structured_error(
+                    "runtime_id_not_found",
+                    "No connected runtime has that runtime id.",
+                    json!({ "runtime_id": id, "runtimes": runtime_summaries(&runtimes) }),
+                ),
+            ));
+        }
+        Some(id.to_string())
+    } else if let Some(needle) = requested_url {
+        let matches = runtimes
+            .values()
+            .filter(|client| client.url.as_deref().unwrap_or("").contains(needle))
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [client] => Some(client.runtime_id.clone()),
+            [] => {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    structured_error(
+                        "no_match",
+                        "No connected runtime URL matched url_contains.",
+                        json!({ "url_contains": needle, "runtimes": runtime_summaries(&runtimes) }),
+                    ),
+                ));
+            }
+            _ => {
+                return Err((
+                    StatusCode::CONFLICT,
+                    structured_error(
+                        "multiple_matches",
+                        "url_contains matched multiple runtimes; be more specific or use runtime_id.",
+                        json!({
+                            "url_contains": needle,
+                            "matches": matches.iter().map(|client| runtime_summary(client)).collect::<Vec<_>>()
+                        }),
+                    ),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut active = state.active_runtime_id.lock().await;
+    if let Some(id) = resolved_id {
+        *active = Some(id);
+    } else if active.as_deref().is_none_or(|id| !runtimes.contains_key(id)) {
+        // Reading, but the stored active is stale/unset: default to a connected one.
+        *active = runtimes.keys().next().cloned();
+    }
+    let active_id = active.clone();
+
+    Ok(Json(ToolCallResponse {
+        ok: true,
+        call_id,
+        output: Some(json!({
+            "ok": true,
+            "active_runtime_id": active_id,
+            "active_runtime": active_id
+                .as_deref()
+                .and_then(|id| runtimes.get(id))
+                .map(runtime_summary),
+            "runtimes": runtime_summaries(&runtimes),
+        })),
+        error: None,
+    }))
+}
+
+fn runtime_agent_await_event_tool_manifest() -> Value {
+    json!({
+        "name": "runtime.agent.await_event",
+        "description": "Block until the hosted agent produces its next output event (assistant response, tool call/result, refusal, or lifecycle change), then return the events since your cursor. Returns immediately if a backlog exists. If no event arrives within timeout_ms it returns {idle:true, silent_ms} — a returned idle after silence is the stall signal. Pass the cursor from the previous call to avoid missing events; omit it on the first call to watch only future events. Does not consume the events (read-only cursor).",
+        "input_schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "cursor": {
+                    "type": "integer",
+                    "description": "Last event seq you have seen; returns events with seq > cursor. Omit on first call for latest-only; pass -1 to replay the retained queue from the start."
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "maximum": 60000,
+                    "default": 25000,
+                    "description": "How long to block waiting for the next event before returning idle. Clamped to [1000, 60000]."
+                }
+            }
+        }
+    })
+}
+
+async fn runtime_agent_await_event_call(
+    state: AppState,
+    request: ToolCallRequest,
+) -> Result<Json<ToolCallResponse>, (StatusCode, Json<Value>)> {
+    let call_id = Uuid::new_v4().to_string();
+    let arguments = request.arguments.as_object().cloned().unwrap_or_default();
+
+    // Resolve the runtime (error immediately if none — spec Q-3).
+    let runtimes = state.runtimes.lock().await;
+    let resolved_id: String = if let Some(id) = request
+        .target_runtime_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+    {
+        if !runtimes.contains_key(id) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                structured_error(
+                    "runtime_id_not_found",
+                    "No connected runtime has that runtime id.",
+                    json!({ "runtime_id": id, "runtimes": runtime_summaries(&runtimes) }),
+                ),
+            ));
+        }
+        id.to_string()
+    } else if let Some(needle) = request
+        .target_url_contains
+        .as_deref()
+        .filter(|needle| !needle.is_empty())
+    {
+        let matches = runtimes
+            .values()
+            .filter(|client| client.url.as_deref().unwrap_or("").contains(needle))
+            .map(|client| client.runtime_id.clone())
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [id] => id.clone(),
+            [] => {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    structured_error(
+                        "no_match",
+                        "No connected runtime URL matched target_url_contains.",
+                        json!({ "target_url_contains": needle }),
+                    ),
+                ));
+            }
+            _ => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    structured_error(
+                        "ambiguous_match",
+                        "target_url_contains matched more than one runtime.",
+                        json!({ "target_url_contains": needle }),
+                    ),
+                ));
+            }
+        }
+    } else if let Some(active) = state.active_runtime_id.lock().await.clone() {
+        active
+    } else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            structured_error(
+                "no_runtime",
+                "No target runtime and no active runtime to await events from.",
+                json!({ "runtimes": runtime_summaries(&runtimes) }),
+            ),
+        ));
+    };
+    drop(runtimes);
+
+    let timeout_ms = arguments
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(25_000)
+        .clamp(1_000, 60_000);
+
+    // Default cursor: latest-only (skip the existing backlog). An explicit
+    // cursor (including -1 to replay) overrides.
+    let cursor: i64 = match arguments.get("cursor").and_then(Value::as_i64) {
+        Some(explicit) => explicit,
+        None => {
+            let map = state.agent_event_queues.lock().await;
+            map.get(&resolved_id)
+                .map(|q| q.next_seq as i64 - 1)
+                .unwrap_or(-1)
+        }
+    };
+
+    let output = await_agent_event(&state, &resolved_id, cursor, timeout_ms).await;
+
+    Ok(Json(ToolCallResponse {
+        ok: true,
+        call_id,
+        output: Some(json!({
+            "adapter": "bridge",
+            "ok": true,
+            "primitive": "runtime.agent.await_event",
+            "runtime_id": resolved_id,
+            "value": output,
+        })),
+        error: None,
+    }))
+}
+
 fn djb2_hash_hex(text: &str) -> String {
     let mut hash: u32 = 5381;
     for byte in text.as_bytes() {
@@ -1910,6 +2852,46 @@ fn schema_with_policy_exception_report(schema: Value) -> Value {
     schema
 }
 
+// Add the optional routing meta-fields to a tool's advertised schema so MCP
+// clients (which can only place arguments inside `arguments`) are allowed to
+// carry target_runtime_id / target_url_contains there. They are stripped before
+// executor-facing validation by strip_routing_meta_arguments. Never required.
+fn schema_with_routing_meta(schema: Value) -> Value {
+    let mut schema = schema;
+    let Some(object) = schema.as_object_mut() else {
+        return schema;
+    };
+    object
+        .entry("type".to_string())
+        .or_insert_with(|| json!("object"));
+    let properties = object
+        .entry("properties".to_string())
+        .or_insert_with(|| json!({}));
+    if !properties.is_object() {
+        *properties = json!({});
+    }
+    let properties = properties
+        .as_object_mut()
+        .expect("properties was normalized to object");
+    properties
+        .entry("target_runtime_id".to_string())
+        .or_insert_with(|| {
+            json!({
+                "type": "string",
+                "description": "Route this call to a specific connected runtime by its runtime id (from actions-json://bridge/runtimes). Overrides the active tab."
+            })
+        });
+    properties
+        .entry("target_url_contains".to_string())
+        .or_insert_with(|| {
+            json!({
+                "type": "string",
+                "description": "Route this call to the connected runtime whose URL contains this substring. Overrides the active tab. Errors if it matches more than one runtime."
+            })
+        });
+    schema
+}
+
 fn advertised_input_schema_for_tool(tool: &Value) -> Value {
     let schema = tool
         .get("input_schema")
@@ -1918,11 +2900,12 @@ fn advertised_input_schema_for_tool(tool: &Value) -> Value {
     let Some(name) = tool.get("name").and_then(Value::as_str) else {
         return schema;
     };
-    if direct_mcp_tool_requires_policy_exception_report(name) {
+    let schema = if direct_mcp_tool_requires_policy_exception_report(name) {
         schema_with_policy_exception_report(schema)
     } else {
         schema
-    }
+    };
+    schema_with_routing_meta(schema)
 }
 
 fn extension_executor_supports_primitive(name: &str) -> bool {
@@ -2205,6 +3188,21 @@ fn state_from_catalog(
         bridge_payloads_configure_tool_manifest(),
     )
     .expect("bridge.payloads.configure tool must be insertable into advertised manifest");
+    ensure_advertised_tool(
+        &mut catalog.manifest,
+        browser_active_tab_set_tool_manifest(),
+    )
+    .expect("browser.active_tab.set tool must be insertable into advertised manifest");
+    ensure_advertised_tool(
+        &mut catalog.manifest,
+        runtime_agent_await_event_tool_manifest(),
+    )
+    .expect("runtime.agent.await_event tool must be insertable into advertised manifest");
+    ensure_site_tool(
+        &mut catalog.site_manifest,
+        runtime_agent_await_event_tool_manifest(),
+    )
+    .expect("runtime.agent.await_event tool must be insertable into site manifest");
 
     let timestamp = now_ms();
     let seeded_runtimes = runtime_seeds
@@ -2234,6 +3232,9 @@ fn state_from_catalog(
     AppState {
         catalog: Arc::new(Mutex::new(catalog)),
         storage_root,
+        active_runtime_id: Arc::new(Mutex::new(
+            seeded_runtimes.keys().next().cloned(),
+        )),
         runtimes: Arc::new(Mutex::new(seeded_runtimes)),
         pending: Arc::new(Mutex::new(HashMap::new())),
         last_replay_summary: Arc::new(Mutex::new(None)),
@@ -2241,6 +3242,7 @@ fn state_from_catalog(
         last_storage_hydration: Arc::new(Mutex::new(None)),
         pending_storage_hydrations: Arc::new(Mutex::new(HashMap::new())),
         payload: Arc::new(Mutex::new(PayloadSpillConfig::default())),
+        agent_event_queues: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -2643,9 +3645,16 @@ async fn bridge_runtimes_resource(state: &AppState) -> Value {
     let last_replay_summary = state.last_replay_summary.lock().await.clone();
     let credential_hydration = state.last_credential_hydration.lock().await.clone();
     let storage_hydration = state.last_storage_hydration.lock().await.clone();
+    let active_runtime_id = state
+        .active_runtime_id
+        .lock()
+        .await
+        .clone()
+        .filter(|id| runtimes.contains_key(id));
     json!({
         "connected": !runtimes.is_empty(),
         "count": runtimes.len(),
+        "active_runtime_id": active_runtime_id,
         "runtimes": runtime_summaries(&runtimes),
         "last_replay_summary": last_replay_summary,
         "credential_hydration": credential_hydration,
@@ -2865,6 +3874,12 @@ async fn tools_call(
     if request.name == "bridge.payloads.configure" {
         return bridge_payloads_configure_call(state, request).await;
     }
+    if request.name == "browser.active_tab.set" {
+        return browser_active_tab_set_call(state, request).await;
+    }
+    if request.name == "runtime.agent.await_event" {
+        return runtime_agent_await_event_call(state, request).await;
+    }
 
     let resolved = if request.name == "storage.sync" {
         reload_catalog(&state).await?;
@@ -2944,9 +3959,23 @@ async fn dispatch_resolved_tool_call(
     let result = tokio::time::timeout(Duration::from_millis(resolved.timeout_ms), response_rx)
         .await
         .map_err(|_| {
+            let call_id_for_cleanup = call_id.clone();
+            let state_for_cleanup = state.clone();
+            tokio::spawn(async move {
+                let removed = state_for_cleanup
+                    .pending
+                    .lock()
+                    .await
+                    .remove(&call_id_for_cleanup)
+                    .is_some();
+                eprintln!(
+                    "actions-json-mcp pending timeout name=action_call call_id={} removed_pending={}",
+                    call_id_for_cleanup, removed
+                );
+            });
             (
                 StatusCode::GATEWAY_TIMEOUT,
-                Json(json!({ "error": "action timed out", "call_id": call_id })),
+                Json(json!({ "error": "action timed out", "call_id": call_id, "pending_cleanup": "scheduled" })),
             )
         })?
         .map_err(|_| {
@@ -3416,9 +4445,23 @@ async fn dispatch_state_projection_call(
     let result = tokio::time::timeout(Duration::from_millis(routing.timeout_ms), response_rx)
         .await
         .map_err(|_| {
+            let call_id_for_cleanup = call_id.clone();
+            let state_for_cleanup = state.clone();
+            tokio::spawn(async move {
+                let removed = state_for_cleanup
+                    .pending
+                    .lock()
+                    .await
+                    .remove(&call_id_for_cleanup)
+                    .is_some();
+                eprintln!(
+                    "actions-json-mcp pending timeout name=state_projection_call call_id={} removed_pending={}",
+                    call_id_for_cleanup, removed
+                );
+            });
             (
                 StatusCode::GATEWAY_TIMEOUT,
-                Json(json!({ "error": "state projection call timed out", "call_id": call_id })),
+                Json(json!({ "error": "state projection call timed out", "call_id": call_id, "pending_cleanup": "scheduled" })),
             )
         })?
         .map_err(|_| {
@@ -3652,9 +4695,23 @@ async fn dispatch_site_action_call(
     let result = tokio::time::timeout(Duration::from_millis(routing.timeout_ms), response_rx)
         .await
         .map_err(|_| {
+            let call_id_for_cleanup = call_id.clone();
+            let state_for_cleanup = state.clone();
+            tokio::spawn(async move {
+                let removed = state_for_cleanup
+                    .pending
+                    .lock()
+                    .await
+                    .remove(&call_id_for_cleanup)
+                    .is_some();
+                eprintln!(
+                    "actions-json-mcp pending timeout name=site_action_call call_id={} removed_pending={}",
+                    call_id_for_cleanup, removed
+                );
+            });
             (
                 StatusCode::GATEWAY_TIMEOUT,
-                Json(json!({ "error": "site action call timed out", "call_id": call_id })),
+                Json(json!({ "error": "site action call timed out", "call_id": call_id, "pending_cleanup": "scheduled" })),
             )
         })?
         .map_err(|_| {
@@ -4647,19 +5704,40 @@ fn validate_tool_arguments(
     })
 }
 
+// Routing fields are meta-arguments: an MCP client can only carry them inside
+// `arguments` (the protocol gives the client no sibling to `arguments`), and the
+// tool-call parser already lifts them into ToolCallRequest's typed fields. Strip
+// them before schema validation so a tool with `additionalProperties: false`
+// does not reject a perfectly valid routed call. Without this, the documented
+// "specify target_url_contains" escape hatch is unusable on every generic tool.
+const ROUTING_META_ARGUMENT_KEYS: [&str; 2] = ["target_runtime_id", "target_url_contains"];
+
+fn strip_routing_meta_arguments(arguments: &Value) -> Value {
+    match arguments.as_object() {
+        Some(object) => {
+            let mut stripped = object.clone();
+            for key in ROUTING_META_ARGUMENT_KEYS {
+                stripped.remove(key);
+            }
+            Value::Object(stripped)
+        }
+        None => arguments.clone(),
+    }
+}
+
 fn validate_and_prepare_direct_tool_arguments(
     tool: &Value,
     request: &ToolCallRequest,
 ) -> Result<Value, (StatusCode, Json<Value>)> {
+    let arguments = strip_routing_meta_arguments(&request.arguments);
     if direct_mcp_tool_requires_policy_exception_report(&request.name) {
-        let stripped =
-            validate_and_strip_policy_exception_report(&request.name, &request.arguments)?;
+        let stripped = validate_and_strip_policy_exception_report(&request.name, &arguments)?;
         validate_tool_arguments(tool, &request.name, &stripped)?;
         return Ok(stripped);
     }
 
-    validate_tool_arguments(tool, &request.name, &request.arguments)?;
-    Ok(request.arguments.clone())
+    validate_tool_arguments(tool, &request.name, &arguments)?;
+    Ok(arguments)
 }
 
 fn validate_and_strip_policy_exception_report(
@@ -5012,10 +6090,19 @@ async fn select_runtime(
         return Ok(runtimes.values().next().unwrap().clone());
     }
 
+    // No explicit target and more than one runtime: fall back to the
+    // agent-manageable active tab instead of erroring. This is what lets the
+    // agent hold several tabs open and still issue bare commands.
+    if let Some(active_id) = state.active_runtime_id.lock().await.as_deref() {
+        if let Some(client) = runtimes.get(active_id) {
+            return Ok(client.clone());
+        }
+    }
+
     Err((
         StatusCode::CONFLICT,
         Json(json!({
-            "error": "multiple extension runtimes connected; specify target_runtime_id or target_url_contains",
+            "error": "multiple extension runtimes connected and no active tab is set; specify target_runtime_id or target_url_contains, or set an active tab with browser.active_tab.set",
             "runtimes": runtime_summaries(&runtimes),
             "routing_trace": runtime_routing_trace(&runtimes, request, "ambiguous_without_target")
         })),
@@ -5112,6 +6199,7 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
                     &heartbeat_state,
                     &heartbeat_runtime_ids,
                     &heartbeat_connection_id,
+                    "heartbeat_send_failed",
                 )
                 .await;
                 break;
@@ -5154,7 +6242,7 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
                     .await
                     .insert(runtime_id.clone());
                 let timestamp = now_ms();
-                {
+                let connect_tab_url = {
                     let mut runtimes = state.runtimes.lock().await;
                     if let Some(key) = runtime_key.as_deref() {
                         let superseded = runtimes
@@ -5170,6 +6258,7 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
                             let _ = old_tx.send(Message::Close(None));
                         }
                     }
+                    let tab_url = url.clone();
                     runtimes.insert(
                         runtime_id.clone(),
                         RuntimeClient {
@@ -5186,7 +6275,31 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
                             tx: tx.clone(),
                         },
                     );
-                }
+                    // Establish a default active tab: if none is set, or the
+                    // previously active runtime is no longer connected, adopt
+                    // this freshly connected runtime. An explicit
+                    // browser.active_tab.set always wins over this.
+                    let mut active = state.active_runtime_id.lock().await;
+                    if active
+                        .as_deref()
+                        .is_none_or(|id| !runtimes.contains_key(id))
+                    {
+                        *active = Some(runtime_id.clone());
+                    }
+                    tab_url
+                };
+                // Logged after the runtimes lock is released so the file write
+                // never blocks other connections while holding the map lock.
+                append_lifecycle_log(
+                    state.storage_root.as_deref(),
+                    json!({
+                        "ts_ms": timestamp,
+                        "event": "connect",
+                        "runtime_id": runtime_id,
+                        "connection_id": connection_id,
+                        "tab_url": connect_tab_url,
+                    }),
+                );
                 tokio::spawn(send_storage_hydration_to_runtime(
                     state.clone(),
                     runtime_id.clone(),
@@ -5250,13 +6363,34 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
                         }
                     }
                     let mut pending = state.pending.lock().await;
-                    let should_deliver = pending
-                        .get(call_id)
-                        .map(|pending| Some(pending.runtime_id.as_str()) == item_runtime_id)
-                        .unwrap_or(false);
-                    if should_deliver {
-                        if let Some(pending) = pending.remove(call_id) {
-                            let _ = pending.tx.send(item);
+                    match pending.get(call_id) {
+                        Some(pending_call) if Some(pending_call.runtime_id.as_str()) == item_runtime_id => {
+                            if let Some(pending_call) = pending.remove(call_id) {
+                                eprintln!(
+                                    "actions-json-mcp pending matched type={} call_id={} runtime_id={}",
+                                    item.get("type").and_then(Value::as_str).unwrap_or("unknown"),
+                                    call_id,
+                                    item_runtime_id.unwrap_or("<missing>")
+                                );
+                                let _ = pending_call.tx.send(item);
+                            }
+                        }
+                        Some(pending_call) => {
+                            eprintln!(
+                                "actions-json-mcp pending runtime mismatch type={} call_id={} pending_runtime_id={} item_runtime_id={}",
+                                item.get("type").and_then(Value::as_str).unwrap_or("unknown"),
+                                call_id,
+                                pending_call.runtime_id,
+                                item_runtime_id.unwrap_or("<missing>")
+                            );
+                        }
+                        None => {
+                            eprintln!(
+                                "actions-json-mcp pending missing type={} call_id={} item_runtime_id={}",
+                                item.get("type").and_then(Value::as_str).unwrap_or("unknown"),
+                                call_id,
+                                item_runtime_id.unwrap_or("<missing>")
+                            );
                         }
                     }
                 }
@@ -5276,30 +6410,72 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
                     }
                 }
             }
+            Some("agent_event") => {
+                ingest_agent_event(&state, &item).await;
+            }
             _ => {}
         }
     }
 
     heartbeat_task.abort();
     send_task.abort();
-    remove_runtimes_for_connection(&state, &connection_runtime_ids, &connection_id).await;
+    remove_runtimes_for_connection(
+        &state,
+        &connection_runtime_ids,
+        &connection_id,
+        "receive_loop_ended",
+    )
+    .await;
 }
 
 async fn remove_runtimes_for_connection(
     state: &AppState,
     runtime_ids: &Arc<Mutex<HashSet<String>>>,
     connection_id: &str,
+    reason: &str,
 ) {
     let runtime_ids = runtime_ids.lock().await.clone();
+    let active_before = state.active_runtime_id.lock().await.clone();
     let mut runtimes = state.runtimes.lock().await;
+    let mut removed_active = false;
+    // Collect what we actually removed (id + tab url) so the persistent log can
+    // record which tabs dropped and why, not just that a connection closed.
+    let mut removed: Vec<Value> = Vec::new();
     for runtime_id in runtime_ids {
         if runtimes
             .get(&runtime_id)
             .map(|client| client.connection_id == connection_id)
             .unwrap_or(false)
         {
+            let tab_url = runtimes
+                .get(&runtime_id)
+                .and_then(|client| client.url.clone());
             runtimes.remove(&runtime_id);
+            removed.push(json!({ "runtime_id": runtime_id, "tab_url": tab_url }));
+            if active_before.as_deref() == Some(runtime_id.as_str()) {
+                removed_active = true;
+            }
         }
+    }
+    let remaining = runtimes.len();
+    let next_active = runtimes.keys().next().cloned();
+    drop(runtimes);
+    if removed_active {
+        *state.active_runtime_id.lock().await = next_active;
+    }
+    if !removed.is_empty() {
+        append_lifecycle_log(
+            state.storage_root.as_deref(),
+            json!({
+                "ts_ms": now_ms(),
+                "event": "disconnect",
+                "reason": reason,
+                "connection_id": connection_id,
+                "removed_active": removed_active,
+                "remaining_runtimes": remaining,
+                "runtimes": removed,
+            }),
+        );
     }
 }
 

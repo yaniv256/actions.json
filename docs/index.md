@@ -19,6 +19,7 @@ Use this page to choose what to read next.
 | Understand the Chrome extension runtime | [Chrome Extension](chrome-extension.md) |
 | See what tools the hosted agent can call | [Hosted Agent Tools](hosted-agent-tools.md) |
 | Author or review an action map, workflow, or state projection | [actions.json Format](actions-json-format.md), then [Schema V1 Reference](schema-v1-proposal.md) |
+| Audit, score, package, or prepare a site map for review | [Production Pipeline](actions-json-production-pipeline.md) |
 | Use local storage for site maps and context | [actions.json.storage](actions-json-storage.md) |
 | Reuse overlay templates without sharing private data | [Overlay Templates And Data](overlay-template-data.md) |
 | Connect an external coding agent | [Bridge Architecture](bridge-architecture.md), then [Actions Bridge Protocol](actions-bridge-protocol.md) |
@@ -37,6 +38,12 @@ Use this page to choose what to read next.
   fallback.
 - [Hosted Agent Tools](hosted-agent-tools.md): how `actions.site`, direct
   primitives, screenshots, and storage-backed context reach the hosted agent.
+- [Expenditure Tracking](expenditure-tracking.md): live per-response cost
+  estimation for the hosted `gpt-realtime-2` session, whole-day totals, the
+  cache-miss drain signature, and optional cloud persistence of usage records.
+- [Awaiting Agent Events](agent-event-await.md): the `runtime.agent.await_event`
+  supervision loop — learn of each hosted-agent response, tool call, refusal, or
+  stall event-driven instead of polling.
 
 ## Author Action Maps
 
@@ -49,6 +56,9 @@ Use this page to choose what to read next.
   portable and privileged primitive definitions across browser hosts.
 - [Authoring Skill](../skills/SKILL.md): operational instructions for agents
   that explore sites and write action maps.
+- [Production Pipeline](actions-json-production-pipeline.md): offline audit,
+  readiness score, proof packaging, and review-bundle preparation for durable
+  site maps.
 
 ## Use Storage
 
@@ -104,6 +114,12 @@ Use this page to choose what to read next.
   strict validation, overlay menu control, the session task queue, the
   popup-settings UI restructure, anti-masking error routing, and observable
   storage hydration.
+- [0.1.118 Release Notes](release-notes/0.1.118.md)
+- [0.1.119 Release Notes](release-notes/0.1.119.md)
+- [0.1.148 Release Notes](release-notes/0.1.148.md): live expenditure tracking
+  and cloud persistence, the `runtime.agent.await_event` agent event stream,
+  tab-lifecycle primitives, agent memory controls, and the npx bridge wrapper
+  with prebuilt cross-platform binaries.
 
 ## UI Implementation Reference
 

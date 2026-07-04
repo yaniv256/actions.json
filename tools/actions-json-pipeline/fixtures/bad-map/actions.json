@@ -1,0 +1,110 @@
+{
+  "protocol": "actions.json",
+  "name": "bad.fixture",
+  "x_actions": {
+    "files": [
+      {
+        "id": "missing-skill",
+        "path": "SKILL.md",
+        "kind": "skill"
+      }
+    ]
+  },
+  "state_projections": [
+    {
+      "name": "bad.cards",
+      "snapshot": {
+        "version": 1,
+        "source": "dom",
+        "extract": []
+      },
+      "postconditions": {
+        "bad.card.archive": {
+          "projection": "bad.cards",
+          "verify": {
+            "language": "jsonata",
+            "expression": "{% true %}"
+          }
+        }
+      }
+    }
+  ],
+  "tools": [
+    {
+      "name": "bad.button.find",
+      "description": "Find a generic button.",
+      "input_schema": {
+        "type": "object"
+      },
+      "x_actions": {
+        "handler": "locator.element_info",
+        "binding": {
+          "arguments": {
+            "locator": {
+              "selector": "button"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "bad.modal.find",
+      "description": "Find an unscoped modal.",
+      "input_schema": {
+        "type": "object"
+      },
+      "x_actions": {
+        "handler": "locator.element_info",
+        "binding": {
+          "arguments": {
+            "locator": {
+              "selector": "[role='dialog']"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "bad.card.move",
+      "description": "Move a card without verification.",
+      "input_schema": {
+        "type": "object"
+      },
+      "workflow": {
+        "version": 1,
+        "expression_language": "jsonata",
+        "steps": [
+          {
+            "id": "click",
+            "primitive": "pointer.click",
+            "args": {
+              "x": 1,
+              "y": 2
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "bad.card.archive",
+      "description": "Archive a card with weak verification.",
+      "input_schema": {
+        "type": "object"
+      },
+      "workflow": {
+        "version": 1,
+        "expression_language": "jsonata",
+        "steps": [
+          {
+            "id": "click",
+            "primitive": "pointer.click",
+            "args": {
+              "x": 1,
+              "y": 2
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
