@@ -1,1 +1,0 @@
-../../../docs/schema-v1-proposal.md

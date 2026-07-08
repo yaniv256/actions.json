@@ -222,6 +222,14 @@
             "text": {
               "type": "string",
               "description": "User-style instruction to send into the active hosted Realtime session for testing."
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "queue",
+                "interrupt"
+              ],
+              "description": "How to handle an in-flight response: 'queue' (default) waits for it to finish then sends; 'interrupt' cancels the active response and sends immediately."
             }
           },
           "additionalProperties": false
@@ -282,6 +290,13 @@
                 "middle",
                 "right"
               ]
+            },
+            "modifiers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Optional modifier keys held during the click (shift, alt/option, control/ctrl, meta/cmd/command). E.g. [\"Shift\"] for shift-click range selection."
             }
           },
           "additionalProperties": false
@@ -478,7 +493,7 @@
         "reason": null,
         "capability_class": "mixed",
         "portable": false,
-        "summary": "Dispatch a page-level keyboard key or modifier chord to the focused element.",
+        "summary": "Dispatch a page-level keyboard key or modifier chord to the focused element. Pass trusted:true to dispatch a real (debugger) key event that canvas editors honor; default is synthetic.",
         "input_schema": {
           "type": "object",
           "required": [
@@ -504,6 +519,106 @@
                   "Option"
                 ]
               }
+            },
+            "trusted": {
+              "type": "boolean",
+              "description": "When true, dispatch a TRUSTED key event via the browser debugger (reaches canvas editors like Google Slides/Docs/Sheets, where synthetic keys are ignored — e.g. Control+A to select all). Defaults to false (synthetic, portable). Run both and compare to confirm whether trusted is actually required."
+            },
+            "repeat": {
+              "type": "integer",
+              "description": "Press the chord this many times inside ONE trusted debugger session (1-1000, default 1). The fast path for positional caret walks (e.g. ArrowRight x400 in milliseconds-per-key instead of ~0.5s/key)."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "keyboard.press_gated",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "debug",
+        "portable": false,
+        "summary": "Accessibility-gated key-repeat: press a key/chord and gate each repeat on the a11y layer's return (stop=count|until|path, positive/negative polarity), halting loud on a path mismatch. Reliable word/menu navigation where open-loop bursts coalesce. Always trusted (CDP).",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "key",
+            "stop"
+          ],
+          "properties": {
+            "key": {
+              "type": "string",
+              "description": "Key name, or a compact chord such as Control+ArrowRight, ArrowDown, Shift+End."
+            },
+            "modifiers": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "Alt",
+                  "Control",
+                  "Ctrl",
+                  "Meta",
+                  "Cmd",
+                  "Command",
+                  "Shift",
+                  "Option"
+                ]
+              },
+              "description": "Modifiers held for every press (or fold them into `key` as a chord)."
+            },
+            "stop": {
+              "type": "string",
+              "enum": [
+                "count",
+                "until",
+                "path"
+              ],
+              "description": "count = press N times (no gate); until = press until `expect` matches; path = advance through the ordered `expect` regex list."
+            },
+            "count": {
+              "type": "integer",
+              "description": "Number of presses when stop=count (0-2000)."
+            },
+            "expect": {
+              "description": "Regex (stop=until: one) or ordered list of regexes (stop=path: one per expected a11y return). Each is matched against the a11y layer's value after that press.",
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            },
+            "polarity": {
+              "description": "match (default) advances on a regex match; no_match advances on a non-match. May be a single value or a per-step array (path).",
+              "oneOf": [
+                {
+                  "type": "string",
+                  "enum": [
+                    "match",
+                    "no_match"
+                  ]
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "match",
+                      "no_match"
+                    ]
+                  }
+                }
+              ]
+            },
+            "max_presses": {
+              "type": "integer",
+              "description": "Safety cap on total presses (default 200, max 2000). On hitting it the primitive returns a clean partial (steps_done + position), not an error."
             }
           },
           "additionalProperties": false
@@ -644,11 +759,11 @@
       },
       {
         "name": "clipboard.write",
-        "support": "unsupported",
-        "reason": "transfer_buffer_preferred",
-        "capability_class": "privileged",
-        "portable": false,
-        "summary": "Write text to the extension-approved clipboard or transfer surface when permission is available.",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Write text to the system clipboard (pure clipboard I/O).",
         "input_schema": {
           "type": "object",
           "required": [
@@ -664,11 +779,11 @@
       },
       {
         "name": "clipboard.read",
-        "support": "unsupported",
-        "reason": "transfer_buffer_preferred",
-        "capability_class": "privileged",
-        "portable": false,
-        "summary": "Read text from the extension-approved clipboard or transfer surface when permission is available.",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Read the current system clipboard text (pure clipboard I/O).",
         "input_schema": {
           "type": "object",
           "properties": {},
@@ -823,6 +938,26 @@
         "capability_class": "portable",
         "portable": true,
         "summary": "Resolve a locator and return its visible text content.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "locator"
+          ],
+          "properties": {
+            "locator": {
+              "type": "object"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "dom.focus",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Move keyboard focus to the element matched by a locator (calls element.focus()). Use to re-seat focus on an intended target after a transient focus-owning surface (an overlay search/find field, a command palette, a popover input) closes without returning focus. Returns { focused, active_is_target, selection_preserved, selection_before_length, selection_after_length } so callers can tell whether focusing kept or collapsed an existing text selection.",
         "input_schema": {
           "type": "object",
           "required": [
@@ -1457,6 +1592,353 @@
             ],
             "component": "ActionsJsonTaskQueue"
           }
+        }
+      },
+      {
+        "name": "text.select",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Select a range on the page (a target's or the focused element's editable contents).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "object",
+              "description": "Optional locator. Omit to use the focused element."
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "all"
+              ],
+              "default": "all"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "clipboard.copy",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Move the current page selection into the system clipboard (page -> clipboard).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "object",
+              "description": "Optional locator whose selection to copy. Omit to use the current selection / focused element."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "clipboard.paste",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Paste text (given, or the system clipboard) into a DOM element via a synthetic paste event; reaches iframe-hosted editors. Supply html for structured content (e.g. a <table> that Google Sheets expands into a range).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "description": "Optional. Plain-text flavor to paste. Omit to paste the current system clipboard."
+            },
+            "html": {
+              "type": "string",
+              "description": "Optional. Exact text/html clipboard flavor. Use for tables or rich runs (e.g. an HTML <table> so Google Sheets expands a real multi-column range). Omitted: html is derived from text."
+            },
+            "target": {
+              "type": "object",
+              "description": "Optional locator to paste into. Omit to use the focused element. An iframe target falls back to the focused inner element."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "page.fetch",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Authenticated same-origin GET of a URL from the page context; returns the raw response body (read-only).",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "url"
+          ],
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "Same-origin URL to GET (authenticated with the page session). Cross-origin or non-GET is rejected."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "marker.query",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Resolve a registered marker to its live location by running its recipe.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "id"
+          ],
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The marker id, as emitted in the projection output's markers[]."
+            }
+          }
+        }
+      },
+      {
+        "name": "cursor.move_to",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Move the text cursor to a cursor-type marker's location by running its recipe.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "marker"
+          ],
+          "properties": {
+            "marker": {
+              "type": "string",
+              "description": "The cursor-marker id from the projection output's markers[]."
+            }
+          }
+        }
+      },
+      {
+        "name": "pointer.move_to",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Move the mouse pointer to a pointer-type marker's live location.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "marker"
+          ],
+          "properties": {
+            "marker": {
+              "type": "string",
+              "description": "The pointer-marker id from the projection output's markers[]."
+            }
+          }
+        }
+      },
+      {
+        "name": "text.type",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Type a string at the focused element (trusted:true overtypes a selection in canvas editors).",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "text"
+          ],
+          "properties": {
+            "text": {
+              "type": "string",
+              "description": "Text to type at the focused element."
+            },
+            "trusted": {
+              "type": "boolean",
+              "description": "When true, types via CDP Input.insertText (trusted) — REPLACES the active selection and reaches canvas editors (Docs/Slides/Sheets). Default false = synthetic insert at the focused editable."
+            },
+            "mode": {
+              "type": "string",
+              "description": "Synthetic path only: 'insert' (default) or 'replace'."
+            },
+            "select_back_chars": {
+              "type": "number",
+              "description": "Trusted path only: before typing, extend the selection backward this many characters (Shift+Left) so the type overtypes exactly that span — one atomic CDP call. Use the character length of the phrase to replace."
+            }
+          }
+        }
+      },
+      {
+        "name": "a11y.tree",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "privileged",
+        "portable": false,
+        "summary": "Accessibility-tree outline via the CDP Accessibility domain (background/debugger authority).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "tab_id": {
+              "type": "integer",
+              "description": "Target tab. Defaults to the routed/active tab."
+            },
+            "max_depth": {
+              "type": "integer"
+            },
+            "max_nodes": {
+              "type": "integer"
+            }
+          },
+          "additionalProperties": false
+        },
+        "x_actions": {
+          "handler": "background"
+        }
+      },
+      {
+        "name": "a11y.query",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "privileged",
+        "portable": false,
+        "summary": "Identity-based element lookup (role + accessible name) with clickable center.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "tab_id": {
+              "type": "integer",
+              "description": "Target tab. Defaults to the routed/active tab."
+            },
+            "role": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "name_contains": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "x_actions": {
+          "handler": "background"
+        }
+      },
+      {
+        "name": "a11y.events.read",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "bridge",
+        "portable": false,
+        "summary": "Cursored read of the buffered announcement history (bridge-side store).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "since": {
+              "type": "integer"
+            },
+            "limit": {
+              "type": "integer"
+            }
+          },
+          "additionalProperties": false
+        },
+        "x_actions": {
+          "handler": "bridge"
+        }
+      },
+      {
+        "name": "a11y.announcements_subscribe",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "bridge",
+        "portable": false,
+        "summary": "Per-(agent, tab) announcement delivery configuration (inject/buffer/off).",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "subscriber": {
+              "type": "string"
+            },
+            "tab_id": {
+              "type": "integer"
+            },
+            "assertive": {
+              "type": "string"
+            },
+            "polite": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "x_actions": {
+          "handler": "bridge"
+        }
+      },
+      {
+        "name": "a11y.announcements_configure",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "bridge",
+        "portable": false,
+        "summary": "Alias of a11y.announcements_subscribe.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "subscriber": {
+              "type": "string"
+            },
+            "tab_id": {
+              "type": "integer"
+            },
+            "assertive": {
+              "type": "string"
+            },
+            "polite": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "x_actions": {
+          "handler": "bridge"
+        }
+      },
+      {
+        "name": "a11y.watch",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "privileged",
+        "portable": false,
+        "summary": "Inject the live-region observer (all frames) + enable screen-reader mode so a tab narrates itself.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "tab_id": {
+              "type": "integer",
+              "description": "Target tab. Defaults to the routed/active tab."
+            },
+            "enable_screen_reader": {
+              "type": "boolean"
+            },
+            "screen_reader_chord": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "x_actions": {
+          "handler": "background"
         }
       }
     ]
@@ -2122,6 +2604,14 @@
           "text": {
             "type": "string",
             "description": "User-style instruction to send into the active hosted Realtime session for testing."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "queue",
+              "interrupt"
+            ],
+            "description": "How to handle an in-flight response: 'queue' (default) waits for it to finish then sends; 'interrupt' cancels the active response and sends immediately."
           }
         },
         "required": [
@@ -2461,6 +2951,13 @@
                 "minimum": 0,
                 "maximum": 20,
                 "default": 4
+              },
+              "frame": {
+                "type": [
+                  "string",
+                  "array"
+                ],
+                "description": "Optional CSS selector (or array of selectors, outer->inner) for iframe(s) to target inside. Same-origin only; a cross-origin frame errors frame_cross_origin."
               }
             },
             "additionalProperties": false
@@ -2641,6 +3138,13 @@
             "type": "integer",
             "minimum": 12,
             "maximum": 500
+          },
+          "frame": {
+            "type": [
+              "string",
+              "array"
+            ],
+            "description": "Optional CSS selector (or array of selectors, outer->inner) for iframe(s) to target inside. Same-origin only; a cross-origin frame errors frame_cross_origin."
           }
         },
         "additionalProperties": false
@@ -2731,7 +3235,16 @@
         "type": "object",
         "properties": {
           "locator": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "frame": {
+                "type": [
+                  "string",
+                  "array"
+                ],
+                "description": "Optional CSS selector (or array of selectors, outer->inner) for iframe(s) to target inside. Same-origin only; a cross-origin frame errors frame_cross_origin."
+              }
+            }
           }
         },
         "required": [
@@ -2847,6 +3360,13 @@
               "middle",
               "right"
             ]
+          },
+          "modifiers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional modifier keys held during the click (shift, alt/option, control/ctrl, meta/cmd/command). E.g. [\"Shift\"] for shift-click range selection."
           }
         },
         "required": [
@@ -3077,7 +3597,7 @@
     },
     {
       "name": "keyboard.press",
-      "description": "Dispatch a keyboard key or modifier chord to the focused page element. Use this for Enter/Escape/Tab flows after focusing a visible target.",
+      "description": "Dispatch a keyboard key or modifier chord to the focused page element. Use this for Enter/Escape/Tab flows after focusing a visible target Pass trusted:true for a real (debugger-dispatched) key that reaches canvas editors like Google Slides (e.g. Control+A); default false is the synthetic, portable path — run both and compare to see if trusted is needed.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -3100,6 +3620,10 @@
                 "Option"
               ]
             }
+          },
+          "trusted": {
+            "type": "boolean",
+            "description": "When true, dispatch a TRUSTED key event via the browser debugger (reaches canvas editors like Google Slides/Docs/Sheets, where synthetic keys are ignored — e.g. Control+A to select all). Defaults to false (synthetic, portable). Run both and compare to confirm whether trusted is actually required."
           }
         },
         "required": [
@@ -3119,6 +3643,110 @@
             "actionsJsonOverlay.keyboardPress"
           ],
           "component": "ActionsJsonOverlay"
+        }
+      }
+    },
+    {
+      "name": "keyboard.press_gated",
+      "description": "ACCESSIBILITY-GATED key-repeat: press a key/chord repeatedly, gating each repeat on what the accessibility layer reports after the previous press. RELIABLE where an open-loop burst coalesces (e.g. Ctrl+ArrowRight word-jumps on Google Docs). Surface-agnostic — also drives menu/listbox/field navigation. stop=count presses N times; stop=until presses until the a11y return matches the single `expect` regex; stop=path advances through the ordered `expect` regex list one press per step and HALTS LOUD on a mismatch (steps_done/expected/actual returned) so the caller re-reads instead of drifting. polarity=match advances on a regex match, no_match advances on a non-match. Always trusted (CDP).",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "key",
+          "stop"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "Key name, or a compact chord such as Control+ArrowRight, ArrowDown, Shift+End."
+          },
+          "modifiers": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "Alt",
+                "Control",
+                "Ctrl",
+                "Meta",
+                "Cmd",
+                "Command",
+                "Shift",
+                "Option"
+              ]
+            },
+            "description": "Modifiers held for every press (or fold them into `key` as a chord)."
+          },
+          "stop": {
+            "type": "string",
+            "enum": [
+              "count",
+              "until",
+              "path"
+            ],
+            "description": "count = press N times (no gate); until = press until `expect` matches; path = advance through the ordered `expect` regex list."
+          },
+          "count": {
+            "type": "integer",
+            "description": "Number of presses when stop=count (0-2000)."
+          },
+          "expect": {
+            "description": "Regex (stop=until: one) or ordered list of regexes (stop=path: one per expected a11y return). Each is matched against the a11y layer's value after that press.",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "polarity": {
+            "description": "match (default) advances on a regex match; no_match advances on a non-match. May be a single value or a per-step array (path).",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "match",
+                  "no_match"
+                ]
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "match",
+                    "no_match"
+                  ]
+                }
+              }
+            ]
+          },
+          "max_presses": {
+            "type": "integer",
+            "description": "Safety cap on total presses (default 200, max 2000). On hitting it the primitive returns a clean partial (steps_done + position), not an error."
+          }
+        },
+        "additionalProperties": false
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "dispatchGatedRepeat",
+        "scope": "active_surface",
+        "source": {
+          "files": [
+            "src/background.js",
+            "src/a11y/gated-repeat.mjs"
+          ],
+          "symbols": [
+            "dispatchGatedRepeat",
+            "runGatedRepeat"
+          ],
+          "component": "BackgroundWorker"
         }
       }
     },
@@ -3381,6 +4009,348 @@
           ],
           "component": "ActionsJsonTaskQueue"
         }
+      }
+    },
+    {
+      "name": "text.select",
+      "description": "Select a range on the page (a target's editable contents, or the focused element's contents). Precursor to clipboard.copy.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object",
+            "description": "Optional locator. Omit to use the focused element."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "all"
+            ],
+            "default": "all"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "clipboard.copy",
+      "description": "Move the current page selection into the system clipboard (page -> clipboard). Dispatches a synthetic copy event so page-side copy handlers run and writes the selection text to the system clipboard.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object",
+            "description": "Optional locator whose selection to copy. Omit to use the current selection / focused element."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "clipboard.paste",
+      "description": "Paste into a DOM element (clipboard -> page). With text: paste that plain text. With html: paste that exact text/html flavor (use for tables/rich runs — e.g. an HTML <table> that Google Sheets expands into a real multi-column range). Without text: paste the current system clipboard. Dispatches a synthetic paste event at the target (default: focused element); this is the way to write into iframe-hosted editors like Google Docs where text.insert cannot reach.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Optional. Plain-text flavor to paste. Omit to paste the current system clipboard."
+          },
+          "html": {
+            "type": "string",
+            "description": "Optional. Exact text/html clipboard flavor. Use for tables or rich runs (e.g. an HTML <table> so Google Sheets expands a real multi-column range). Omitted: html is derived from text."
+          },
+          "target": {
+            "type": "object",
+            "description": "Optional locator to paste into. Omit to use the focused element. An iframe target falls back to the focused inner element."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "clipboard.read",
+      "description": "Read the current system clipboard text. Pure clipboard I/O; does not touch the page.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "clipboard.write",
+      "description": "Write text to the system clipboard. Pure clipboard I/O; does not touch the page.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "page.fetch",
+      "description": "Authenticated same-origin GET of a URL from the page context; returns the raw response body. Use to read a page-published text/HTML view (e.g. Google Docs /mobilebasic, Sheets /htmlview) that the canvas-rendered DOM does not expose. Cross-origin or non-GET is rejected; app-specific parsing belongs in the site map.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Same-origin URL to GET (authenticated with the page session). Cross-origin or non-GET is rejected."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "marker.query",
+      "description": "Resolve a registered projection marker to its LIVE on-screen location (computed now by running the marker's recipe; coordinates are never cached — re-query after scrolling). Markers are minted by running a state projection that declares them.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The marker id, as emitted in the projection output's markers[]."
+          }
+        }
+      }
+    },
+    {
+      "name": "cursor.move_to",
+      "description": "Run a CURSOR-type marker's recipe so the text cursor (caret) ends at the marker's location. The marker's promise: after this call the caret is there. Use markers minted by the current page's projection; re-run the projection after navigation.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "marker"
+        ],
+        "properties": {
+          "marker": {
+            "type": "string",
+            "description": "The cursor-marker id from the projection output's markers[]."
+          }
+        }
+      }
+    },
+    {
+      "name": "pointer.move_to",
+      "description": "Run a POINTER-type marker's recipe and move the mouse pointer to the marker's live location. Compose selections as: pointer.move_to(start) + pointer.click, then pointer.move_to(end) + pointer.click{modifiers:[\"Shift\"]}.",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "marker"
+        ],
+        "properties": {
+          "marker": {
+            "type": "string",
+            "description": "The pointer-marker id from the projection output's markers[]."
+          }
+        }
+      }
+    },
+    {
+      "name": "text.type",
+      "description": "Type a string at the focused element as keystrokes. Synthetic by default; with trusted:true it uses CDP Input.insertText, which overtypes the active selection and works in canvas editors — the overtype step after a keyboard selection (clipboard.paste does not route to a keyboard-made selection).",
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Text to type at the focused element."
+          },
+          "trusted": {
+            "type": "boolean",
+            "description": "When true, types via CDP Input.insertText (trusted) — REPLACES the active selection and reaches canvas editors (Docs/Slides/Sheets). Default false = synthetic insert at the focused editable."
+          },
+          "mode": {
+            "type": "string",
+            "description": "Synthetic path only: 'insert' (default) or 'replace'."
+          },
+          "select_back_chars": {
+            "type": "number",
+            "description": "Trusted path only: before typing, extend the selection backward this many characters (Shift+Left) so the type overtypes exactly that span — one atomic CDP call. Use the character length of the phrase to replace."
+          }
+        }
+      }
+    },
+    {
+      "name": "a11y.tree",
+      "description": "Accessibility-tree outline of the page (role/name/value/state, live regions annotated) from the CDP Accessibility domain. The blind agent's map — consult before screenshot-squinting.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tab_id": {
+            "type": "integer",
+            "description": "Target tab. Defaults to the routed/active tab."
+          },
+          "max_depth": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 40
+          },
+          "max_nodes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2000
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "a11y.query",
+      "description": "Resolve an element by accessibility identity (role and/or accessible name) to its node and clickable center — the identity-based locator that replaces CSS/geometry targeting.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tab_id": {
+            "type": "integer",
+            "description": "Target tab. Defaults to the routed/active tab."
+          },
+          "role": {
+            "type": "string",
+            "description": "AX role, e.g. button, link, textbox."
+          },
+          "name": {
+            "type": "string",
+            "description": "Exact accessible name."
+          },
+          "name_contains": {
+            "type": "string",
+            "description": "Accessible-name substring match."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "a11y.events.read",
+      "description": "Read the buffered a11y announcement history (the speech history): live-region utterances produced by the ChromeVox core, cursored. Inject-mode announcements also piggyback on every tool result.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "since": {
+            "type": "integer",
+            "description": "Cursor from a prior read; returns records with seq > since."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "a11y.announcements_subscribe",
+      "description": "Adjust this agent's own listening settings for a11y announcements, per tab (an agent manages only its own subscription). Modes: inject (piggyback on tool results), buffer (history only), off.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "subscriber": {
+            "type": "string",
+            "enum": [
+              "mcp",
+              "hosted"
+            ],
+            "default": "mcp"
+          },
+          "tab_id": {
+            "type": "integer",
+            "description": "Scope to one tab; omit for the subscriber-wide default."
+          },
+          "assertive": {
+            "type": "string",
+            "enum": [
+              "inject",
+              "buffer",
+              "off"
+            ]
+          },
+          "polite": {
+            "type": "string",
+            "enum": [
+              "inject",
+              "buffer",
+              "off"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "a11y.announcements_configure",
+      "description": "Alias of a11y.announcements_subscribe: update per-(agent, tab) announcement delivery modes.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "subscriber": {
+            "type": "string",
+            "enum": [
+              "mcp",
+              "hosted"
+            ],
+            "default": "mcp"
+          },
+          "tab_id": {
+            "type": "integer"
+          },
+          "assertive": {
+            "type": "string",
+            "enum": [
+              "inject",
+              "buffer",
+              "off"
+            ]
+          },
+          "polite": {
+            "type": "string",
+            "enum": [
+              "inject",
+              "buffer",
+              "off"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "a11y.watch",
+      "description": "Start listening to a tab's live regions: inject the accessibility observer into all frames (idempotent — works on already-open tabs) and enable the site's screen-reader mode so it narrates itself. Call once before expecting a11y announcements.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tab_id": {
+            "type": "integer",
+            "description": "Target tab. Defaults to the routed/active tab."
+          },
+          "enable_screen_reader": {
+            "type": "boolean",
+            "default": true,
+            "description": "Enable the site screen-reader mode (e.g. Docs Ctrl+Alt+Z) idempotently."
+          },
+          "screen_reader_chord": {
+            "type": "string",
+            "description": "Override the SR-mode toggle chord (default Control+Alt+z)."
+          }
+        },
+        "additionalProperties": false
       }
     }
   ],

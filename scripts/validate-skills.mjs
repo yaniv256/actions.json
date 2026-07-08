@@ -1,9 +1,13 @@
 import { readdir, readFile, readlink } from "node:fs/promises";
 import { join } from "node:path";
 
-const canonicalSkillPath = "skills/SKILL.md";
-const openAiMetadataPath = "skills/agents/openai.yaml";
-const gettingStartedPath = "skills/references/getting-started.md";
+const canonicalSkillPath = "skills/write-actions-json/SKILL.md";
+const openAiMetadataPath = "skills/write-actions-json/agents/openai.yaml";
+const gettingStartedPath = "skills/write-actions-json/references/getting-started.md";
+// Skills under skills/ that are standalone submodules with their own repo and
+// validation. They are not this repo's canonical inline authoring skill, so the
+// canonical-skill discovery below must ignore them.
+const submoduleSkillDirs = ["skills/incident-investigation"];
 const publicDocReferences = [
   "actions-bridge-protocol.md",
   "actions-json-format.md",
@@ -55,10 +59,12 @@ function parseFrontmatter(path, text) {
   }
 }
 
-const skillPaths = await findSkillFiles("skills");
+const skillPaths = (await findSkillFiles("skills")).filter(
+  (path) => !submoduleSkillDirs.some((dir) => path.startsWith(`${dir}/`)),
+);
 if (skillPaths.length !== 1 || skillPaths[0] !== canonicalSkillPath) {
   throw new Error(
-    `Expected exactly one installable skill at ${canonicalSkillPath}; found ${skillPaths.join(", ")}`,
+    `Expected exactly one inline installable skill at ${canonicalSkillPath}; found ${skillPaths.join(", ")}`,
   );
 }
 
@@ -75,10 +81,10 @@ for (const phrase of [
   "Chrome Extension",
   "Bookmarklet / Embed",
   "Setup Reference",
-  "skills/references/getting-started.md",
+  "skills/write-actions-json/references/getting-started.md",
   "Documentation Routing",
-  "skills/references/docs/actions-json-format.md",
-  "skills/references/docs/primitive-dictionary-architecture.md",
+  "skills/write-actions-json/references/docs/actions-json-format.md",
+  "skills/write-actions-json/references/docs/primitive-dictionary-architecture.md",
   "internal-docs",
   "Stable MCP-Shaped Tool Pattern",
   "not a fully conforming MCP server",
@@ -93,9 +99,9 @@ for (const phrase of [
 }
 
 for (const filename of publicDocReferences) {
-  const path = `skills/references/docs/${filename}`;
+  const path = `skills/write-actions-json/references/docs/${filename}`;
   const target = await readlink(path);
-  const expected = `../../../docs/${filename}`;
+  const expected = `../../../../docs/${filename}`;
   if (target !== expected) {
     throw new Error(`${path}: expected symlink to ${expected}, found ${target}`);
   }
@@ -109,7 +115,7 @@ for (const internalTopic of [
   "open-browser-use-primitive-inventory.md",
   "overlay-runtime-prototype.md",
 ]) {
-  if (core.includes(`docs/${internalTopic}`) || core.includes(`skills/references/docs/${internalTopic}`)) {
+  if (core.includes(`docs/${internalTopic}`) || core.includes(`skills/write-actions-json/references/docs/${internalTopic}`)) {
     throw new Error(`${canonicalSkillPath}: should not route public skill users to ${internalTopic}`);
   }
 }
@@ -134,7 +140,7 @@ for (const phrase of [
 const openAiMetadata = await readFile(openAiMetadataPath, "utf8");
 for (const phrase of [
   "write-actions-json",
-  "skills/SKILL.md",
+  "skills/write-actions-json/SKILL.md",
 ]) {
   if (!openAiMetadata.includes(phrase)) {
     throw new Error(`${openAiMetadataPath}: missing required phrase: ${phrase}`);

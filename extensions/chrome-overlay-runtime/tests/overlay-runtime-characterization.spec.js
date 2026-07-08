@@ -3402,7 +3402,7 @@ test("background session log handler returns stored agent memory without dynamic
       },
       tabs: {
         async get(id) {
-          return { id, windowId: 77, url: "https://pragmaworks.dev/start" };
+          return { id, windowId: 77, url: "https://acme.example/start" };
         },
         async group() {
           return 42;

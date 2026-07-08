@@ -35,6 +35,10 @@ if [[ "$out_dir" != /* ]]; then
   out_dir="$repo_root/$out_dir"
 fi
 
+# The a11y layer ships a built bundle (ChromeVox policy core; U2) — build it
+# so the zip always carries a bundle matching the sources being packaged.
+node "$repo_root/extensions/chrome-overlay-runtime/esbuild.a11y.mjs"
+
 mkdir -p "$out_dir"
 rm -f "$out_dir/$artifact_name" "$out_dir/SHA256SUMS.txt"
 
@@ -76,7 +80,12 @@ rm -f "$out_dir/$artifact_name" "$out_dir/SHA256SUMS.txt"
     src/offscreen-agent.js \
     src/popup.js \
     src/sidepanel.js \
-    src/storage-bundle.mjs
+    src/storage-bundle.mjs \
+    src/a11y/automation_shim.js \
+    src/a11y/announcer.js \
+    src/a11y/gated-repeat.mjs \
+    src/a11y/live_region_observer.js \
+    dist/a11y-bundle.js
 )
 
 (

@@ -54,7 +54,7 @@ Use this page to choose what to read next.
   validation) and `state_projections` schemas.
 - [Primitive Dictionary Architecture](primitive-dictionary-architecture.md):
   portable and privileged primitive definitions across browser hosts.
-- [Authoring Skill](../skills/SKILL.md): operational instructions for agents
+- [Authoring Skill](../skills/write-actions-json/SKILL.md): operational instructions for agents
   that explore sites and write action maps.
 - [Production Pipeline](actions-json-production-pipeline.md): offline audit,
   readiness score, proof packaging, and review-bundle preparation for durable

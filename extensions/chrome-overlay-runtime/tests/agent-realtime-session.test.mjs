@@ -101,6 +101,8 @@ test("hosted realtime session fails closed when no OpenAI key is configured", as
     inputMuted: true,
     outputMuted: true,
     textOnly: true,
+    busy: false,
+    activeResponseId: null,
   });
 });
 
@@ -119,6 +121,8 @@ test("hosted realtime session starts gpt-realtime-2 with a fake transport and re
     inputMuted: true,
     outputMuted: true,
     textOnly: true,
+    busy: false,
+    activeResponseId: null,
   });
   assert.equal(transportFactory.calls[0][0], "create");
   assert.equal(transportFactory.calls[0][1].model, "gpt-realtime-2");
@@ -132,6 +136,8 @@ test("hosted realtime session starts gpt-realtime-2 with a fake transport and re
     inputMuted: true,
     outputMuted: true,
     textOnly: true,
+    busy: false,
+    activeResponseId: null,
     credential: {
       configured: true,
       redacted: "sk-proj...3456",
@@ -368,6 +374,8 @@ test("hosted realtime session stop closes the active transport and clears transi
     inputMuted: false,
     outputMuted: false,
     textOnly: true,
+    busy: false,
+    activeResponseId: null,
   });
 });
 
@@ -837,7 +845,7 @@ test("hosted realtime session log preserves compact tool arguments and results",
             primitive: "locator.element_info",
             value: {
               locator: call.arguments.locator,
-              text: "genspec.dev",
+              text: "beta.example",
               clickable_center: { x: 412.25, y: 538.5 },
               bounding_box: {
                 x: 360,
@@ -865,16 +873,16 @@ test("hosted realtime session log preserves compact tool arguments and results",
         {
           type: "function_call",
           name: "locator.element_info",
-          call_id: "call-genspec-locator",
+          call_id: "call-beta-locator",
           arguments: JSON.stringify(
             fallbackArgs(
               {
                 locator: {
-                  selector: "a[href*='genspec.dev']",
-                  text_contains: "genspec.dev",
+                  selector: "a[href*='beta.example']",
+                  text_contains: "beta.example",
                 },
               },
-              { tool: "locator.element_info", actions_json_path: "pragmaworks.links.genspec.geometry" },
+              { tool: "locator.element_info", actions_json_path: "acme.links.beta.geometry" },
             ),
           ),
         },
@@ -886,11 +894,11 @@ test("hosted realtime session log preserves compact tool arguments and results",
   const event = (await getAgentSessionLog(storage)).events.at(-1);
   assert.equal(event.name, "locator.element_info");
   assert.deepEqual(event.input, {
-    call_id: "call-genspec-locator",
+    call_id: "call-beta-locator",
     arguments: {
       locator: {
-        selector: "a[href*='genspec.dev']",
-        text_contains: "genspec.dev",
+        selector: "a[href*='beta.example']",
+        text_contains: "beta.example",
       },
     },
   });
@@ -899,10 +907,10 @@ test("hosted realtime session log preserves compact tool arguments and results",
     primitive: "locator.element_info",
     value: {
       locator: {
-        selector: "a[href*='genspec.dev']",
-        text_contains: "genspec.dev",
+        selector: "a[href*='beta.example']",
+        text_contains: "beta.example",
       },
-      text: "genspec.dev",
+      text: "beta.example",
       clickable_center: { x: 412.25, y: 538.5 },
       bounding_box: {
         x: 360,
@@ -1222,6 +1230,8 @@ test("hosted realtime session records delivery failure and skips follow-up respo
     inputMuted: true,
     outputMuted: true,
     textOnly: true,
+    busy: false,
+    activeResponseId: null,
   });
   assert.equal(
     transport.events.slice(2).some((event) => event.type === "response.create"),

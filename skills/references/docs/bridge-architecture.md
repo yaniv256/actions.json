@@ -1,1 +1,0 @@
-../../../docs/bridge-architecture.md

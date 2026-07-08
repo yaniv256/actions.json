@@ -18,6 +18,16 @@ import {
 import {
   BridgeOutputDeliveryQueue,
 } from "./agent/bridge-output-delivery.mjs";
+import { ShimTree } from "./a11y/automation_shim.js";
+// Static import — MV3 service workers DISALLOW dynamic import() (HTML spec).
+// A dynamic import here silently failed and dropped the entire announcement
+// pipeline; caught by the Playwright live smoke, invisible to Node-ESM unit
+// tests where import() is legal.
+import { Announcer } from "./a11y/announcer.js";
+import {
+  normalizeGatedRepeatArgs,
+  runGatedRepeat,
+} from "./a11y/gated-repeat.mjs";
 import {
   TransferBuffer,
   TransferBufferError,
@@ -66,7 +76,43 @@ const BRIDGE_BACKGROUND_ACTION_NAMES = new Set([
   "browser.open_tab",
   "browser.close_tab",
   "browser.dismiss_dialog",
+  // a11y primitives run on the CDP-backed AutomationShim, which lives here in
+  // the background worker (it owns chrome.debugger) — forwarding them to
+  // content.js executeAction would throw "No handler implemented".
+  "a11y.tree",
+  "a11y.query",
+  "a11y.watch",
+  // keyboard.press_gated is trusted-CDP-only (it presses + reads the a11y layer
+  // in one held debugger session), so it ALWAYS runs in the background worker —
+  // there is no synthetic counterpart to A/B against, unlike keyboard.press.
+  "keyboard.press_gated",
 ]);
+
+// keyboard.press has TWO implementations selected by an optional `trusted` flag:
+// the default synthetic path runs in content.js (portable, untrusted); when
+// trusted:true it must run in the BACKGROUND worker so it can dispatch a real
+// (trusted) key via CDP Input.dispatchKeyEvent — the only kind canvas editors
+// (Google Slides/Docs/Sheets) honor. trusted is opt-in and always has a
+// non-debugger counterpart, so the two paths can be A/B compared to confirm
+// whether trusted is actually required. This predicate decides, per call,
+// whether keyboard.press routes to the background worker.
+const bridgeItemNeedsBackground = (item) => {
+  if (item?.type !== "action_call") return false;
+  if (BRIDGE_BACKGROUND_ACTION_NAMES.has(item?.name)) return true;
+  if (item?.name === "keyboard.press" && item?.arguments && item.arguments.trusted === true) {
+    return true;
+  }
+  if (item?.name === "text.type" && item?.arguments && item.arguments.trusted === true) {
+    return true;
+  }
+  // pointer.drag with trusted:true runs in the background (CDP Input.dispatchMouseEvent):
+  // a real animated pointer drag (the faded drag-ghost follows the cursor). The default
+  // (untrusted) pointer.drag stays synthetic in content.js.
+  if (item?.name === "pointer.drag" && item?.arguments && item.arguments.trusted === true) {
+    return true;
+  }
+  return false;
+};
 
 let knownPrimitiveNamesPromise = null;
 const getKnownPrimitiveNames = () => {
@@ -122,28 +168,86 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
 });
 
+// How long a single chrome.storage.local access may pend before we stop waiting
+// on it. Under MV3 the background service worker is torn down and re-instantiated
+// constantly; a storage access that never settles (dead worker context, zombie
+// promise) MUST NOT hang the caller forever. Every claimed_tabs.* handler awaits
+// SessionStore readiness, so an unbounded init promise wedges all tab-lifecycle
+// calls into 504s while non-store handlers keep working. Bounding it turns a
+// permanent hang into a fast, retryable degradation. (investigations/bridge-504-timeouts.md)
+const SESSION_STORE_IO_TIMEOUT_MS = 3000;
+
+// NOTE: withTimeout(promise, ms, label) is declared once later in this module and
+// reused here — its const initializes before any SessionStore method runs (methods
+// execute post-module-eval). Do NOT redeclare it: a second `const withTimeout`
+// throws "Identifier already declared" at load and breaks the whole service worker.
+
+// Bounded chrome.storage.local access — the shared *access* primitive every
+// background-SW store uses instead of raw chrome.storage.local. An unbounded
+// storage await on a background hot path becomes a 504 when MV3 recycles the
+// worker mid-access and leaves a dead promise; bounding each access turns that
+// permanent hang into a fast rejection the caller can degrade from. Callers own
+// the readiness/degrade lifecycle (e.g. SessionStore.ensureReady); this helper
+// owns only the timeout. (docs/plans/2026-07-07-001; investigations/bridge-504-timeouts.md)
+const boundedStorageGet = (key, ms = SESSION_STORE_IO_TIMEOUT_MS) => {
+  return withTimeout(chrome.storage.local.get(key), ms, "storage.local.get");
+};
+const boundedStorageSet = (items, ms = SESSION_STORE_IO_TIMEOUT_MS) => {
+  return withTimeout(chrome.storage.local.set(items), ms, "storage.local.set");
+};
+
 class SessionStore {
   constructor() {
     this.state = { sessions: {} };
-    this.ready = this.load();
+    // Self-healing readiness: a one-shot `this.ready = this.load()` that stalls
+    // wedges EVERY reader forever (the 504 root cause). Instead, ensureReady()
+    // re-initializes the load promise whenever the previous attempt rejected or
+    // timed out, so a stuck init recovers on the next call rather than hanging
+    // the whole tab-lifecycle surface.
+    this.readyPromise = null;
+    this.loaded = false;
   }
 
   async load() {
-    const stored = await chrome.storage.local.get(SESSION_STATE_KEY);
+    const stored = await boundedStorageGet(SESSION_STATE_KEY);
     const value = stored[SESSION_STATE_KEY];
     if (value && typeof value === "object") {
       this.state = {
         sessions: value.sessions && typeof value.sessions === "object" ? value.sessions : {},
       };
     }
+    this.loaded = true;
+  }
+
+  // Await readiness without ever hanging permanently. If a prior load stalled or
+  // rejected, start a fresh one; a caller after a failed load retries the init
+  // rather than awaiting a dead promise. Once loaded, this is a no-op.
+  async ensureReady() {
+    if (this.loaded) return;
+    if (!this.readyPromise) {
+      this.readyPromise = this.load().catch((error) => {
+        // Drop the failed promise so the NEXT ensureReady() re-attempts the load
+        // instead of re-awaiting a rejected/stale one. The in-memory default
+        // ({ sessions: {} }) is a safe fallback; a later save() re-persists it.
+        this.readyPromise = null;
+        throw error;
+      });
+    }
+    try {
+      await this.readyPromise;
+    } catch (_error) {
+      // Degrade to the in-memory default rather than propagating a hang/reject to
+      // every tab-lifecycle handler. Storage may recover on a subsequent access.
+    }
   }
 
   async save() {
-    await chrome.storage.local.set({ [SESSION_STATE_KEY]: this.state });
+    await boundedStorageSet({ [SESSION_STATE_KEY]: this.state })
+      .catch(() => { /* best effort; in-memory state remains authoritative this run */ });
   }
 
   async getSession(sessionId = DEFAULT_SESSION_ID) {
-    await this.ready;
+    await this.ensureReady();
     const existing = this.state.sessions[sessionId];
     if (existing && typeof existing === "object") {
       return existing;
@@ -160,7 +264,7 @@ class SessionStore {
   }
 
   async getSessionEntries() {
-    await this.ready;
+    await this.ensureReady();
     return Object.entries(this.state.sessions);
   }
 }
@@ -395,14 +499,14 @@ const routeBridgeItemToTab = async (item) => {
   // implemented for action: browser.dismiss_dialog" because this router only
   // special-cased screenshot — the hosted-agent path had the background check,
   // the direct-bridge path did not.)
-  if (item?.type === "action_call" && BRIDGE_BACKGROUND_ACTION_NAMES.has(item?.name)) {
+  if (bridgeItemNeedsBackground(item)) {
     let result;
     try {
       result = await executeBackgroundHostedToolCall({
         name: item.name,
         call_id: item.call_id,
         arguments: item.arguments,
-      });
+      }, tabId);
     } catch (error) {
       result = {
         ok: false,
@@ -890,6 +994,17 @@ const injectContent = async (tabId) => {
     target: { tabId },
     files: ["src/content.js"],
   });
+  // U4: the live-region observer is a SEPARATE observer-only script injected
+  // into ALL frames — content.js stays top-frame-only (re-injecting it tears
+  // down the live bridge connection; the observer is idempotent by guard).
+  // Late frames are covered by the reconnect-on-update funnel re-running this;
+  // frames inserted without navigation are a documented phase-1 bound.
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ["src/a11y/live_region_observer.js"],
+    });
+  } catch (_e) { /* some frames (about:blank, sandboxed) reject injection */ }
 };
 
 const connectClaimedTab = async (tabId, claim) => {
@@ -1013,6 +1128,23 @@ const listClaimedTabs = async () => {
   };
 };
 
+// True when a claimed tab already has a LIVE runtime registered on the current
+// open bridge socket: the shared socket is OPEN, the tab is in the connected
+// set, and its route is remembered. When all hold, the tab is already drivable
+// and bringing it to the foreground does NOT change that — activation is a pure
+// UI operation (chrome.tabs.update active + windows.update focused) that never
+// touches the WebSocket or the content script. So the reconnect is gratuitous;
+// re-injecting content.js into an already-connected tab tears down its live
+// runtime and churns transport that other tabs depend on. Only reconnect when
+// the tab is NOT currently healthy (e.g. it was reaped, or the socket rebuilt).
+const claimedTabHasLiveRuntime = (tabId) => {
+  if (!Number.isInteger(tabId)) return false;
+  if (bridgeSocket?.readyState !== WebSocket.OPEN) return false;
+  if (!(bridgeState?.activeRuntimeTabIds instanceof Set)) return false;
+  if (!bridgeState.activeRuntimeTabIds.has(tabId)) return false;
+  return bridgeRuntimeRoutes.get(`runtime_key:${runtimeKeyForTab(tabId)}`) === tabId;
+};
+
 const activateClaimedTab = async (message) => {
   const tabId = Number(message.tabId);
   if (!Number.isInteger(tabId)) {
@@ -1032,6 +1164,27 @@ const activateClaimedTab = async (message) => {
     claim.url = tab.url || claim.url || null;
     session.activeTabId = tabId;
     await sessionStore.save();
+
+    // Foregrounding a healthy tab does not disturb its runtime — skip the
+    // reconnect so activation stays non-disruptive to this tab and every other
+    // tab on the shared socket. Only (re)connect when the runtime isn't live.
+    if (claimedTabHasLiveRuntime(tabId)) {
+      appendBackgroundDiagnosticEvent({
+        type: "navigation",
+        name: "background.claimed_tab.activate",
+        ok: true,
+        summary: "Claimed tab foregrounded without reconnecting — its runtime was already live.",
+        input: { tab_id: tabId, runtime_key: claim.runtimeKey || runtimeKeyForTab(tabId) },
+        output: { reconnected: false, reused_runtime: true },
+      });
+      return {
+        ok: true,
+        scheduled: false,
+        reconnected: false,
+        reused_runtime: true,
+        tab: serializeClaimedTab(session, { ...tab, active: true }, claim),
+      };
+    }
 
     const reconnectDelayMs = Number.isFinite(message.reconnectDelayMs)
       ? Math.max(0, Math.min(5000, Math.floor(message.reconnectDelayMs)))
@@ -1058,6 +1211,7 @@ const activateClaimedTab = async (message) => {
     return {
       ok: true,
       scheduled: true,
+      reconnected: true,
       reconnect_delay_ms: reconnectDelayMs,
       tab: serializeClaimedTab(session, { ...tab, active: true }, claim),
     };
@@ -1452,6 +1606,543 @@ const debuggerDetach = (target) =>
 const debuggerSendCommand = (target, method, params) =>
   callbackApi((callback) => chrome.debugger.sendCommand(target, method, params, callback));
 
+// Shared, refcounted debugger session manager (U8). Chrome allows only ONE
+// debugger client per tab, but this extension has several independent
+// consumers (trusted keys, debug JS, screenshots, the a11y announcer's
+// persistent tree). Each used to attach/detach on its own, assuming sole
+// ownership — so the moment two overlap (e.g. the persistent a11y session +
+// a trusted keypress) the second throws "Another debugger is already
+// attached". This manager makes them coexist: acquire() attaches once and
+// hands out a shared session; release() detaches only when the last holder
+// leaves. Long-lived holders (a11y.watch) and per-op holders (a key press)
+// share the same underlying attach.
+const debuggerRefcounts = new Map(); // tabId -> count
+const debuggerAdopted = new Set();   // tabIds we adopted (didn't cleanly attach; don't force-detach)
+const acquireDebugger = async (tabId) => {
+  const n = debuggerRefcounts.get(tabId) || 0;
+  if (n === 0) {
+    try {
+      await debuggerAttach({ tabId });
+    } catch (error) {
+      if (!/already attached/i.test(String(error?.message || error))) throw error;
+      debuggerAdopted.add(tabId); // someone outside the manager holds it; ride along
+    }
+  }
+  debuggerRefcounts.set(tabId, n + 1);
+};
+const releaseDebugger = async (tabId) => {
+  const n = debuggerRefcounts.get(tabId) || 0;
+  if (n <= 1) {
+    debuggerRefcounts.delete(tabId);
+    if (!debuggerAdopted.delete(tabId)) {
+      await debuggerDetach({ tabId }).catch(() => {});
+    }
+  } else {
+    debuggerRefcounts.set(tabId, n - 1);
+  }
+};
+chrome.debugger.onDetach?.addListener((source) => {
+  if (Number.isInteger(source?.tabId)) {
+    debuggerRefcounts.delete(source.tabId);
+    debuggerAdopted.delete(source.tabId);
+    a11yDebuggerSessions.delete(source.tabId);
+  }
+});
+
+// Persistent a11y debugger session (U8): the announcer keeps a ShimTree whose
+// CDP closure must stay valid for resolveNode_'s later DOM.querySelector calls,
+// so the session must OUTLIVE each batch. Held open (one refcount) while the
+// tab is watched, via the shared manager so trusted keys / debug JS coexist.
+const a11yDebuggerSessions = new Set(); // tabIds a11y.watch holds
+const ensureA11yDebuggerSession = async (tabId) => {
+  if (a11yDebuggerSessions.has(tabId)) return;
+  await acquireDebugger(tabId);       // one persistent refcount for a11y
+  a11yDebuggerSessions.add(tabId);
+};
+// Build a ShimTree over the shared session (no detach — a11y holds a refcount).
+const a11yTreeFromSession = async (tabId) => {
+  await ensureA11yDebuggerSession(tabId);
+  const target = { tabId };
+  let url = "";
+  let focused = true;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    url = tab?.url || "";
+    focused = Boolean(tab?.active);
+  } catch (_e) { /* best effort */ }
+  return new ShimTree({
+    cdp: (method, params) => debuggerSendCommand(target, method, params),
+    tabId,
+    url,
+    focused,
+  }).refresh();
+};
+
+// CDP modifier bitmask (Input.dispatchKeyEvent): Alt=1, Ctrl=2, Meta/Cmd=4, Shift=8.
+const CDP_MODIFIER_BITS = { alt: 1, option: 1, control: 2, ctrl: 2, meta: 4, cmd: 4, command: 4, shift: 8 };
+
+// Modifier keys pressed as REAL held keys around a chord. A combined `rawKeyDown`
+// carrying only a `modifiers` BITMASK reaches Google Docs but does NOT trigger its
+// shortcut/command layer — Ctrl+A / Ctrl+Home / Ctrl+Down (and Shift-extend
+// selection) all no-op (measured live: investigations/
+// hosted-agent-debugger-not-attached-new-tab.md, X13). Docs needs the modifier
+// modeled as a genuinely-held keyDown across the chord. Shift is included: the
+// select-back path (dispatchTrustedText) hits the same class.
+const CDP_HELD_MODIFIER_KEYS = [
+  { bit: CDP_MODIFIER_BITS.control, code: "ControlLeft", keyCode: 17, key: "Control" },
+  { bit: CDP_MODIFIER_BITS.alt, code: "AltLeft", keyCode: 18, key: "Alt" },
+  { bit: CDP_MODIFIER_BITS.meta, code: "MetaLeft", keyCode: 91, key: "Meta" },
+  { bit: CDP_MODIFIER_BITS.shift, code: "ShiftLeft", keyCode: 16, key: "Shift" },
+];
+
+// Run `fn` with each modifier in `modifierBits` pressed as a real held key —
+// keyDown before, keyUp after (reverse order, in a finally so a throw can't leave
+// a modifier stuck down). Assumes the debugger is already attached to `target`;
+// the caller owns acquire/release. Additive: the chord events `fn` dispatches
+// still carry the `modifiers` bitmask too, so surfaces that read it are unaffected.
+const withHeldModifiers = async (target, modifierBits, fn) => {
+  const held = CDP_HELD_MODIFIER_KEYS.filter((mod) => (modifierBits & mod.bit) !== 0);
+  for (const mod of held) {
+    await debuggerSendCommand(target, "Input.dispatchKeyEvent", {
+      type: "rawKeyDown",
+      modifiers: modifierBits,
+      key: mod.key,
+      code: mod.code,
+      windowsVirtualKeyCode: mod.keyCode,
+      nativeVirtualKeyCode: mod.keyCode,
+    });
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const mod of [...held].reverse()) {
+      try {
+        await debuggerSendCommand(target, "Input.dispatchKeyEvent", {
+          type: "keyUp",
+          modifiers: 0,
+          key: mod.key,
+          code: mod.code,
+          windowsVirtualKeyCode: mod.keyCode,
+          nativeVirtualKeyCode: mod.keyCode,
+        });
+      } catch (_e) {
+        // best-effort release; caller's debugger detach still runs
+      }
+    }
+  }
+};
+
+// Minimal key metadata for CDP Input.dispatchKeyEvent. For single printable
+// characters we derive code/keyCode/text; named keys map explicitly. This covers
+// the keys the trusted-input work needs (chords like Ctrl+A, and Enter/Escape/
+// Backspace/Delete/Tab/arrows) without shipping a full keyboard table.
+const cdpKeyInfo = (rawKey) => {
+  const named = {
+    Enter: { code: "Enter", keyCode: 13, key: "Enter", text: "\r" },
+    Escape: { code: "Escape", keyCode: 27, key: "Escape" },
+    Backspace: { code: "Backspace", keyCode: 8, key: "Backspace" },
+    Delete: { code: "Delete", keyCode: 46, key: "Delete" },
+    Tab: { code: "Tab", keyCode: 9, key: "Tab" },
+    ArrowUp: { code: "ArrowUp", keyCode: 38, key: "ArrowUp" },
+    ArrowDown: { code: "ArrowDown", keyCode: 40, key: "ArrowDown" },
+    ArrowLeft: { code: "ArrowLeft", keyCode: 37, key: "ArrowLeft" },
+    ArrowRight: { code: "ArrowRight", keyCode: 39, key: "ArrowRight" },
+    Home: { code: "Home", keyCode: 36, key: "Home" },
+    End: { code: "End", keyCode: 35, key: "End" },
+    " ": { code: "Space", keyCode: 32, key: " ", text: " " },
+    Space: { code: "Space", keyCode: 32, key: " ", text: " " },
+  };
+  if (named[rawKey]) return named[rawKey];
+  if (rawKey.length === 1) {
+    const ch = rawKey;
+    const upper = ch.toUpperCase();
+    const isLetter = upper >= "A" && upper <= "Z";
+    const isDigit = ch >= "0" && ch <= "9";
+    if (isLetter || isDigit) {
+      return {
+        code: isLetter ? `Key${upper}` : `Digit${ch}`,
+        keyCode: upper.charCodeAt(0),
+        key: ch,
+        text: ch,
+      };
+    }
+    // Punctuation must use the real US-layout OEM virtual-key codes.
+    // charCodeAt is NOT a VK for punctuation: "'" is 0x27 = VK_RIGHT, "." is
+    // 0x2E = VK_DELETE, "!" is 0x21 = VK_PRIOR — an editor processes those as
+    // caret navigation / deletion instead of typing (incident:
+    // actions.json.storage scopes/private/docs/investigations/
+    // hosted-agent-docs-edit-corruption.md).
+    if (CDP_PUNCT_KEYS[ch]) {
+      const p = CDP_PUNCT_KEYS[ch];
+      return { code: p.code, keyCode: p.keyCode, key: ch, text: ch };
+    }
+    // Unknown printable char (unicode, emoji fragments): never fabricate a VK.
+    // keyCode 0 has no editing-key collision; the text payload still commits.
+    return { code: "", keyCode: 0, key: ch, text: ch };
+  }
+  return { code: rawKey, keyCode: 0, key: rawKey };
+};
+
+// US-layout OEM virtual keys for ASCII punctuation (base and shifted share the
+// physical key, hence the same code/keyCode; `text` carries the actual char).
+const CDP_PUNCT_KEYS = {
+  "'": { code: "Quote", keyCode: 222 },
+  '"': { code: "Quote", keyCode: 222 },
+  ",": { code: "Comma", keyCode: 188 },
+  "<": { code: "Comma", keyCode: 188 },
+  ".": { code: "Period", keyCode: 190 },
+  ">": { code: "Period", keyCode: 190 },
+  "/": { code: "Slash", keyCode: 191 },
+  "?": { code: "Slash", keyCode: 191 },
+  ";": { code: "Semicolon", keyCode: 186 },
+  ":": { code: "Semicolon", keyCode: 186 },
+  "[": { code: "BracketLeft", keyCode: 219 },
+  "{": { code: "BracketLeft", keyCode: 219 },
+  "]": { code: "BracketRight", keyCode: 221 },
+  "}": { code: "BracketRight", keyCode: 221 },
+  "\\": { code: "Backslash", keyCode: 220 },
+  "|": { code: "Backslash", keyCode: 220 },
+  "`": { code: "Backquote", keyCode: 192 },
+  "~": { code: "Backquote", keyCode: 192 },
+  "-": { code: "Minus", keyCode: 189 },
+  _: { code: "Minus", keyCode: 189 },
+  "=": { code: "Equal", keyCode: 187 },
+  "+": { code: "Equal", keyCode: 187 },
+  "!": { code: "Digit1", keyCode: 49 },
+  "@": { code: "Digit2", keyCode: 50 },
+  "#": { code: "Digit3", keyCode: 51 },
+  $: { code: "Digit4", keyCode: 52 },
+  "%": { code: "Digit5", keyCode: 53 },
+  "^": { code: "Digit6", keyCode: 54 },
+  "&": { code: "Digit7", keyCode: 55 },
+  "*": { code: "Digit8", keyCode: 56 },
+  "(": { code: "Digit9", keyCode: 57 },
+  ")": { code: "Digit0", keyCode: 48 },
+};
+
+// Dispatch a TRUSTED keypress (keyDown+keyUp) into a tab via CDP. Unlike
+// content.js keyboard.press (untrusted, ignored by canvas editors), these events
+// carry isTrusted:true so Google Slides/Docs/Sheets honor them (Ctrl+A selects,
+// arrows navigate, Delete deletes). Attaches the debugger, sends the chord,
+// detaches. Returns { pressed, key, modifiers, fidelity:"trusted" }.
+const dispatchTrustedKey = async (tabId, rawKey, rawModifiers, rawRepeat) => {
+  if (!Number.isInteger(tabId)) {
+    throw new Error("input.key requires an authorized browser tab");
+  }
+  const key = String(rawKey || "");
+  if (!key) {
+    throw new Error("input.key requires a key");
+  }
+  const modifiers = (Array.isArray(rawModifiers) ? rawModifiers : []).map((m) => String(m).toLowerCase());
+  const modifierBits = modifiers.reduce((bits, m) => bits | (CDP_MODIFIER_BITS[m] || 0), 0);
+  // repeat: press the same chord N times inside ONE debugger session — the fast
+  // path for positional caret walks (ArrowRight x400). Looping OUTSIDE this
+  // function costs a debugger acquire/release round-trip per press (~0.5s/key);
+  // inside one session the same walk runs in milliseconds per key.
+  // repeat: undefined -> 1 (normal keypress). Explicit 0 -> no-op (chunked
+  // positional walks compute segment sizes; a zero segment must press nothing).
+  const rawRepeatNum = rawRepeat === undefined || rawRepeat === null ? 1 : Math.floor(Number(rawRepeat));
+  const repeat = Number.isFinite(rawRepeatNum) ? Math.min(1000, Math.max(0, rawRepeatNum)) : 1;
+  if (repeat === 0) {
+    return { pressed: false, key, modifiers, repeat: 0, fidelity: "trusted" };
+  }
+  const info = cdpKeyInfo(key);
+  // With a non-shift modifier held (e.g. Ctrl/Meta), suppress the text payload so
+  // the browser treats it as a shortcut (Ctrl+A) rather than typing a character.
+  const nonTextModifier = (modifierBits & ~CDP_MODIFIER_BITS.shift) !== 0;
+  const base = {
+    modifiers: modifierBits,
+    key: info.key,
+    code: info.code,
+    windowsVirtualKeyCode: info.keyCode,
+    nativeVirtualKeyCode: info.keyCode,
+  };
+  // Hold the non-shift modifiers (Ctrl/Alt/Meta) as real keys around the chord so
+  // Docs' shortcut layer fires (see withHeldModifiers / X13). Shift stays out of
+  // the held set here: a shifted printable still needs its text payload and the
+  // existing shift handling suffices for dispatchTrustedKey's callers.
+  const heldBits = modifierBits & ~CDP_MODIFIER_BITS.shift;
+  const target = { tabId };
+  let acquired = false;
+  try {
+    // Shared refcounted attach — coexists with a held a11y.watch session on the
+    // same tab (previously a second attach here threw "already attached").
+    await acquireDebugger(tabId);
+    acquired = true;
+    await withHeldModifiers(target, heldBits, async () => {
+      // A canvas editor (Google Docs) advances its caret on a requestAnimationFrame
+      // loop that consumes AT MOST ONE navigation key per frame. Firing a burst of
+      // ArrowRight keyDown+keyUp faster than one-per-frame COALESCES — extra
+      // presses in the same frame are dropped, so a walk of N lands ~2-3 chars in
+      // (measured live; reproduced offline by tests/live/caret-walk-coalesce-smoke).
+      // Each repeated press is therefore a DISCRETE keyDown+keyUp spaced past one
+      // frame (~16ms). We wait ~24ms — comfortably over a 60fps frame, still fast
+      // (a 78-char walk ~1.9s). autoRepeat is NOT used: Docs treats an autoRepeat
+      // burst as a single held key (one caret move), the opposite of what we need.
+      const FRAME_GAP_MS = 25;
+      const isRepeat = repeat > 1;
+      for (let i = 0; i < repeat; i += 1) {
+        await debuggerSendCommand(target, "Input.dispatchKeyEvent", {
+          ...base,
+          type: info.text && !nonTextModifier ? "keyDown" : "rawKeyDown",
+          ...(info.text && !nonTextModifier ? { text: info.text } : {}),
+        });
+        await debuggerSendCommand(target, "Input.dispatchKeyEvent", { ...base, type: "keyUp" });
+        // Space presses past one animation frame so the editor consumes each one.
+        if (isRepeat && i < repeat - 1) await new Promise((r) => setTimeout(r, FRAME_GAP_MS));
+      }
+    });
+  } finally {
+    if (acquired) await releaseDebugger(tabId);
+  }
+  return { pressed: true, key, modifiers, repeat, fidelity: "trusted" };
+};
+
+// Trusted, ANIMATED drag via CDP Input.dispatchMouseEvent (mirrors dispatchTrustedKey's
+// attach/dispatch/detach). The DEFAULT "animated" card move: a real pointer travels the
+// path so the browser renders the faded drag-image FOLLOWING the cursor — the beautiful
+// slide (investigations/drag-operations-primitive.md). Content.js pointer.drag (synthetic,
+// untrusted) can't produce the drag-ghost; native HTML5 draggable ignores it. Trusted CDP
+// mousePressed → MANY interpolated mouseMoved → mouseReleased is what a human drag is, so
+// the browser animates it. Choreography (per Yaniv's spec + DnD thresholds): press at
+// source, a few small pickup jitters to cross the drag threshold, then LOTS of interpolated
+// move points along the (straight) path so the ghost glides smoothly, then release at the
+// end. Coordinates are viewport CSS pixels (same space as pointer.click). Returns
+// { dragged, from, to, points, fidelity:"trusted" }.
+const dispatchTrustedDrag = async (tabId, rawFrom, rawTo, rawOpts) => {
+  if (!Number.isInteger(tabId)) {
+    throw new Error("pointer.drag (trusted) requires an authorized browser tab");
+  }
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : NaN);
+  const fromX = num(rawFrom?.x); const fromY = num(rawFrom?.y);
+  const toX = num(rawTo?.x); const toY = num(rawTo?.y);
+  if ([fromX, fromY, toX, toY].some((n) => Number.isNaN(n))) {
+    throw new Error("pointer.drag (trusted) requires numeric from.{x,y} and to.{x,y} viewport coordinates");
+  }
+  const opts = rawOpts && typeof rawOpts === "object" ? rawOpts : {};
+  // "lots and lots of points" — default a smooth 60; the per-step delay keeps it visible.
+  const points = Math.min(200, Math.max(12, Math.floor(Number(opts.points ?? opts.steps) || 60)));
+  const moveDelayMs = Math.min(60, Math.max(4, Math.floor(Number(opts.move_delay_ms) || 12)));
+  const target = { tabId };
+  const mouse = (type, x, y, extra = {}) =>
+    debuggerSendCommand(target, "Input.dispatchMouseEvent", {
+      type, x: Math.round(x), y: Math.round(y), button: "left",
+      buttons: type === "mouseReleased" ? 0 : 1,
+      clickCount: type === "mousePressed" || type === "mouseReleased" ? 1 : 0, ...extra,
+    });
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  let acquired = false;
+  try {
+    await acquireDebugger(tabId);
+    acquired = true;
+    // Move onto the source (no button), then press.
+    await mouse("mouseMoved", fromX, fromY, { buttons: 0, clickCount: 0 });
+    await mouse("mousePressed", fromX, fromY);
+    await sleep(moveDelayMs * 2);
+    // Pickup jitter: small moves at the source cross the browser's drag-start threshold so a
+    // real drag begins (and the drag-image appears).
+    for (let j = 1; j <= 4; j += 1) {
+      await mouse("mouseMoved", fromX + j * 4, fromY + j * 2);
+      await sleep(moveDelayMs);
+    }
+    // Glide: LOTS of interpolated points along the straight path so the ghost slides.
+    for (let i = 1; i <= points; i += 1) {
+      const t = i / points;
+      await mouse("mouseMoved", fromX + (toX - fromX) * t, fromY + (toY - fromY) * t);
+      await sleep(moveDelayMs);
+    }
+    // Settle over the target, then release to drop.
+    await mouse("mouseMoved", toX, toY);
+    await sleep(moveDelayMs * 3);
+    await mouse("mouseReleased", toX, toY);
+  } finally {
+    if (acquired) await releaseDebugger(tabId);
+  }
+  return {
+    dragged: true,
+    from: { x: fromX, y: fromY },
+    to: { x: toX, y: toY },
+    points,
+    fidelity: "trusted",
+  };
+};
+
+// Read the current accessibility value for a tab — the signal the gated-repeat
+// loop matches each expected regex against. GENERAL by design (not Docs-bound):
+// the primary source is the announcer's most-recent announcement (the same live
+// stream a11y.watch exposes); when that is empty we fall back to a focused-node
+// accessible-text read via page script. Docs' word-caret announcement proved
+// reliable this way (verified live 2026-07-07). The definitive per-surface source
+// + read dwell are tuned by the live smoke (plan U6 / OQ1); this function is the
+// swappable seam.
+const readCurrentA11yValue = async (tabId) => {
+  // SOURCE PRIORITY (corrected live 2026-07-07, plan U6/OQ1): on real Google Docs
+  // the aria-live REGION node (#docs-aria-speakable) holds the precise caret WORD
+  // ("you"), while the buffered announcement STREAM interleaves coarse ChromeVox
+  // role echoes ("Application"). Reading the stream first (the old order) made the
+  // gate see "Application" and halt-loud on a press that actually landed. So read
+  // the region node FIRST; use the announcement buffer only as a fallback for
+  // surfaces that don't publish a speakable region.
+  try {
+    const [{ result } = {}] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const speak = document.getElementById("docs-aria-speakable");
+        if (speak && speak.textContent && speak.textContent.trim()) return speak.textContent.trim();
+        const el = document.activeElement;
+        if (!el) return "";
+        return (el.getAttribute("aria-label") || el.textContent || el.value || "").trim();
+      },
+    });
+    const regionText = String(result ?? "").trim();
+    if (regionText) return regionText;
+  } catch (_e) {
+    // fall through to the announcement buffer
+  }
+  // Fallback: last buffered a11y announcement (surfaces without a speakable region).
+  const buf = readA11yAnnouncements(tabId);
+  if (Array.isArray(buf) && buf.length) {
+    const last = buf[buf.length - 1];
+    const text = (last && (last.text ?? last.value ?? last.name)) || "";
+    if (String(text).trim()) return String(text).trim();
+  }
+  return "";
+};
+
+// Accessibility-gated key-repeat (plan 2026-07-07-004): press a key/chord and
+// gate each repeat on the a11y layer's return, with count | until-regex |
+// path-of-regexes stop modes and positive/negative polarity. The DECISION logic
+// lives in ./a11y/gated-repeat.mjs (unit-tested); this wires it to the real
+// trusted-CDP press (one keyDown/keyUp per step, spaced, inside ONE held
+// debugger session so the a11y read reflects each press) and the a11y read.
+const GATED_FRAME_GAP_MS = 40; // per-press dwell: press consumed + announcement emitted before read (tuned in U6)
+const dispatchGatedRepeat = async (tabId, rawArgs) => {
+  if (!Number.isInteger(tabId)) {
+    throw new Error("keyboard.press_gated requires an authorized browser tab");
+  }
+  const plan = normalizeGatedRepeatArgs(rawArgs); // throws on invalid args (key/stop/count/regex/polarity)
+  const target = { tabId };
+  let acquired = false;
+  try {
+    await acquireDebugger(tabId);
+    acquired = true;
+    // One trusted keyDown+keyUp for `key`+`modifiers`, mirroring dispatchTrustedKey's
+    // single-press shape (withHeldModifiers so Docs' shortcut layer fires for chords),
+    // then a frame-gap dwell so the surface consumes it and emits its a11y announcement.
+    const press = async (rawKey, modifiers) => {
+      // Support a compact chord in the key field ("Control+ArrowRight"), mirroring
+      // the keyboard.press handler: split into base key + modifiers so the CDP
+      // event carries a real key AND the held-modifier bits.
+      const rawKeyStr = String(rawKey || "");
+      const chordParts = rawKeyStr.includes("+") ? rawKeyStr.split("+").filter(Boolean) : [];
+      const key = chordParts.length > 1 ? chordParts.at(-1) : rawKeyStr;
+      const allMods = [
+        ...(Array.isArray(modifiers) ? modifiers : []),
+        ...(chordParts.length > 1 ? chordParts.slice(0, -1) : []),
+      ];
+      const info = cdpKeyInfo(key);
+      const modBits = allMods
+        .map((m) => String(m).toLowerCase())
+        .reduce((bits, m) => bits | (CDP_MODIFIER_BITS[m] || 0), 0);
+      const nonTextMod = (modBits & ~CDP_MODIFIER_BITS.shift) !== 0;
+      const heldBits = modBits & ~CDP_MODIFIER_BITS.shift;
+      const base = {
+        modifiers: modBits,
+        key: info.key,
+        code: info.code,
+        windowsVirtualKeyCode: info.keyCode,
+        nativeVirtualKeyCode: info.keyCode,
+      };
+      await withHeldModifiers(target, heldBits, async () => {
+        await debuggerSendCommand(target, "Input.dispatchKeyEvent", {
+          ...base,
+          type: info.text && !nonTextMod ? "keyDown" : "rawKeyDown",
+          ...(info.text && !nonTextMod ? { text: info.text } : {}),
+        });
+        await debuggerSendCommand(target, "Input.dispatchKeyEvent", { ...base, type: "keyUp" });
+      });
+      await new Promise((r) => setTimeout(r, GATED_FRAME_GAP_MS));
+    };
+    const read = async () => readCurrentA11yValue(tabId);
+    const result = await runGatedRepeat(plan, { press, read });
+    return { ...result, fidelity: "trusted" };
+  } finally {
+    if (acquired) await releaseDebugger(tabId);
+  }
+};
+
+// Trusted multi-character type as REAL per-character key events (CDP
+// Input.dispatchKeyEvent keyDown+keyUp), NOT Input.insertText.
+//
+// WHY (verified live 2026-07-06 on Google Docs): Input.insertText is a
+// text-commit command that canvas editors (Docs/Slides/Sheets) IGNORE against a
+// live selection — the selected run survives, the insert is dropped. A real
+// keyDown carrying a `text` payload — the exact event dispatchTrustedKey sends,
+// which was proven to overtype a Find-made selection — DOES reach the canvas and
+// replaces the selection. So we type the string character by character with the
+// same key-event shape as a single trusted keypress. This is the fix that
+// unblocks select-and-replace / delete-by-space on canvas editors (the old
+// select_and_type "fire-and-forget" failure was really insertText-not-honored,
+// not a timing bug).
+const dispatchTrustedText = async (tabId, rawText, selectBackChars = 0) => {
+  if (!Number.isInteger(tabId)) {
+    throw new Error("text.type trusted requires an authorized browser tab");
+  }
+  const text = String(rawText ?? "");
+  const count = Number.isFinite(Number(selectBackChars)) ? Math.max(0, Math.floor(Number(selectBackChars))) : 0;
+  const target = { tabId };
+  let acquired = false;
+  try {
+    await acquireDebugger(tabId); // shared, coexists with a held a11y session
+    acquired = true;
+    // Optionally extend a selection backward by `count` chars (Shift+Left) BEFORE
+    // inserting, so a single atomic call both selects and overtypes — the caller
+    // gives the character length of the phrase to replace (e.g. from a Find match).
+    // Shift is held as a REAL key across all N ArrowLeft presses (withHeldModifiers):
+    // a per-event `modifiers: shift` bitmask alone does NOT extend the selection on
+    // Docs — the same class as the Ctrl-chord bug (X13). Held once around the whole
+    // run, not re-pressed per key.
+    if (count > 0) {
+      const left = cdpKeyInfo("ArrowLeft");
+      await withHeldModifiers(target, CDP_MODIFIER_BITS.shift, async () => {
+        for (let i = 0; i < count; i += 1) {
+          const base = {
+            modifiers: CDP_MODIFIER_BITS.shift,
+            key: left.key,
+            code: left.code,
+            windowsVirtualKeyCode: left.keyCode,
+            nativeVirtualKeyCode: left.keyCode,
+          };
+          await debuggerSendCommand(target, "Input.dispatchKeyEvent", { ...base, type: "rawKeyDown" });
+          await debuggerSendCommand(target, "Input.dispatchKeyEvent", { ...base, type: "keyUp" });
+        }
+      });
+    }
+    // Type each character as a real trusted keyDown (with text payload) + keyUp —
+    // the mechanism canvas editors honor. The first character replaces the live
+    // selection; the rest insert sequentially at the caret.
+    for (const ch of Array.from(text)) {
+      const info = cdpKeyInfo(ch);
+      const base = {
+        modifiers: 0,
+        key: info.key,
+        code: info.code,
+        windowsVirtualKeyCode: info.keyCode,
+        nativeVirtualKeyCode: info.keyCode,
+      };
+      await debuggerSendCommand(target, "Input.dispatchKeyEvent", {
+        ...base,
+        type: "keyDown",
+        text: info.text != null ? info.text : ch,
+      });
+      await debuggerSendCommand(target, "Input.dispatchKeyEvent", { ...base, type: "keyUp" });
+    }
+  } finally {
+    if (acquired) await releaseDebugger(tabId);
+  }
+  return { typed: true, length: text.length, selected_back: count, fidelity: "trusted" };
+};
+
 const debugExpressionFor = (source, args) => {
   const serializedArgs = JSON.stringify(args && typeof args === "object" ? args : {});
   return `
@@ -1481,10 +2172,10 @@ const evaluateWithDebugger = async (message, sender) => {
   }
 
   const target = { tabId };
-  let attached = false;
+  let acquired = false;
   try {
-    await debuggerAttach(target);
-    attached = true;
+    await acquireDebugger(tabId); // shared, coexists with a held a11y session
+    acquired = true;
     const response = await debuggerSendCommand(target, "Runtime.evaluate", {
       expression: debugExpressionFor(source, message.args),
       awaitPromise: true,
@@ -1508,13 +2199,7 @@ const evaluateWithDebugger = async (message, sender) => {
       }
     };
   } finally {
-    if (attached) {
-      try {
-        await debuggerDetach(target);
-      } catch (_error) {
-        // The page may detach itself during navigation; evaluation already has its result.
-      }
-    }
+    if (acquired) await releaseDebugger(tabId);
   }
 };
 
@@ -1711,7 +2396,18 @@ const publicBridgeResponseDetails = (body) => {
 };
 
 const appendAgentMemoryEvent = async (event) => {
-  const stored = await chrome.storage.local.get(AGENT_MEMORY_STORAGE_KEY);
+  // Fire-and-forget event logging on the background hot path. Route both storage
+  // accesses through the bounded helper so a wedged chrome.storage under MV3
+  // recycling cannot hang this (F1, docs/plans/2026-07-07-001). On a bounded-get
+  // timeout we degrade to empty memory rather than skipping the append; on a
+  // bounded-set timeout we drop the event — either way we never propagate a
+  // rejection into the caller, matching the fire-and-forget intent.
+  let stored;
+  try {
+    stored = await boundedStorageGet(AGENT_MEMORY_STORAGE_KEY);
+  } catch (_error) {
+    stored = null; // storage stalled — start from empty, don't hang or throw
+  }
   const existing = stored?.[AGENT_MEMORY_STORAGE_KEY];
   const memory = existing && typeof existing === "object"
     ? existing
@@ -1722,12 +2418,12 @@ const appendAgentMemoryEvent = async (event) => {
     timestamp: event.timestamp || new Date().toISOString(),
     ...event,
   });
-  await chrome.storage.local.set({
+  await boundedStorageSet({
     [AGENT_MEMORY_STORAGE_KEY]: {
       visitorId: typeof memory.visitorId === "string" ? memory.visitorId : null,
       events: events.slice(-MAX_AGENT_LOG_EVENTS),
     },
-  });
+  }).catch(() => { /* storage stalled — drop this event rather than hang or throw */ });
 };
 
 const originForUrl = (value) => {
@@ -2140,7 +2836,222 @@ const getHostedToolDefaultTab = async () => {
   return { tab: tab || null, source: "browser_active_tab" };
 };
 
-const executeBackgroundHostedToolCall = async (call = {}) => {
+// a11y.tree / a11y.query (U3, docs/a11y-shim-spec.md): build a fresh CDP-backed
+// ShimTree for the routed tab and run the operation. Per-call refresh is the
+// simplest-correct phase-1 policy; attach/detach mirrors dispatchTrustedKey.
+const runA11yTreeOp = async (tabId, op) => {
+  if (!Number.isInteger(tabId)) {
+    throw new Error("a11y primitives require an authorized browser tab");
+  }
+  const target = { tabId };
+  let acquired = false;
+  try {
+    await acquireDebugger(tabId);
+    acquired = true;
+    let url = "";
+    let focused = true;
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      url = tab?.url || "";
+      focused = Boolean(tab?.active);
+    } catch (_e) { /* tab metadata is best-effort */ }
+    const tree = await new ShimTree({
+      cdp: (method, params) => debuggerSendCommand(target, method, params),
+      tabId,
+      url,
+      focused,
+    }).refresh();
+    return await op(tree);
+  } finally {
+    if (acquired) await releaseDebugger(tabId);
+  }
+};
+
+// a11y.watch (U8): start listening to a tab's live regions. Injects the
+// observer content script into ALL frames (idempotent by guard — safe on
+// already-connected tabs, which is exactly the gap: the observer otherwise
+// only lands on tabs claimed AFTER this version loaded), ensures the announcer
+// is running, and — when requested — enables the site's screen-reader mode
+// idempotently (verifying it is ON rather than blind-toggling). This is the
+// R8 "screen-reader-mode capability" as a callable primitive.
+const runA11yWatch = async (tabId, { enableScreenReader = true, screenReaderChord = "Control+Alt+z" } = {}) => {
+  if (!Number.isInteger(tabId)) {
+    throw new Error("a11y.watch requires an authorized browser tab");
+  }
+  // 1) Inject the observer into every frame (idempotent).
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ["src/a11y/live_region_observer.js"],
+    });
+  } catch (e) {
+    // Some frames reject injection (sandboxed / about:blank) — the top frame
+    // is what matters for phase-1 canvas editors.
+  }
+  // 2) Open the persistent a11y debugger session so the announcer's ShimTree
+  //    CDP closure stays alive across the batch (the U8 drop was per-op detach).
+  try { await ensureA11yDebuggerSession(tabId); } catch (_e) { /* adopted or unavailable */ }
+  // 3) Ensure the announcer is wired (lazy — first tree-change would also do it).
+  await getA11yAnnouncer().catch(() => {});
+  // 3) Enable the site screen-reader mode idempotently, if asked (canvas Docs
+  //    needs it to populate live regions richly). Verify by the aria-live flag.
+  let screenReader = "not_requested";
+  if (enableScreenReader) {
+    const readState = async () => {
+      try {
+        const [{ result } = {}] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => {
+            const el = document.getElementById("docs-aria-speakable");
+            return el ? el.textContent : null;
+          },
+        });
+        return result;
+      } catch (_e) { return null; }
+    };
+    const isOn = (s) => typeof s === "string" && /enabled/i.test(s);
+    let state = await readState();
+    if (!isOn(state)) {
+      // Toggle once, then verify; if it flipped the wrong way, toggle back.
+      const parts = String(screenReaderChord).split("+");
+      const key = parts.at(-1);
+      const modifiers = parts.slice(0, -1);
+      await dispatchTrustedKey(tabId, key, modifiers);
+      await new Promise((r) => setTimeout(r, 250));
+      state = await readState();
+      if (!isOn(state)) {
+        await dispatchTrustedKey(tabId, key, modifiers);
+        await new Promise((r) => setTimeout(r, 250));
+        state = await readState();
+      }
+    }
+    screenReader = isOn(state) ? "enabled" : `unverified(${state ?? "no-signal"})`;
+  }
+  // Diagnostic: how many observer batches has this tab's log received so far,
+  // and did the observer's global install (probed in the isolated world)?
+  let observerInstalled = null;
+  try {
+    const [{ result } = {}] = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "ISOLATED",
+      func: () => Boolean(globalThis.__actionsJsonA11yObserver) &&
+        (globalThis.__actionsJsonA11yObserver.regionCount?.() ?? -1),
+    });
+    observerInstalled = result;
+  } catch (_e) { observerInstalled = "probe_failed"; }
+  const batchCount = (a11yEventLogs.get(tabId) || []).length;
+  let announcerDiag = null;
+  try {
+    const ann = await a11yAnnouncerPromise;
+    announcerDiag = ann?.diagnostics?.() ?? null;
+  } catch (_e) { /* not started */ }
+  return {
+    watching: true,
+    tab_id: tabId,
+    screen_reader: screenReader,
+    observer_regions: observerInstalled,
+    observer_batches_received: batchCount,
+    announcer_diag: announcerDiag,
+    store_size: (a11yAnnouncements.get(tabId) || []).length,
+  };
+};
+
+const executeBackgroundHostedToolCall = async (call = {}, routedTabId = null) => {
+  if (call.name === "a11y.watch") {
+    const args = call.arguments && typeof call.arguments === "object" ? call.arguments : {};
+    const tabId = Number.isInteger(routedTabId) ? routedTabId : Number(args.tab_id ?? args.tabId);
+    const output = await runA11yWatch(tabId, {
+      enableScreenReader: args.enable_screen_reader !== false,
+      screenReaderChord: typeof args.screen_reader_chord === "string" ? args.screen_reader_chord : undefined,
+    });
+    return { ok: true, call_id: call.call_id, output, error: null };
+  }
+  if (call.name === "a11y.tree") {
+    const args = call.arguments && typeof call.arguments === "object" ? call.arguments : {};
+    const tabId = Number.isInteger(routedTabId) ? routedTabId : Number(args.tab_id ?? args.tabId);
+    const output = await runA11yTreeOp(tabId, async (tree) =>
+      tree.outline({
+        maxDepth: Number.isInteger(args.max_depth) ? args.max_depth : 12,
+        maxNodes: Number.isInteger(args.max_nodes) ? args.max_nodes : 800,
+      }));
+    return { ok: true, call_id: call.call_id, output, error: null };
+  }
+  if (call.name === "a11y.query") {
+    const args = call.arguments && typeof call.arguments === "object" ? call.arguments : {};
+    const tabId = Number.isInteger(routedTabId) ? routedTabId : Number(args.tab_id ?? args.tabId);
+    const output = await runA11yTreeOp(tabId, async (tree) => {
+      const node = tree.query({
+        role: args.role,
+        name: args.name,
+        name_contains: args.name_contains,
+      });
+      if (!node) {
+        return { found: false, role: args.role || null, name: args.name ?? args.name_contains ?? null };
+      }
+      const center = await tree.clickableCenter(node);
+      return {
+        found: true,
+        role: node.role,
+        name: node.name,
+        value: node.value ?? null,
+        state: node.state,
+        backend_dom_node_id: node.backendDOMNodeId ?? null,
+        clickable_center: center,
+      };
+    });
+    return { ok: true, call_id: call.call_id, output, error: null };
+  }
+  // keyboard.press with trusted:true runs here (CDP). Without the flag it never
+  // reaches this function — it flows to the content.js synthetic path.
+  if (call.name === "keyboard.press" && call.arguments && call.arguments.trusted === true) {
+    const args = call.arguments;
+    const rawKey = String(args.key || "");
+    // Support a compact chord like "Control+A" in the key field, mirroring the synthetic path.
+    const chordParts = rawKey.includes("+") ? rawKey.split("+").filter(Boolean) : [];
+    const key = chordParts.length > 1 ? chordParts.at(-1) : rawKey;
+    const modifiers = [
+      ...(Array.isArray(args.modifiers) ? args.modifiers : []),
+      ...(chordParts.length > 1 ? chordParts.slice(0, -1) : []),
+    ];
+    const tabId = Number.isInteger(routedTabId) ? routedTabId : (args.tab_id ?? args.tabId);
+    return {
+      ok: true,
+      call_id: call.call_id,
+      output: await dispatchTrustedKey(Number(tabId), key, modifiers, args.repeat),
+      error: null,
+    };
+  }
+  if (call.name === "keyboard.press_gated") {
+    const args = call.arguments || {};
+    const tabId = Number.isInteger(routedTabId) ? routedTabId : (args.tab_id ?? args.tabId);
+    return {
+      ok: true,
+      call_id: call.call_id,
+      output: await dispatchGatedRepeat(Number(tabId), args),
+      error: null,
+    };
+  }
+  if (call.name === "text.type" && call.arguments && call.arguments.trusted === true) {
+    const args = call.arguments;
+    const tabId = Number.isInteger(routedTabId) ? routedTabId : (args.tab_id ?? args.tabId);
+    return {
+      ok: true,
+      call_id: call.call_id,
+      output: await dispatchTrustedText(Number(tabId), args.text, args.select_back_chars),
+      error: null,
+    };
+  }
+  // pointer.drag with trusted:true runs here (CDP animated pointer drag).
+  if (call.name === "pointer.drag" && call.arguments && call.arguments.trusted === true) {
+    const args = call.arguments;
+    const tabId = Number.isInteger(routedTabId) ? routedTabId : (args.tab_id ?? args.tabId);
+    return {
+      ok: true,
+      call_id: call.call_id,
+      output: await dispatchTrustedDrag(Number(tabId), args.from, args.to, args),
+      error: null,
+    };
+  }
   if (call.name === "browser.claimed_tabs.list") {
     return {
       ok: true,
@@ -2538,8 +3449,32 @@ const executeSiteActionCallInTab = async (tab, { bundle, args, call }) => {
   });
 };
 
-const executeHostedToolCall = async (call = {}) => {
-  const backgroundResult = await executeBackgroundHostedToolCall(call);
+// Background tools that operate on the hosted agent's active tab but don't
+// carry a tab id in their args — resolve the default tab for them so the hosted
+// agent can call them the same as I can. a11y.* was the dangling connector: the
+// primitives were exposed to the hosted path, but only keyboard.press had its
+// tab resolved, so a11y.query/tree arrived with no tab and threw "requires an
+// authorized browser tab." (The blind agent reached for the eyes I built and
+// hit a wire I forgot to connect.)
+const HOSTED_DEFAULT_TAB_TOOLS = new Set([
+  "a11y.tree",
+  "a11y.query",
+  "a11y.watch",
+]);
+
+const executeHostedToolCallInner = async (call = {}) => {
+  // A trusted keyboard.press targets a specific tab; resolve the hosted default
+  // tab first so the trusted keypress lands on the active tab (other background
+  // actions carry their own tab id in args).
+  let backgroundRoutedTabId = null;
+  const isTrustedKey = call.name === "keyboard.press" && call.arguments && call.arguments.trusted === true;
+  const isTrustedText = call.name === "text.type" && call.arguments && call.arguments.trusted === true;
+  const argHasTab = call.arguments && (Number.isInteger(call.arguments.tab_id) || Number.isInteger(call.arguments.tabId));
+  if (isTrustedKey || isTrustedText || (HOSTED_DEFAULT_TAB_TOOLS.has(call.name) && !argHasTab)) {
+    const { tab } = await getHostedToolDefaultTab();
+    backgroundRoutedTabId = tab?.id ?? null;
+  }
+  const backgroundResult = await executeBackgroundHostedToolCall(call, backgroundRoutedTabId);
   if (backgroundResult) {
     await logHostedLocalRouting({
       call,
@@ -3249,7 +4184,270 @@ async function fanOutCostMeter(meter) {
   }
 }
 
+// U4: per-tab ring log of live-region TreeChange records from the observer
+// script. The U5 announcer registers itself as the sink to drive the fork's
+// LiveRegions; until then (and always, for diagnostics) records land here.
+const A11Y_EVENT_LOG_LIMIT = 200;
+const a11yEventLogs = new Map(); // tabId -> [{records, frame_url, frame_id, ts}]
+let a11yTreeChangeSink = null; // set by the announcer wiring below
+const setA11yTreeChangeSink = (fn) => { a11yTreeChangeSink = fn; };
+const readA11yEventLog = (tabId) => a11yEventLogs.get(tabId) || [];
+
+// U5: announcer wiring — ChromeVox LiveRegions/Output (dist/a11y-bundle.js)
+// driven by observer records, utterances captured as announcement records.
+// Lazy: the bundle loads on the first tree-change batch. Announcements land in
+// a per-tab ring here; U6 adds bridge transport + subscription policy.
+const A11Y_ANNOUNCEMENT_LIMIT = 100;
+const a11yAnnouncements = new Map(); // tabId -> [record]
+const readA11yAnnouncements = (tabId) => a11yAnnouncements.get(tabId) || [];
+// Self-test hook (Task #71): lets the Playwright live-smoke harness drive the
+// a11y path from the service worker without the bridge or a human round-trip.
+// Inert in normal operation; only a test explicitly reads self.__a11yTest.
+self.__a11yRoutingProbe = async () => {
+  // The 0.1.170 fix: hosted a11y.* with no tab id must resolve the default tab.
+  const inSet = HOSTED_DEFAULT_TAB_TOOLS.has("a11y.watch") && HOSTED_DEFAULT_TAB_TOOLS.has("a11y.query") && HOSTED_DEFAULT_TAB_TOOLS.has("a11y.tree");
+  let resolvedTab = null, err = null;
+  try {
+    const r = await executeHostedToolCall({ name: "a11y.watch", call_id: "probe", arguments: { enable_screen_reader: false } });
+    resolvedTab = r && r.ok && r.output ? r.output.tab_id : (r && r.error ? "err:" + r.error.code : null);
+  } catch (e) { err = String(e && e.message || e); }
+  return { a11y_in_default_tab_set: inSet, tabless_watch_result: resolvedTab, err };
+};
+self.__a11yTest = {
+  watch: (tabId) => runA11yWatch(tabId, { enableScreenReader: false }),
+  read: (tabId) => ({ announcements: readA11yAnnouncements(tabId) }),
+  eventLog: (tabId) => (a11yEventLogs.get(tabId) || []),
+  // Feed a synthetic observer batch straight to the announcer, isolating the
+  // announcer pipeline (getTree → resolveNode_ → fork → sink → store) from tab
+  // injection. Requires a real tabId with a live region in its AX tree.
+  feedBatch: async (tabId, records) => {
+    const ann = await getA11yAnnouncer();
+    setA11yTreeChangeSink((t, e) => ann.handleBatch(t, e));
+    await ann.handleBatch(tabId, { records });
+    await new Promise((r) => setTimeout(r, 50));
+    return { diag: ann.diagnostics?.() ?? null, store: readA11yAnnouncements(tabId).length };
+  },
+};
+// Inert in normal operation; only a test reads self.__inputTest. Drives the
+// trusted-text path (dispatchTrustedText) so the Playwright harness can prove
+// trusted text.type emits real per-char key events that a contenteditable
+// honors (guards the 0.1.172 insertText→keyDown regression).
+self.__inputTest = {
+  trustedText: (tabId, text, selectBackChars) => dispatchTrustedText(tabId, text, selectBackChars),
+  trustedKey: (tabId, key, modifiers, repeat) => dispatchTrustedKey(tabId, key, modifiers || [], repeat),
+  // Drives the accessibility-gated key-repeat (dispatchGatedRepeat) so the live
+  // harness can prove the gate advances/halts against a coalescing fixture.
+  gatedRepeat: (tabId, args) => dispatchGatedRepeat(tabId, args),
+};
+// Inert in normal operation; only the eval harness reads self.__claimTest. Runs
+// the REAL popup claim path (claimAuthorizedTab → connectClaimedTab) headlessly
+// for a given tabId, so the harness can make the extension take control of a
+// tab with NO human popup click (plan 2026-07-07-005 U7 — closes the
+// self-install/iterate loop). Surfaces the full result/error rather than a bare
+// message ack, so a failed bridge connect is VISIBLE, not a silent count:0.
+self.__claimTest = {
+  claim: async (tabId, bridgeUrl) => {
+    try {
+      const url = bridgeUrl || (await loadBridgeUrl().catch(() => DEFAULT_BRIDGE_URL));
+      await chrome.storage.local.set({ bridgeUrl: url });
+      const result = await claimAuthorizedTab({ tabId: Number(tabId), bridgeUrl: url });
+      return { ok: true, bridgeUrl: url, result };
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error), stack: String(error?.stack || "") };
+    }
+  },
+  // Report the live bridge/claim state so the harness can verify registration.
+  state: async () => {
+    const stored = await chrome.storage.local.get("bridgeUrl");
+    const bs = typeof bridgeState !== "undefined" ? bridgeState : null;
+    return {
+      bridgeUrl: stored.bridgeUrl ?? null,
+      hasBridgeState: Boolean(bs),
+      shouldReconnect: bs?.shouldReconnect ?? null,
+      wsReadyState: bs?.ws?.readyState ?? null,
+      bridgeSessionId: bs?.bridgeSessionId ?? null,
+    };
+  },
+};
+// Inert in normal operation; only the eval harness reads self.__agentTest. Lets the
+// self-contained Playwright eval (tests/live/eval/) drive a REAL hosted GPT-Realtime
+// session from the service worker with no bridge MCP client — it calls the same
+// executeHostedToolCall dispatcher the bridge uses for runtime.agent.* tools, so
+// runtime.agent.start / user_message / await_event / stop all route identically.
+self.__agentTest = {
+  call: async (name, args = {}) => {
+    try {
+      const result = await executeHostedToolCall({ name, call_id: `evaltest-${Date.now()}`, arguments: args || {} });
+      return result;
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error) };
+    }
+  },
+};
+// Inert in normal operation; only a test reads self.__sessionStoreTest. Proves
+// the 504 fix live (investigations/bridge-504-timeouts.md): when
+// chrome.storage.local.get hangs (the MV3 SW-churn wedge), a session-store read
+// must DEGRADE (resolve to the in-memory default) instead of hanging forever and
+// 504-ing every claimed_tabs.* call. Drives the REAL SessionStore + listClaimedTabs
+// in the live service worker with storage.local wedged/unwedged.
+self.__sessionStoreTest = {
+  // Replace chrome.storage.local.get with a hang; returns a restore fn.
+  wedgeStorageGet: () => {
+    const orig = chrome.storage.local.get.bind(chrome.storage.local);
+    chrome.storage.local.get = () => new Promise(() => {});
+    return () => { chrome.storage.local.get = orig; };
+  },
+  // A fresh store whose FIRST load hits the wedge — the exact live condition.
+  freshStoreEntries: async () => {
+    const store = new SessionStore();
+    return store.getSessionEntries();
+  },
+  // The real handler the bridge calls for browser.claimed_tabs.list.
+  listClaimedTabs: () => listClaimedTabs(),
+};
+// Hosted-agent inject queue (KTD5) — drained onto hosted tool results.
+const hostedA11yInjectQueue = [];
+const A11Y_PIGGYBACK_MAX_RECORDS = 5;
+const A11Y_PIGGYBACK_MAX_CHARS = 1200;
+const drainHostedA11yAnnouncements = () => {
+  if (!hostedA11yInjectQueue.length) return null;
+  const out = [];
+  let chars = 0;
+  while (hostedA11yInjectQueue.length && out.length < A11Y_PIGGYBACK_MAX_RECORDS) {
+    const next = hostedA11yInjectQueue[0];
+    const len = (next.text || "").length;
+    if (out.length > 0 && chars + len > A11Y_PIGGYBACK_MAX_CHARS) break;
+    out.push(hostedA11yInjectQueue.shift());
+    chars += len;
+  }
+  return out.length ? out : null;
+};
+
+// KTD5: hosted tool calls execute extension-locally (bridge only as fallback),
+// so inject-mode announcements piggyback HERE, where hosted results assemble —
+// the bridge drains its own queue for MCP tool calls. act -> hear.
+const executeHostedToolCall = async (call = {}) => {
+  const result = await executeHostedToolCallInner(call);
+  const announcements = drainHostedA11yAnnouncements();
+  if (announcements && result && typeof result === "object") {
+    result.announcements = announcements;
+  }
+  return result;
+};
+let a11yAnnouncerPromise = null;
+const getA11yAnnouncer = () => {
+  if (!a11yAnnouncerPromise) {
+    a11yAnnouncerPromise = (async () => {
+      const announcer = new Announcer({
+        // Per-batch tree snapshot: attach → refresh → detach. The snapshot's
+        // maps outlive the session; CDP-dependent resolution inside the
+        // announcer degrades gracefully to text-match (its documented order).
+        getTree: async (tabId) => {
+          if (!Number.isInteger(tabId)) return null;
+          try {
+            // Persistent session — NOT runA11yTreeOp: the announcer keeps this
+            // tree and calls its CDP closure later (resolveNode_), so the
+            // debugger must stay attached, not detach in a `finally`.
+            return await a11yTreeFromSession(tabId);
+          } catch (e) {
+            console.warn("[a11y] announcer tree snapshot failed", e?.message);
+            return null;
+          }
+        },
+        onAnnouncement: (record) => {
+          const tabId = record.tab;
+          const list = a11yAnnouncements.get(tabId) || [];
+          list.push(record);
+          if (list.length > A11Y_ANNOUNCEMENT_LIMIT) list.splice(0, list.length - A11Y_ANNOUNCEMENT_LIMIT);
+          a11yAnnouncements.set(tabId, list);
+          // Forward to the bridge (subscription policy + MCP piggyback live
+          // there — U6). runtime_key is the stable per-tab route key.
+          try {
+            sendBridgeItem({
+              type: "a11y_announcement",
+              runtime_key: Number.isInteger(tabId) ? runtimeKeyForTab(tabId) : null,
+              record,
+              ts: new Date().toISOString(),
+            });
+          } catch (_e) { /* bridge socket down — ring log still has it */ }
+          // Hosted-agent inject drain (KTD5): hosted tool calls execute
+          // extension-locally and never traverse the bridge, so assertive
+          // announcements queue HERE and piggyback on hosted results. Mirrors
+          // the bridge's default policy (assertive→inject) as a constant.
+          if (record.politeness === "assertive") {
+            hostedA11yInjectQueue.push(record);
+            if (hostedA11yInjectQueue.length > A11Y_ANNOUNCEMENT_LIMIT) hostedA11yInjectQueue.shift();
+          }
+        },
+      }).start();
+      setA11yTreeChangeSink((tabId, entry) => announcer.handleBatch(tabId, entry));
+      return announcer;
+    })();
+  }
+  return a11yAnnouncerPromise;
+};
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "actions-json:a11y-tree-changes") {
+    const tabId = sender?.tab?.id;
+    if (Number.isInteger(tabId)) {
+      const entry = {
+        records: message.records || [],
+        frame_url: message.frame_url || null,
+        frame_id: sender.frameId ?? null,
+        is_top_frame: Boolean(message.is_top_frame),
+        ts: Date.now(),
+      };
+      const log = a11yEventLogs.get(tabId) || [];
+      log.push(entry);
+      if (log.length > A11Y_EVENT_LOG_LIMIT) log.splice(0, log.length - A11Y_EVENT_LOG_LIMIT);
+      a11yEventLogs.set(tabId, log);
+      // AWAIT the announcer before dispatching — it's lazy/async, and the sink
+      // is null until it resolves. The old fire-and-forget getA11yAnnouncer()
+      // + `if (a11yTreeChangeSink)` dropped every batch that arrived before the
+      // first init completed (which, for a freshly-watched tab, is ALL of the
+      // early ones). This was THE announcement-pipeline drop.
+      getA11yAnnouncer()
+        .then(() => {
+          if (a11yTreeChangeSink) a11yTreeChangeSink(tabId, entry);
+        })
+        .catch((e) => console.warn("[a11y] announcer dispatch failed", e?.message));
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message?.type === "actions-json:marker-trusted-key") {
+    // Marker-runner relay: a recipe step keyboard.press{trusted:true} runs in the
+    // content script, which cannot attach the debugger itself. Dispatch the real
+    // CDP key on the sender's own tab only — no cross-tab reach.
+    // __testTabId is honored ONLY when there is no real sender tab (the live
+    // caret-walk harness drives this seam from the service worker); production
+    // messages always carry sender.tab and never hit this branch.
+    const tabId = sender?.tab?.id ?? (Number.isInteger(message.__testTabId) ? message.__testTabId : undefined);
+    if (!Number.isInteger(tabId)) {
+      sendResponse({ ok: false, error: "Trusted key dispatch requires a sender tab." });
+      return false;
+    }
+    dispatchTrustedKey(tabId, message.key, message.modifiers || [], message.repeat)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message?.type === "actions-json:marker-trusted-text") {
+    // Same relay for text.type{trusted:true} — real per-char CDP key events on the sender tab.
+    const tabId = sender?.tab?.id;
+    if (!Number.isInteger(tabId)) {
+      sendResponse({ ok: false, error: "Trusted text dispatch requires a sender tab." });
+      return false;
+    }
+    dispatchTrustedText(tabId, message.text, message.select_back_chars)
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
   if (message?.type === "actions-json:expenditure-record") {
     handleExpenditureRecord(message.record || {})
       .then((result) => sendResponse({ ok: true, ...result }))

@@ -1,0 +1,10 @@
+# Workspace for the actions.json MCP bridge and the chrome-launcher crate it depends on.
+# The launcher is a reusable, cross-platform library (KTD1/KTD4); the bridge consumes it to
+# expose the browser-launch tools as native MCP tools (plan 2026-07-08-001).
+[workspace]
+resolver = "2"
+members = [
+    "actions-json-mcp",
+    "chrome-launcher",
+    "chrome-launcher-helper",
+]

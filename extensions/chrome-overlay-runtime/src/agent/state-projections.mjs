@@ -141,6 +141,71 @@ export function validateStateProjection(projection) {
       error: { code: "invalid_state_projection", message: "State projection snapshot.projection must declare JSONata expression." },
     };
   }
+  if (projection.markers != null) {
+    // markers may be a static array, or a JSONata expression slot ("{% ... %}")
+    // evaluated over { records, state, url } at projection time — marker DATA is
+    // pure; the side-effecting resolution runs later in the action-layer runner.
+    if (typeof projection.markers !== "string") {
+      const markersValidation = validateStateMarkers(projection.markers);
+      if (!markersValidation.ok) return markersValidation;
+    }
+  }
+  return { ok: true };
+}
+
+// Recipe steps are declarative references to EXISTING portable primitives. The
+// projection sandbox never executes them; the content-script marker-runner does.
+export const MARKER_RECIPE_PRIMITIVES = new Set([
+  "keyboard.press",
+  "pointer.click",
+  "pointer.move",
+  "pointer.double_click",
+  "locator.element_info",
+  "locator.wait_for",
+  "text.insert",
+  "text.type",
+  "viewport.scroll",
+]);
+
+const MARKER_PROMISE_TYPES = new Set(["cursor", "pointer"]);
+
+export function validateStateMarkers(markers) {
+  if (!Array.isArray(markers)) {
+    return { ok: false, error: { code: "invalid_state_markers", message: "markers must be an array of marker objects." } };
+  }
+  const seen = new Set();
+  for (const marker of markers) {
+    if (!marker || typeof marker !== "object" || Array.isArray(marker)) {
+      return { ok: false, error: { code: "invalid_state_markers", message: "Each marker must be an object." } };
+    }
+    if (typeof marker.id !== "string" || !marker.id) {
+      return { ok: false, error: { code: "invalid_state_markers", message: "Each marker needs a string id." } };
+    }
+    if (seen.has(marker.id)) {
+      return { ok: false, error: { code: "invalid_state_markers", message: `Duplicate marker id "${marker.id}".` } };
+    }
+    seen.add(marker.id);
+    if (!MARKER_PROMISE_TYPES.has(marker.type)) {
+      return { ok: false, error: { code: "invalid_state_markers", message: `Marker "${marker.id}" type must be "cursor" or "pointer".` } };
+    }
+    if (!Array.isArray(marker.recipe) || marker.recipe.length === 0) {
+      return { ok: false, error: { code: "invalid_state_markers", message: `Marker "${marker.id}" needs a non-empty recipe array.` } };
+    }
+    for (const step of marker.recipe) {
+      if (!step || typeof step !== "object" || !MARKER_RECIPE_PRIMITIVES.has(step.primitive)) {
+        return {
+          ok: false,
+          error: {
+            code: "invalid_state_markers",
+            message: `Marker "${marker.id}" recipe steps must name an allowed primitive (${[...MARKER_RECIPE_PRIMITIVES].join(", ")}).`,
+          },
+        };
+      }
+      if (step.args != null && (typeof step.args !== "object" || Array.isArray(step.args))) {
+        return { ok: false, error: { code: "invalid_state_markers", message: `Marker "${marker.id}" recipe step args must be an object.` } };
+      }
+    }
+  }
   return { ok: true };
 }
 
@@ -552,11 +617,35 @@ export async function executeStateProjection({
       },
     };
   }
+  let markers = null;
+  if (projection.markers != null) {
+    try {
+      const resolved = typeof projection.markers === "string"
+        ? await evaluateJsonataExpression(projection.markers, {
+            records,
+            state,
+            url: pageUrl,
+            projection: { name: projection.name },
+          })
+        : projection.markers;
+      const markersValidation = validateStateMarkers(resolved);
+      if (!markersValidation.ok) {
+        return { ok: false, error: markersValidation.error };
+      }
+      markers = resolved;
+    } catch (error) {
+      return {
+        ok: false,
+        error: { code: error.code || "state_markers_failed", message: error.message || String(error) },
+      };
+    }
+  }
   const base = {
     ok: true,
     projection: projection.name,
     state_hash: stateHash(state),
     observed_at: new Date().toISOString(),
+    ...(markers ? { markers } : {}),
     diagnostics: {
       ...diagnostics,
       schema_valid: true,

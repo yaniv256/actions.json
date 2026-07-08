@@ -30,13 +30,13 @@ const extractClipboardHtmlFromText = () => {
   return new Function(`${source} return clipboardHtmlFromText;`)();
 };
 
-test("synthetic paste html flavor is built by clipboardHtmlFromText", () => {
+test("synthetic paste html flavor is routed through clipboardHtmlFlavor", () => {
   const fnStart = contentSource.indexOf("const syntheticClipboardEvent");
   assert.ok(fnStart >= 0, "syntheticClipboardEvent must exist");
-  const fnBody = contentSource.slice(fnStart, fnStart + 600);
+  const fnBody = contentSource.slice(fnStart, fnStart + 700);
   assert.ok(
-    fnBody.includes('setData("text/html", clipboardHtmlFromText(text))'),
-    "text/html flavor must be produced by clipboardHtmlFromText, not raw escaped text",
+    fnBody.includes('setData("text/html", clipboardHtmlFlavor(text, html))'),
+    "text/html flavor must be produced by clipboardHtmlFlavor (which derives via clipboardHtmlFromText when no explicit html is given), not raw escaped text",
   );
 });
 

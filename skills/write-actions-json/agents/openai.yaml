@@ -1,0 +1,4 @@
+display_name: Write actions.json
+skill_name: write-actions-json
+short_description: Create website action maps for agent-operable browser workflows.
+default_prompt: Use the canonical skill in skills/write-actions-json/SKILL.md to explore a website and write an actions.json file that captures its reusable operations.

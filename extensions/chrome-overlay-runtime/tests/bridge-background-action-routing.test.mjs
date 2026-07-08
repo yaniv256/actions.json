@@ -45,12 +45,19 @@ test("routeBridgeItemToTab intercepts background actions before forwarding to th
   assert.ok(routerStart >= 0, "routeBridgeItemToTab must exist");
   const routerBody = backgroundSource.slice(routerStart, routerStart + 6000);
 
-  const interceptIdx = routerBody.indexOf("BRIDGE_BACKGROUND_ACTION_NAMES.has");
+  // The router decides the background path via bridgeItemNeedsBackground(item),
+  // which consults BRIDGE_BACKGROUND_ACTION_NAMES (and the trusted keyboard.press
+  // case). Keeping the decision in one predicate is the intended refactor.
+  const interceptIdx = routerBody.indexOf("bridgeItemNeedsBackground(item)");
   const forwardIdx = routerBody.indexOf('type: "actions-json:bridge-message"');
 
   assert.ok(
     interceptIdx >= 0,
-    "routeBridgeItemToTab must check BRIDGE_BACKGROUND_ACTION_NAMES.has(item.name)",
+    "routeBridgeItemToTab must gate the background path on bridgeItemNeedsBackground(item)",
+  );
+  assert.ok(
+    backgroundSource.includes("BRIDGE_BACKGROUND_ACTION_NAMES.has(item?.name)"),
+    "bridgeItemNeedsBackground must still consult BRIDGE_BACKGROUND_ACTION_NAMES",
   );
   assert.ok(forwardIdx >= 0, "routeBridgeItemToTab must forward remaining items to the content script");
   assert.ok(
