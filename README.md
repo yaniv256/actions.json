@@ -4,17 +4,26 @@
 [![Latest release](https://img.shields.io/github/v/release/yaniv256/actions.json?include_prereleases&sort=semver)](https://github.com/yaniv256/actions.json/releases)
 [![npm: @actions-json/bridge](https://img.shields.io/npm/v/@actions-json/bridge?label=%40actions-json%2Fbridge)](https://www.npmjs.com/package/@actions-json/bridge)
 
-**A readable action map for websites — so AI agents operate a site through
-declared actions instead of scraping and guessing.**
+**Talk to any website. `actions.json` gives you a voice agent that runs on any
+site — it hears you, sees the page, navigates, and acts on your behalf.**
 
-For **site owners** who want their site to work well with agents, and for
-**developers** whose coding agents (Claude Code, Codex) need to drive a browser
-reliably. `actions.json` lets an agent discover what a site can do, call
-declared actions, and reuse website knowledge instead of rediscovering the same
-DOM every run.
+Install the Chrome extension, bring your own OpenAI API key, and press **Start**:
+a `gpt-realtime` voice agent takes control of the tab and you *speak* to the
+site — "file this expense," "reply to the last message," "book the 3pm slot." No
+per-site integration required; it works on sites as they already are. A site can
+go further by publishing an `actions.json` map, which turns that generic voice
+agent into a fluent expert on that specific site.
 
+Under the hood, `actions.json` is **a readable action map for websites** — so an
+agent operates a site through declared actions instead of scraping and guessing.
 It's **OpenAPI for website actions**: OpenAPI describes what a server can do;
-`actions.json` describes what a website can do.
+`actions.json` describes what a website can do. The voice agent is the product;
+the map is what makes it reliable.
+
+Three ways in: a **voice agent** for anyone on the current site; a **coding-agent
+bridge** (Claude Code, Codex) that drives the browser through an MCP server; and
+a **first-party map** a site owner publishes so every agent understands their
+site.
 
 <p align="center">
   <a href="https://yaniv256.github.io/actions.json/decks/schema-v1-proposal-deck.html">
@@ -59,16 +68,70 @@ Started](https://yaniv256.github.io/actions.json/getting-started.html)**.
 
 ## What You Can Do Now
 
-This repository contains the current public reference implementation for:
+This repository contains the current public reference implementation.
+
+### A voice agent on any website — the headline
+
+Install the Chrome extension, add your OpenAI API key, click **Take control of
+this tab**, and press **Start**. A `gpt-realtime` agent joins the page: you speak
+to it, it speaks back, and it operates the site for you — reading the page,
+clicking, typing, filling forms, moving between tabs. It runs on any site out of
+the box, and gets sharper on any site that ships an `actions.json` map. The live
+session lives in an extension-owned offscreen document, so it survives page
+overlays and navigation instead of dropping mid-conversation. Everything below —
+the accessibility layer, the canvas-editing stack, marker projections — exists to
+make *this* agent reliable on real, messy websites.
+
+### An agent that operates by structure, not pixels — the accessibility layer
+
+An agent driving a site is, in effect, a blind screen-reader user: it should
+navigate by structure and announcements, not by guessing at pixels. So we
+replatformed **ChromeVox** (Chromium's own screen reader) onto the runtime and
+expose its output as primitives:
+
+- `a11y.tree` — read the page's accessibility tree (the structure a
+  screen-reader user perceives);
+- `a11y.query` — find a control by role and accessible name, the way you'd bind
+  a target that survives a redesign;
+- `a11y.events.read` / `a11y.watch` / `a11y.announcements.*` — subscribe to
+  live-region announcements and receive real screen-reader utterances as the
+  page changes.
+
+### Editing Google Docs, Sheets, and Slides for real
+
+Canvas apps have no editable DOM, so ordinary synthetic input can't touch them.
+A trusted-input + positional-editing stack now drives them the way a person
+who has read the document would — by position, never by blind find-and-replace:
+
+- `text.type` (trusted CDP keystrokes) and the `docs.select_and_type` composite,
+  which overtypes even a phrase that straddles formatting runs;
+- positional caret navigation — `cursor.to_paragraph`, word-wise
+  `words_forward`/`words_backward`, `pointer.click` modifiers for range
+  selection;
+- `keyboard.press_gated` — repeat a key but gate each press on a live
+  accessibility read, so a word-walk stops exactly on its target instead of
+  overshooting;
+- the `clipboard` and selection family for writing into iframe editors and
+  moving content across apps.
+
+### Durable positions on any surface — marker projections
+
+A projection can declare **markers**: named, typed promises (this marker's
+cursor ends *here*; this one's pointer ends *there*) built from portable
+primitives, with no stored coordinates. `marker.query`, `cursor.move_to`, and
+`pointer.move_to` resolve them live — re-resolvable positions even on a canvas.
+
+### And the platform underneath
 
 - writing `actions.json` maps with an agent authoring skill;
-- running a Chrome extension that can host a GPT Realtime browser agent with
-  your own OpenAI API key;
-- **driving several authorized tabs from one agent** — the agent moves between,
-  opens, and closes tabs and routes each action to the right one, so a workflow
-  can span Gmail, a calendar, and a CRM board in a single session;
-- loading `actions.json.storage` so the hosted agent can use site-specific
-  context and actions;
+- running a Chrome extension that hosts a GPT Realtime browser agent with your
+  own OpenAI API key;
+- **driving several authorized tabs from one agent** — it moves between, opens,
+  and closes tabs and routes each action to the right one, so a workflow can
+  span Gmail, a calendar, and a CRM board in one session;
+- loading `actions.json.storage` for site-specific context and actions, with
+  **private-over-public scope precedence** so a private map cleanly overrides a
+  public one;
 - exposing actions to external coding agents through a Model Context Protocol
   (MCP) bridge;
 - supervising the hosted agent event-driven, learning of each response, tool
@@ -113,7 +176,7 @@ writes or improves `actions.json`, asks `actions.site` what actions are
 available, and calls stored actions instead of rediscovering the page.
 
 Read [Bridge Architecture](https://yaniv256.github.io/actions.json/bridge-architecture.html)
-and the authoring skill at [skills/SKILL.md](skills/SKILL.md).
+and the authoring skill at [skills/write-actions-json/SKILL.md](skills/write-actions-json/SKILL.md).
 
 ### I Want To Make My Website Agent-Ready
 
@@ -181,7 +244,7 @@ cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- mcp \
 
 ```text
 docs/                         Public documentation and schema references
-skills/SKILL.md               Canonical installable authoring skill
+skills/write-actions-json/SKILL.md               Canonical installable authoring skill
 skills/references/            Skill reference docs (the published docs/ mirror these)
 runtime/actions-json-runtime/ Shared runtime and bookmarklet code
 extensions/chrome-overlay-runtime/

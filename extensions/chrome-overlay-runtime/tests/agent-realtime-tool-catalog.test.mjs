@@ -58,8 +58,11 @@ test("realtime tool catalog includes supported stage 1 primitives without unsupp
   assert.equal(extensionTools.some((tool) => tool.name === "transfer.write"), true);
   assert.equal(extensionTools.some((tool) => tool.name === "transfer.insert"), true);
   assert.equal(extensionTools.some((tool) => tool.name === "storage.read_file"), true);
-  assert.equal(extensionTools.some((tool) => tool.name === "clipboard.write"), false);
-  assert.equal(extensionTools.some((tool) => tool.name === "clipboard.read"), false);
+  // clipboard.read/write are now supported on the extension host (system
+  // clipboard access is a first-class facility — a bridge to native apps and
+  // other windows the transfer buffer cannot reach), so they DO appear.
+  assert.equal(extensionTools.some((tool) => tool.name === "clipboard.write"), true);
+  assert.equal(extensionTools.some((tool) => tool.name === "clipboard.read"), true);
   assert.equal(extensionTools.some((tool) => tool.name === "runtime.session.name"), false);
   assert.equal(extensionTools.some((tool) => tool.name === "runtime.session.finalize_tabs"), false);
   assert.equal(embedTools.some((tool) => tool.name === "pointer.click"), true);

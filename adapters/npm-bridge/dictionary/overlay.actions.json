@@ -83,6 +83,98 @@
         }
       },
       {
+        "name": "browser.navigate",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "privileged",
+        "portable": false,
+        "summary": "Navigate a claimed tab to a URL (or reload it) and reconnect its runtime.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "Destination URL. Required unless reload is true."
+            },
+            "reload": {
+              "type": "boolean",
+              "description": "Reload the current tab instead of navigating."
+            },
+            "tab_id": {
+              "type": "integer",
+              "description": "Claimed tab id. Omit for the active claimed tab."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "browser.open_tab",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "privileged",
+        "portable": false,
+        "summary": "Open a new browser tab, auto-claim it, and return a ready-to-drive runtime.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "URL to open. Defaults to a blank page."
+            },
+            "active": {
+              "type": "boolean",
+              "description": "Foreground the new tab. Default true."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "browser.close_tab",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "privileged",
+        "portable": false,
+        "summary": "Close a claimed tab (defaults to active); refuses to close the last remaining claimed tab.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "tab_id": {
+              "type": "integer",
+              "description": "Claimed tab id. Omit for the active claimed tab."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "browser.dismiss_dialog",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "privileged",
+        "portable": false,
+        "summary": "Dismiss a native JS dialog (alert/confirm/prompt/beforeunload) blocking a claimed tab via CDP; recovers a wedged tab.",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "tab_id": {
+              "type": "integer",
+              "description": "Claimed Chrome tab id whose dialog to dismiss. Omit for the active claimed tab."
+            },
+            "accept": {
+              "type": "boolean",
+              "description": "Accept (true, default) or cancel (false) the dialog. For a beforeunload 'Leave site?' confirm, accept=true leaves the page, accept=false stays."
+            },
+            "prompt_text": {
+              "type": "string",
+              "description": "Text to enter for a prompt() dialog. Ignored for other dialog types."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
         "name": "runtime.agent.start",
         "support": "supported",
         "reason": null,
@@ -2000,6 +2092,28 @@
       }
     },
     {
+      "name": "runtime.agent.memory_clear",
+      "description": "Clear the hosted agent's persistent local memory (ACTIONS_JSON_AGENT_MEMORY_V1). A new hosted session rehydrates the last stored events as context; clear the memory first when a genuinely fresh, uncontaminated session is required (for example before an acceptance test). Returns the number of events cleared.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "x_actions": {
+        "direction": "agent_to_html",
+        "handler": "actionsJsonOverlay.runtimeAgentMemoryClear",
+        "scope": "active_surface",
+        "source": {
+          "files": [
+            "src/content.js",
+            "src/background.js",
+            "src/agent/session-memory-store.mjs"
+          ],
+          "component": "HostedRealtimeSession"
+        }
+      }
+    },
+    {
       "name": "runtime.agent.user_message",
       "description": "Inject a developer test prompt into the active hosted GPT Realtime session. The model response is requested as text only and shown in the browser as a toast instead of being spoken.",
       "input_schema": {
@@ -2051,6 +2165,82 @@
           "tab_id": {
             "type": "integer",
             "description": "Chrome tab id returned by browser.claimed_tabs.list."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "browser.navigate",
+      "description": "Navigate a claimed tab to a URL (or reload it), then reconnect its runtime so it stays drivable after the load. Defaults to the active claimed tab; pass tab_id to target another. Use this to recover a tab that is wedged, stuck on a stale/soft-navigated view, or to move it to a known URL. Refuses chrome/about/file/edge URLs. Verify the result with page.info or a projection afterward.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "Destination URL. Required unless reload is true."
+          },
+          "reload": {
+            "type": "boolean",
+            "description": "Reload the current tab instead of navigating to url. The clean escape from a wedged editor or a half-mounted SPA view."
+          },
+          "tab_id": {
+            "type": "integer",
+            "description": "Claimed Chrome tab id to navigate. Omit to use the active claimed tab."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "browser.open_tab",
+      "description": "Open a new browser tab (optionally at a URL), auto-claim and authorize it, and return a ready-to-drive runtime. Use this to get unstuck without losing the tab you were on, or to work on a fresh page. Returns tab_id and runtime_id; route subsequent calls to that runtime. Refuses chrome/about/file/edge URLs.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "URL to open in the new tab. Defaults to a blank Google page if omitted."
+          },
+          "active": {
+            "type": "boolean",
+            "description": "Whether to foreground the new tab. Defaults to true."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "browser.close_tab",
+      "description": "Close a claimed tab you are done with (defaults to the active tab; pass tab_id to target another). Use to reap stale/duplicate tabs that cause ambiguous routing. Refuses to close the last remaining claimed tab. Removes the tab's runtime from the bridge.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tab_id": {
+            "type": "integer",
+            "description": "Claimed Chrome tab id to close. Omit to close the active claimed tab."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "browser.dismiss_dialog",
+      "description": "Dismiss a native JavaScript dialog (alert/confirm/prompt/beforeunload) blocking a claimed tab, via the CDP Page domain. A native modal freezes the page main thread so no content-script primitive can clear it; this works below the page event loop and recovers a tab wedged after navigating away from an editor with unsaved changes. Defaults to the active claimed tab and accept=true.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "tab_id": {
+            "type": "integer",
+            "description": "Claimed Chrome tab id whose dialog to dismiss. Omit for the active claimed tab."
+          },
+          "accept": {
+            "type": "boolean",
+            "description": "Accept (true, default) or cancel (false) the dialog. For a beforeunload 'Leave site?' confirm, accept=true leaves the page, accept=false stays."
+          },
+          "prompt_text": {
+            "type": "string",
+            "description": "Text to enter for a prompt() dialog. Ignored for other dialog types."
           }
         },
         "additionalProperties": false

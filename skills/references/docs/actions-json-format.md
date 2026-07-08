@@ -1,1 +1,0 @@
-../../../docs/actions-json-format.md

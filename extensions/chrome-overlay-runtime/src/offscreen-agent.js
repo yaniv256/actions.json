@@ -210,6 +210,7 @@ async function handleCommand(message) {
   if (message.type === "actions-json:agent-session-user-message") {
     const result = await session.sendUserMessage({
       text: message.text,
+      mode: message.mode === "interrupt" ? "interrupt" : "queue",
     });
     return { ok: true, result, state: session.getState() };
   }

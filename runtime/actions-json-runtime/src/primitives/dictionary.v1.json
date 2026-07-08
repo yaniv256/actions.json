@@ -1374,9 +1374,9 @@
       "name": "clipboard.write",
       "version": 1,
       "stage": 1,
-      "summary": "Write text to the extension-approved clipboard or transfer surface when permission is available.",
-      "capability_class": "privileged",
-      "portable": false,
+      "summary": "Write text to the system clipboard (pure clipboard I/O).",
+      "capability_class": "portable",
+      "portable": true,
       "capabilities": [
         "clipboard.write"
       ],
@@ -1405,12 +1405,8 @@
       },
       "adapters": {
         "extension": {
-          "support": "unsupported",
-          "reason": "transfer_buffer_preferred",
-          "error": {
-            "code": "capability_unavailable",
-            "message": "Clipboard primitives are not exposed in this runtime slice. Use transfer.write/read/insert for approved cross-tab transfer."
-          }
+          "support": "supported",
+          "reason": null
         },
         "embed": {
           "support": "unsupported",
@@ -1432,9 +1428,9 @@
       "name": "clipboard.read",
       "version": 1,
       "stage": 1,
-      "summary": "Read text from the extension-approved clipboard or transfer surface when permission is available.",
-      "capability_class": "privileged",
-      "portable": false,
+      "summary": "Read the current system clipboard text (pure clipboard I/O).",
+      "capability_class": "portable",
+      "portable": true,
       "capabilities": [
         "clipboard.read"
       ],
@@ -1453,12 +1449,8 @@
       },
       "adapters": {
         "extension": {
-          "support": "unsupported",
-          "reason": "transfer_buffer_preferred",
-          "error": {
-            "code": "capability_unavailable",
-            "message": "Clipboard primitives are not exposed in this runtime slice. Use transfer.write/read/insert for approved cross-tab transfer."
-          }
+          "support": "supported",
+          "reason": null
         },
         "embed": {
           "support": "unsupported",

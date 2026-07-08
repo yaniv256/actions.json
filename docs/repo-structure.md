@@ -63,7 +63,7 @@ skills/
     docs/
 ```
 
-`skills/SKILL.md` is the primary skill file. It should stay telescoped: short
+`skills/write-actions-json/SKILL.md` is the primary skill file. It should stay telescoped: short
 operational guidance in the skill, longer references linked from
 `skills/references/`.
 
@@ -131,7 +131,7 @@ adapters/
 
 Adapters should point to or package the canonical skill and runtime artifacts.
 Do not maintain hollow platform-specific skills that replace
-`skills/SKILL.md`.
+`skills/write-actions-json/SKILL.md`.
 
 If a platform eventually requires a platform-specific `SKILL.md`, generate a
 self-contained copy from the canonical skill during packaging.
@@ -167,6 +167,15 @@ Repository-level tests that do not belong inside one package.
 Package-specific tests may live beside their package, such as runtime tests
 under `runtime/actions-json-runtime/` or extension tests under
 `extensions/chrome-overlay-runtime/`.
+
+## Internal artifacts (`internal-docs` branch)
+
+Spec Kit feature work, implementation task records, and incident investigation
+write-ups live on the `internal-docs` orphan branch, not on `main`. The `main`
+branch holds only public-release material. Those documents are useful for
+contributors working on active implementation, but they are not the first place
+a user should learn the product; public docs summarize stable outcomes rather
+than require readers to reconstruct the spec history.
 
 ## Packaging Rule
 

@@ -1,0 +1,12 @@
+[submodule "agent-skills/incident-investigation"]
+	path = skills/incident-investigation
+	url = https://github.com/yaniv256/incident-investigation.git
+[submodule "third_party/chromevox"]
+	path = third_party/chromevox
+	url = https://github.com/ActionsJson/chromevox.git
+[submodule "skills/jsonata-syntax"]
+	path = skills/jsonata-syntax
+	url = https://github.com/yaniv256/jsonata-syntax.git
+[submodule "examples/actions.json.storage"]
+	path = examples/actions.json.storage
+	url = https://github.com/yaniv256/actions.json.storage.git

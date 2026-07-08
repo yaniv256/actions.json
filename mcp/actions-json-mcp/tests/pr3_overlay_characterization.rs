@@ -351,7 +351,7 @@ async fn url_routing_failure_reports_candidate_rejection_trace() {
         }),
         vec![RuntimeSeed {
             runtime_id: "runtime-a".to_string(),
-            url: Some("https://pragmaworks.dev/#research".to_string()),
+            url: Some("https://acme.example/#research".to_string()),
         }],
     );
 
@@ -364,7 +364,7 @@ async fn url_routing_failure_reports_candidate_rejection_trace() {
                 .body(Body::from(
                     json!({
                         "name": "browser.screenshot",
-                        "target_url_contains": "https://genspec.dev/",
+                        "target_url_contains": "https://beta.example/",
                         "arguments": {
                             "policy_exception_report": policy_exception_report(
                                 "browser.screenshot",
@@ -390,7 +390,7 @@ async fn url_routing_failure_reports_candidate_rejection_trace() {
     );
     assert_eq!(
         payload["routing_trace"]["requested"]["target_url_contains"].as_str(),
-        Some("https://genspec.dev/")
+        Some("https://beta.example/")
     );
     assert_eq!(
         payload["routing_trace"]["candidates"]
@@ -405,7 +405,7 @@ async fn url_routing_failure_reports_candidate_rejection_trace() {
     );
     assert_eq!(
         payload["routing_trace"]["candidates"][0]["url"].as_str(),
-        Some("https://pragmaworks.dev/#research")
+        Some("https://acme.example/#research")
     );
     assert_eq!(
         payload["routing_trace"]["candidates"][0]["url_contains_match"].as_bool(),
@@ -985,7 +985,7 @@ async fn actions_site_call_returns_static_storage_output_without_runtime() {
     let storage_root = tempfile::tempdir().unwrap();
     let site_map = storage_root
         .path()
-        .join("scopes/private/sites/pragmaworks.dev/home/actions.json");
+        .join("scopes/private/sites/acme.example/home/actions.json");
     std::fs::create_dir_all(site_map.parent().unwrap()).unwrap();
     std::fs::write(
         &site_map,
@@ -993,8 +993,8 @@ async fn actions_site_call_returns_static_storage_output_without_runtime() {
             "protocol": "actions.json",
             "tools": [
                 {
-                    "name": "pragmaworks.site.map",
-                    "description": "Return the mapped PragmaWorks page and menu knowledge.",
+                    "name": "acme.site.map",
+                    "description": "Return the mapped Acme page and menu knowledge.",
                     "input_schema": {
                         "type": "object",
                         "properties": {},
@@ -1030,10 +1030,10 @@ async fn actions_site_call_returns_static_storage_output_without_runtime() {
         app,
         json!({
             "name": "actions.site",
-            "target_url_contains": "pragmaworks.dev",
+            "target_url_contains": "acme.example",
             "arguments": {
                 "mode": "call",
-                "action": "pragmaworks.site.map",
+                "action": "acme.site.map",
                 "arguments": {}
             }
         }),
@@ -2908,6 +2908,47 @@ async fn actions_site_workflow_call_rejects_ambiguous_maps() {
     );
     let map_paths = payload["error"]["evidence"]["map_paths"].as_array().unwrap();
     assert_eq!(map_paths.len(), 2);
+}
+
+#[tokio::test]
+async fn actions_site_workflow_call_private_overrides_public() {
+    // Same action declared in both a private and a public map must resolve to the
+    // private one (private > shared > public), not error site_action_ambiguous.
+    let storage_root = tempfile::tempdir().unwrap();
+    write_storage_map(
+        storage_root.path(),
+        "scopes/private/sites/trello.com/board/actions.json",
+        &trello_workflow_map(),
+    );
+    write_storage_map(
+        storage_root.path(),
+        "scopes/public/sites/trello.com/board/actions.json",
+        &trello_workflow_map(),
+    );
+    let app = state_projection_app(storage_root.path()).await;
+
+    let (status, payload) = call_tool(
+        app,
+        json!({
+            "name": "actions.site",
+            "arguments": {
+                "mode": "call",
+                "action": "trello.board.add_card.open_composer",
+                "arguments": { "list_name": "Backlog" },
+                "target_url_contains": "trello.com"
+            }
+        }),
+    )
+    .await;
+
+    // Not ambiguous: precedence collapsed to the private map, so resolution gets
+    // past the ambiguity check. Any remaining error is a downstream dispatch
+    // error (no runtime connected in this unit harness), NOT site_action_ambiguous.
+    assert_ne!(
+        payload["error"]["code"].as_str(),
+        Some("site_action_ambiguous"),
+        "private+public duplication must resolve to private, not error ambiguous; got status {status} payload {payload}"
+    );
 }
 
 #[tokio::test]

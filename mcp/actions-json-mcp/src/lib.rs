@@ -36,6 +36,9 @@ use tokio::{
 };
 use uuid::Uuid;
 
+/// Native chrome-launcher tools (browser launch / self-install / claim) merged into this MCP.
+mod chrome_launcher_tools;
+
 #[derive(Parser)]
 #[command(name = "actions-json-mcp")]
 #[command(about = "actions.json MCP bridge for browser runtimes")]
@@ -119,9 +122,196 @@ struct AppState {
     // the WebSocket. runtime.agent.await_event drains this so the supervising
     // MCP client learns each event event-driven instead of polling the log.
     agent_event_queues: Arc<Mutex<HashMap<String, AgentEventQueue>>>,
+    // a11y phase 1 (U6): announcement store — speech history + inject queue +
+    // per-(subscriber, tab) delivery config. See docs/a11y-shim-spec.md §6 and
+    // the plan's R4/R4a/R5.
+    a11y: Arc<Mutex<A11yStore>>,
 }
 
 const AGENT_EVENT_QUEUE_CAP: usize = 1000;
+
+// --- a11y announcement store (U6) ---------------------------------------
+// Policy per the phase-1 plan: default profile `normal` maps the site's own
+// urgency (assertive -> inject, polite -> buffer); modes inject/buffer/off,
+// keyed per (subscriber, tab) with subscriber-wide fallback (R4a). History is
+// a speech history (R5): timestamped, identical-burst dedupe, windowed
+// last-wins per region — additive regions (role=log, aria-relevant=additions)
+// exempt so history is preserved where history matters.
+
+const A11Y_HISTORY_CAP: usize = 300;
+const A11Y_DEDUPE_WINDOW_MS: u64 = 2000;
+const A11Y_LASTWINS_WINDOW_MS: u64 = 5000;
+const A11Y_PIGGYBACK_MAX_RECORDS: usize = 5;
+const A11Y_PIGGYBACK_MAX_CHARS: usize = 1200;
+
+#[derive(Debug, Clone, Serialize)]
+struct A11yAnnouncement {
+    seq: u64,
+    ts_ms: u64,
+    text: String,
+    politeness: String,
+    region: Option<String>,
+    region_role: Option<String>,
+    relevant: Option<String>,
+    interrupt: bool,
+    tab: Option<i64>,
+    runtime_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct A11ySubscriptionConfig {
+    assertive: Option<String>, // inject | buffer | off (None -> default)
+    polite: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct A11yStore {
+    next_seq: u64,
+    history: std::collections::VecDeque<A11yAnnouncement>,
+    inject: std::collections::VecDeque<u64>, // seqs pending MCP piggyback
+    // key: "<subscriber>" or "<subscriber>|<tab>" (tab-specific overrides win)
+    config: HashMap<String, A11ySubscriptionConfig>,
+}
+
+impl A11yStore {
+    fn is_additive(region_role: &Option<String>, relevant: &Option<String>) -> bool {
+        if region_role.as_deref() == Some("log") {
+            return true;
+        }
+        matches!(relevant.as_deref().map(str::trim), Some("additions"))
+    }
+
+    fn mode_for(&self, subscriber: &str, tab: Option<i64>, politeness: &str) -> String {
+        let lookup = |key: &str| -> Option<String> {
+            self.config.get(key).and_then(|c| {
+                if politeness == "assertive" { c.assertive.clone() } else { c.polite.clone() }
+            })
+        };
+        let tab_key = tab.map(|t| format!("{subscriber}|{t}"));
+        tab_key
+            .as_deref()
+            .and_then(lookup)
+            .or_else(|| lookup(subscriber))
+            .unwrap_or_else(|| {
+                if politeness == "assertive" { "inject".to_string() } else { "buffer".to_string() }
+            })
+    }
+
+    fn configure(&mut self, subscriber: &str, tab: Option<i64>, assertive: Option<String>, polite: Option<String>) {
+        let key = match tab {
+            Some(t) => format!("{subscriber}|{t}"),
+            None => subscriber.to_string(),
+        };
+        let entry = self.config.entry(key).or_default();
+        if assertive.is_some() { entry.assertive = assertive; }
+        if polite.is_some() { entry.polite = polite; }
+    }
+
+    /// Ingest one announcement record (already parsed). Applies dedupe,
+    /// last-wins coalescing (non-additive), and the MCP subscriber's mode.
+    fn ingest(&mut self, mut rec: A11yAnnouncement) {
+        // Identical-burst dedupe: same region + text within the window.
+        if let Some(last) = self.history.back() {
+            if last.region == rec.region
+                && last.text == rec.text
+                && rec.ts_ms.saturating_sub(last.ts_ms) < A11Y_DEDUPE_WINDOW_MS
+            {
+                return;
+            }
+        }
+        let mode = self.mode_for("mcp", rec.tab, &rec.politeness);
+        if mode == "off" {
+            return;
+        }
+        // Windowed last-wins per region, additive regions exempt.
+        if !Self::is_additive(&rec.region_role, &rec.relevant) {
+            if let Some(last) = self.history.back() {
+                if last.region.is_some()
+                    && last.region == rec.region
+                    && rec.ts_ms.saturating_sub(last.ts_ms) < A11Y_LASTWINS_WINDOW_MS
+                {
+                    let old = self.history.pop_back().unwrap();
+                    self.inject.retain(|s| *s != old.seq);
+                }
+            }
+        }
+        rec.seq = self.next_seq;
+        self.next_seq += 1;
+        if mode == "inject" {
+            self.inject.push_back(rec.seq);
+        }
+        self.history.push_back(rec);
+        while self.history.len() > A11Y_HISTORY_CAP {
+            if let Some(dropped) = self.history.pop_front() {
+                self.inject.retain(|s| *s != dropped.seq);
+            }
+        }
+    }
+
+    /// Drain pending inject-mode announcements under the piggyback budget.
+    fn drain_inject(&mut self) -> Vec<A11yAnnouncement> {
+        let mut out = Vec::new();
+        let mut chars = 0usize;
+        while let Some(seq) = self.inject.front().copied() {
+            let Some(rec) = self.history.iter().find(|r| r.seq == seq).cloned() else {
+                self.inject.pop_front();
+                continue;
+            };
+            if !out.is_empty()
+                && (out.len() >= A11Y_PIGGYBACK_MAX_RECORDS || chars + rec.text.len() > A11Y_PIGGYBACK_MAX_CHARS)
+            {
+                break;
+            }
+            chars += rec.text.len();
+            self.inject.pop_front();
+            out.push(rec);
+            if out.len() >= A11Y_PIGGYBACK_MAX_RECORDS {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Read history after a cursor (speech history / review — R5).
+    fn read(&self, since: Option<u64>, limit: usize) -> (Vec<A11yAnnouncement>, u64) {
+        let items: Vec<A11yAnnouncement> = self
+            .history
+            .iter()
+            .filter(|r| match since { Some(c) => r.seq > c, None => true })
+            .take(limit)
+            .cloned()
+            .collect();
+        let next = items.last().map(|r| r.seq).or(since).unwrap_or(0);
+        (items, next)
+    }
+}
+
+/// Parse + ingest an inbound `a11y_announcement` WebSocket item.
+async fn ingest_a11y_announcement(state: &AppState, item: &Value) {
+    let Some(record) = item.get("record") else { return };
+    let text = record.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+    if text.is_empty() {
+        return;
+    }
+    let rec = A11yAnnouncement {
+        seq: 0,
+        ts_ms: now_ms() as u64,
+        text,
+        politeness: record
+            .get("politeness")
+            .and_then(Value::as_str)
+            .unwrap_or("polite")
+            .to_string(),
+        region: record.get("region").and_then(Value::as_str).map(str::to_string),
+        region_role: record.get("region_role").and_then(Value::as_str).map(str::to_string),
+        relevant: record.get("relevant").and_then(Value::as_str).map(str::to_string),
+        interrupt: record.get("interrupt").and_then(Value::as_bool).unwrap_or(false),
+        tab: record.get("tab").and_then(Value::as_i64),
+        runtime_key: item.get("runtime_key").and_then(Value::as_str).map(str::to_string),
+    };
+    state.a11y.lock().await.ingest(rec);
+}
+
 
 #[derive(Clone)]
 struct AgentEvent {
@@ -361,6 +551,9 @@ struct ToolCallResponse {
     call_id: String,
     output: Option<Value>,
     error: Option<Value>,
+    // U6: inject-mode a11y announcements piggybacked onto this result (KTD5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    announcements: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1431,6 +1624,94 @@ mod tests {
         assert!(queue.events.iter().any(|e| e.kind == "events_dropped"));
     }
 
+        fn a11y_rec(text: &str, politeness: &str, region: &str, role: Option<&str>, relevant: &str, ts: u64) -> A11yAnnouncement {
+        A11yAnnouncement {
+            seq: 0,
+            ts_ms: ts,
+            text: text.to_string(),
+            politeness: politeness.to_string(),
+            region: Some(region.to_string()),
+            region_role: role.map(str::to_string),
+            relevant: Some(relevant.to_string()),
+            interrupt: politeness == "assertive",
+            tab: Some(7),
+            runtime_key: None,
+        }
+    }
+
+    #[test]
+    fn a11y_default_policy_maps_site_urgency() {
+        let mut store = A11yStore::default();
+        store.ingest(a11y_rec("urgent", "assertive", "#a", None, "additions text", 1000));
+        store.ingest(a11y_rec("calm", "polite", "#b", None, "additions text", 1100));
+        assert_eq!(store.history.len(), 2);
+        assert_eq!(store.inject.len(), 1, "assertive injects, polite buffers");
+        let drained = store.drain_inject();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].text, "urgent");
+        assert!(store.drain_inject().is_empty(), "drain is consuming");
+    }
+
+    #[test]
+    fn a11y_per_tab_config_overrides_and_isolates_subscribers() {
+        let mut store = A11yStore::default();
+        store.configure("mcp", Some(7), Some("off".to_string()), None);
+        assert_eq!(store.mode_for("mcp", Some(7), "assertive"), "off");
+        assert_eq!(store.mode_for("mcp", Some(8), "assertive"), "inject", "other tab keeps default");
+        assert_eq!(store.mode_for("hosted", Some(7), "assertive"), "inject", "one agent's configure cannot mutate another's (R4a)");
+        store.ingest(a11y_rec("dropped", "assertive", "#a", None, "additions text", 1000));
+        assert_eq!(store.history.len(), 0, "off drops cleanly");
+    }
+
+    #[test]
+    fn a11y_dedupes_identical_bursts() {
+        let mut store = A11yStore::default();
+        store.ingest(a11y_rec("same", "assertive", "#a", None, "additions text", 1000));
+        store.ingest(a11y_rec("same", "assertive", "#a", None, "additions text", 1200));
+        assert_eq!(store.history.len(), 1);
+    }
+
+    #[test]
+    fn a11y_last_wins_per_region_but_log_regions_are_additive() {
+        let mut store = A11yStore::default();
+        store.ingest(a11y_rec("v1", "polite", "#status", None, "additions text", 1000));
+        store.ingest(a11y_rec("v2", "polite", "#status", None, "additions text", 2000));
+        assert_eq!(store.history.len(), 1, "windowed last-wins replaces the stale entry");
+        assert_eq!(store.history.back().unwrap().text, "v2");
+
+        let mut log_store = A11yStore::default();
+        log_store.ingest(a11y_rec("m1", "polite", "#log", Some("log"), "additions", 1000));
+        log_store.ingest(a11y_rec("m2", "polite", "#log", Some("log"), "additions", 1500));
+        log_store.ingest(a11y_rec("m3", "polite", "#log", Some("log"), "additions", 2000));
+        assert_eq!(log_store.history.len(), 3, "three distinct log messages yield three history entries");
+    }
+
+    #[test]
+    fn a11y_drain_respects_budget_and_fifo() {
+        let mut store = A11yStore::default();
+        for i in 0..8 {
+            store.ingest(a11y_rec(&format!("msg {i}"), "assertive", &format!("#r{i}"), None, "additions text", 1000 + i * 3000));
+        }
+        let first = store.drain_inject();
+        assert_eq!(first.len(), A11Y_PIGGYBACK_MAX_RECORDS);
+        assert_eq!(first[0].text, "msg 0", "FIFO");
+        let rest = store.drain_inject();
+        assert_eq!(rest.len(), 3);
+    }
+
+    #[test]
+    fn a11y_read_pages_by_cursor() {
+        let mut store = A11yStore::default();
+        for i in 0..4 {
+            store.ingest(a11y_rec(&format!("m{i}"), "polite", &format!("#r{i}"), None, "additions text", 1000 + i * 3000));
+        }
+        let (page1, cursor) = store.read(None, 2);
+        assert_eq!(page1.len(), 2);
+        let (page2, _) = store.read(Some(cursor), 10);
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2[0].text, "m2");
+    }
+
     #[tokio::test]
     async fn ingest_agent_event_lands_in_runtime_queue() {
         let state = empty_state();
@@ -2499,6 +2780,7 @@ async fn bridge_payloads_configure_call(
         }
     }
     Ok(Json(ToolCallResponse {
+        announcements: None,
         ok: true,
         call_id,
         output: Some(json!({
@@ -2614,6 +2896,7 @@ async fn browser_active_tab_set_call(
     let active_id = active.clone();
 
     Ok(Json(ToolCallResponse {
+        announcements: None,
         ok: true,
         call_id,
         output: Some(json!({
@@ -2746,6 +3029,7 @@ async fn runtime_agent_await_event_call(
     let output = await_agent_event(&state, &resolved_id, cursor, timeout_ms).await;
 
     Ok(Json(ToolCallResponse {
+        announcements: None,
         ok: true,
         call_id,
         output: Some(json!({
@@ -2918,6 +3202,10 @@ fn extension_executor_supports_primitive(name: &str) -> bool {
             | "locator.element_info"
             | "locator.text_content"
             | "locator.wait_for"
+            | "dom.focus"
+            | "a11y.watch"
+            | "a11y.tree"
+            | "a11y.query"
             | "viewport.scroll"
             | "pointer.click"
             | "pointer.move"
@@ -2930,6 +3218,7 @@ fn extension_executor_supports_primitive(name: &str) -> bool {
             | "transfer.insert"
             | "storage.read_file"
             | "keyboard.press"
+            | "keyboard.press_gated"
             | "page.info"
             | "dom.observe.visible"
             | "dom.list_sections"
@@ -3243,6 +3532,7 @@ fn state_from_catalog(
         pending_storage_hydrations: Arc::new(Mutex::new(HashMap::new())),
         payload: Arc::new(Mutex::new(PayloadSpillConfig::default())),
         agent_event_queues: Arc::new(Mutex::new(HashMap::new())),
+        a11y: Arc::new(Mutex::new(A11yStore::default())),
     }
 }
 
@@ -3371,6 +3661,16 @@ async fn mcp_tools_list(state: &AppState) -> Result<Value, Value> {
             })
         })
         .collect::<Vec<_>>();
+    // Native chrome-launcher tools (U7): browser launch / self-install / claim, merged into
+    // this one MCP so a local user needs no second server.
+    let mut tools = tools;
+    for m in chrome_launcher_tools::tool_manifests() {
+        tools.push(json!({
+            "name": m.get("name").cloned().unwrap_or(Value::Null),
+            "description": m.get("description").cloned().unwrap_or(Value::String(String::new())),
+            "inputSchema": m.get("input_schema").cloned().unwrap_or(Value::Null),
+        }));
+    }
     Ok(json!({ "tools": tools }))
 }
 
@@ -3386,6 +3686,18 @@ async fn mcp_tools_call(state: AppState, params: Value) -> Result<Value, Value> 
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    // Native chrome-launcher tools (U7) short-circuit the site/primitive machinery — they
+    // don't touch a connected browser runtime; they LAUNCH one. The helper path (the
+    // cross-compiled Windows pipe helper) comes from env, falling back to the workspace build.
+    if chrome_launcher_tools::is_chrome_launcher_tool(name) {
+        let helper_win = std::env::var("CHROME_LAUNCHER_HELPER_WIN").ok();
+        let output = chrome_launcher_tools::dispatch(name, &arguments, helper_win.as_deref()).await;
+        let is_ok = output.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        return Ok(json!({
+            "content": [{ "type": "text", "text": serde_json::to_string_pretty(&output).unwrap_or_default() }],
+            "isError": !is_ok,
+        }));
+    }
     let request = ToolCallRequest {
         name: name.to_string(),
         target_runtime_id: params
@@ -3860,7 +4172,32 @@ async fn tools_resolve(
     ))
 }
 
+/// Outer tools/call handler: executes the call, then piggybacks pending
+/// inject-mode a11y announcements onto the result envelope (KTD5: act → hear).
+/// Both the HTTP route and mcp_tools_call flow through here.
 async fn tools_call(
+    state: State<AppState>,
+    request: Json<ToolCallRequest>,
+) -> Result<Json<ToolCallResponse>, (StatusCode, Json<Value>)> {
+    let a11y = state.0.a11y.clone();
+    let is_a11y_read = request.0.name == "a11y.events.read";
+    let mut result = tools_call_inner(state, request).await;
+    if let Ok(Json(response)) = &mut result {
+        // Don't piggyback onto the read primitive itself — it already carries
+        // the history, and double-delivery would double-cursor the queue.
+        if !is_a11y_read {
+            let drained = a11y.lock().await.drain_inject();
+            if !drained.is_empty() {
+                response.announcements = Some(
+                    drained.into_iter().map(|r| json!(r)).collect(),
+                );
+            }
+        }
+    }
+    result
+}
+
+async fn tools_call_inner(
     State(state): State<AppState>,
     Json(mut request): Json<ToolCallRequest>,
 ) -> Result<Json<ToolCallResponse>, (StatusCode, Json<Value>)> {
@@ -3879,6 +4216,57 @@ async fn tools_call(
     }
     if request.name == "runtime.agent.await_event" {
         return runtime_agent_await_event_call(state, request).await;
+    }
+    if request.name == "a11y.events.read" {
+        let args = &request.arguments;
+        let since = args.get("since").and_then(Value::as_u64);
+        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
+        let (items, next) = state.a11y.lock().await.read(since, limit.min(200));
+        return Ok(Json(ToolCallResponse {
+            announcements: None,
+            ok: true,
+            call_id: Uuid::new_v4().to_string(),
+            output: Some(json!({
+                "announcements": items,
+                "next_cursor": next,
+                "note": "speech history (R5); pass since=next_cursor to page"
+            })),
+            error: None,
+        }));
+    }
+    if request.name == "a11y.announcements_subscribe" || request.name == "a11y.announcements_configure" {
+        let args = &request.arguments;
+        let subscriber = args
+            .get("subscriber")
+            .and_then(Value::as_str)
+            .unwrap_or("mcp")
+            .to_string();
+        let tab = args.get("tab_id").and_then(Value::as_i64);
+        let valid = |v: Option<&str>| -> Option<String> {
+            match v {
+                Some(m @ ("inject" | "buffer" | "off")) => Some(m.to_string()),
+                _ => None,
+            }
+        };
+        let assertive = valid(args.get("assertive").and_then(Value::as_str));
+        let polite = valid(args.get("polite").and_then(Value::as_str));
+        let mut store = state.a11y.lock().await;
+        store.configure(&subscriber, tab, assertive, polite);
+        let effective_assertive = store.mode_for(&subscriber, tab, "assertive");
+        let effective_polite = store.mode_for(&subscriber, tab, "polite");
+        return Ok(Json(ToolCallResponse {
+            announcements: None,
+            ok: true,
+            call_id: Uuid::new_v4().to_string(),
+            output: Some(json!({
+                "subscriber": subscriber,
+                "tab_id": tab,
+                "assertive": effective_assertive,
+                "polite": effective_polite,
+                "note": "per-(agent, tab) subscription (R4a); an agent manages only its own"
+            })),
+            error: None,
+        }));
     }
 
     let resolved = if request.name == "storage.sync" {
@@ -3921,6 +4309,7 @@ async fn dispatch_resolved_tool_call(
     let call_id = Uuid::new_v4().to_string();
     if let Some(output) = resolved.static_output {
         return Ok(Json(ToolCallResponse {
+            announcements: None,
             ok: true,
             call_id,
             output: Some(output),
@@ -3987,6 +4376,7 @@ async fn dispatch_resolved_tool_call(
 
     let is_error = result.get("type").and_then(Value::as_str) == Some("action_error");
     Ok(Json(ToolCallResponse {
+        announcements: None,
         ok: !is_error,
         call_id,
         output: result.get("output").cloned(),
@@ -4170,6 +4560,7 @@ async fn site_actions_call(
             None => Vec::new(),
         };
         return Ok(Json(ToolCallResponse {
+            announcements: None,
             ok: true,
             call_id: Uuid::new_v4().to_string(),
             output: Some(json!({
@@ -4473,6 +4864,7 @@ async fn dispatch_state_projection_call(
 
     let is_error = result.get("type").and_then(Value::as_str) == Some("action_error");
     Ok(Json(ToolCallResponse {
+        announcements: None,
         ok: !is_error,
         call_id,
         output: result.get("output").cloned(),
@@ -4503,6 +4895,7 @@ async fn storage_read_file_call(
     .await?;
 
     Ok(Json(ToolCallResponse {
+        announcements: None,
         ok: true,
         call_id: Uuid::new_v4().to_string(),
         output: Some(match result {
@@ -4609,6 +5002,22 @@ async fn site_storage_files_for_target(
     Ok((files, skills))
 }
 
+/// Storage-scope precedence for resolving the same action declared in more than
+/// one map. Lower rank wins: private overrides shared overrides public. A path
+/// with no recognized scope segment falls to the lowest precedence so explicit
+/// scopes always win over an unscoped map.
+fn storage_scope_precedence_rank(relative_path: &str) -> u8 {
+    let scope = relative_path
+        .strip_prefix("scopes/")
+        .and_then(|rest| rest.split('/').next());
+    match scope {
+        Some("private") => 0,
+        Some("shared") => 1,
+        Some("public") => 2,
+        _ => 3,
+    }
+}
+
 async fn site_storage_workflow_maps_for_action(
     storage_root: &Path,
     action: &str,
@@ -4658,6 +5067,19 @@ async fn site_storage_workflow_maps_for_action(
             .to_string_lossy()
             .to_string();
         matches.push((relative_path, map));
+    }
+    // Scope precedence: when the same workflow action is declared in multiple
+    // maps (e.g. a private override of a public map), the highest-precedence
+    // scope wins (private > shared > public) instead of erroring ambiguous.
+    if matches.len() > 1 {
+        let best_rank = matches
+            .iter()
+            .map(|(relative_path, _)| storage_scope_precedence_rank(relative_path))
+            .min()
+            .unwrap_or(u8::MAX);
+        matches.retain(|(relative_path, _)| {
+            storage_scope_precedence_rank(relative_path) == best_rank
+        });
     }
     Ok(matches)
 }
@@ -4723,6 +5145,7 @@ async fn dispatch_site_action_call(
 
     let is_error = result.get("type").and_then(Value::as_str) == Some("action_error");
     Ok(Json(ToolCallResponse {
+        announcements: None,
         ok: !is_error,
         call_id,
         output: result.get("output").cloned(),
@@ -6412,6 +6835,9 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
             }
             Some("agent_event") => {
                 ingest_agent_event(&state, &item).await;
+            }
+            Some("a11y_announcement") => {
+                ingest_a11y_announcement(&state, &item).await;
             }
             _ => {}
         }

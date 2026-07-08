@@ -1,3 +1,4 @@
+mcp/target/
 mcp/actions-json-mcp/target/
 node_modules/
 dist/
@@ -7,3 +8,11 @@ test-results/
 playwright-report/
 
 .specify/
+extensions/chrome-overlay-runtime/src/a11y/generated/
+
+# Hosted-agent eval run artifacts (per-trial JSON, not source)
+extensions/chrome-overlay-runtime/tests/live/eval/runs/
+
+# Eval harness auth SECRET — developer-supplied Google cookies, NEVER commit
+# Match every variant incl. .bak backups (eval-secrets.cookies.json.allaccounts.bak)
+extensions/chrome-overlay-runtime/tests/live/eval/eval-secrets*

@@ -3,13 +3,27 @@
     "build:storage-bookmarklet": "node runtime/actions-json-runtime/bookmarklet/build-bookmarklet-url.mjs",
     "test:pipeline": "node --test tools/actions-json-pipeline/tests/*.test.mjs",
     "test:runtime": "node --test runtime/actions-json-runtime/tests/*.test.mjs && npx playwright test runtime/actions-json-runtime/tests/*.spec.mjs",
-    "test:overlay-runtime": "playwright test extensions/chrome-overlay-runtime/tests/overlay-runtime-characterization.spec.js"
+    "test:overlay-runtime": "playwright test extensions/chrome-overlay-runtime/tests/overlay-runtime-characterization.spec.js",
+    "build:a11y-bundle": "node extensions/chrome-overlay-runtime/esbuild.a11y.mjs",
+    "test:a11y": "npm run build:a11y-bundle && node --test extensions/chrome-overlay-runtime/tests/a11y-*.test.mjs",
+    "test:a11y-live": "xvfb-run -a node extensions/chrome-overlay-runtime/tests/live/a11y-live-smoke.mjs",
+    "test:trusted-text-live": "xvfb-run -a node extensions/chrome-overlay-runtime/tests/live/trusted-text-type-smoke.mjs",
+    "test:send-serialization-live": "xvfb-run -a node extensions/chrome-overlay-runtime/tests/live/send-serialization-smoke.mjs",
+    "test:session-store-504-live": "xvfb-run -a node extensions/chrome-overlay-runtime/tests/live/session-store-504-smoke.mjs",
+    "test:gated-repeat-live": "xvfb-run -a node extensions/chrome-overlay-runtime/tests/live/gated-repeat-smoke.mjs",
+    "test:gated-repeat-article": "xvfb-run -a node extensions/chrome-overlay-runtime/tests/live/gated-repeat-article-stress.mjs",
+    "test:gated-edit-loop": "xvfb-run -a node extensions/chrome-overlay-runtime/tests/live/gated-edit-loop-smoke.mjs",
+    "test:hosted-agent-eval": "node --test extensions/chrome-overlay-runtime/tests/fixtures-docs-edit-tasks.test.mjs extensions/chrome-overlay-runtime/tests/eval-scorer.test.mjs extensions/chrome-overlay-runtime/tests/eval-run-orchestrator.test.mjs extensions/chrome-overlay-runtime/tests/eval-cookies.test.mjs",
+    "test:hosted-agent-eval-live": "xvfb-run -a node extensions/chrome-overlay-runtime/tests/live/eval/hosted-agent-eval-live.mjs"
   },
   "devDependencies": {
+    "@messageformat/core": "^3.4.0",
     "@playwright/test": "1.60.0",
+    "esbuild": "^0.24.0",
     "terser": "^5.48.0"
   },
   "dependencies": {
-    "jsonata": "^2.2.1"
+    "jsonata": "^2.2.1",
+    "ws": "^8.21.0"
   }
 }

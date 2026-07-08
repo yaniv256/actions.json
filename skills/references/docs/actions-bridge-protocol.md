@@ -1,1 +1,0 @@
-../../../docs/actions-bridge-protocol.md

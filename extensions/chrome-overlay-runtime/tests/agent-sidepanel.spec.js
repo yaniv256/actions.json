@@ -568,7 +568,7 @@ test("side panel describes local tool fallback without failure wording when brid
       },
       tabs: {
         async query() {
-          return [{ id: 101, url: "https://pragmaworks.dev/" }];
+          return [{ id: 101, url: "https://acme.example/" }];
         },
         async sendMessage() {
           return { ok: true };
@@ -825,7 +825,7 @@ test("side panel starts production voice through the durable extension session h
       },
       tabs: {
         async query() {
-          return [{ id: 101, url: "https://pragmaworks.dev/" }];
+          return [{ id: 101, url: "https://acme.example/" }];
         },
         async sendMessage() {
           return { ok: true };
@@ -1367,15 +1367,15 @@ test("side panel loads and writes a shared actions.json storage folder", async (
     window.__actionsJsonStorage = {};
     window.__actionsJsonFolderWrites = [];
     const files = {
-      "sites/pragmaworks.dev/home/actions.json": JSON.stringify({
+      "sites/acme.example/home/actions.json": JSON.stringify({
         protocol: "actions.json",
-        tools: [{ name: "pragmaworks.site.map", description: "Map", input_schema: { type: "object" } }],
+        tools: [{ name: "acme.site.map", description: "Map", input_schema: { type: "object" } }],
       }),
     };
     function directoryHandle(prefix = "") {
       return {
         kind: "directory",
-        name: prefix ? prefix.split("/").at(-1) : "actions.json.storage.shared.pragmaworks",
+        name: prefix ? prefix.split("/").at(-1) : "actions.json.storage.shared.acme",
         async *entries() {
           const directNames = new Set();
           for (const path of Object.keys(files)) {
@@ -1456,7 +1456,7 @@ test("side panel loads and writes a shared actions.json storage folder", async (
       },
       tabs: {
         async query() {
-          return [{ id: 505, url: "https://pragmaworks.dev/" }];
+          return [{ id: 505, url: "https://acme.example/" }];
         },
         async sendMessage() {
           return { ok: true };
@@ -1471,13 +1471,13 @@ test("side panel loads and writes a shared actions.json storage folder", async (
   await expect(page.locator("#storageFolderStatus")).toContainText("Uploaded 1 file(s)");
   await expect
     .poll(() => page.evaluate(() => window.__actionsJsonStorage.actionsJsonStorageBundle.entries[0].path))
-    .toBe("scopes/shared/pragmaworks/sites/pragmaworks.dev/home/actions.json");
+    .toBe("scopes/shared/acme/sites/acme.example/home/actions.json");
 
   await page.locator("#writeStorageFolder").click();
   await expect(page.locator("#storageFolderStatus")).toContainText("Downloaded 1 file(s)");
   await expect
     .poll(() => page.evaluate(() => window.__actionsJsonFolderWrites[0].path))
-    .toBe("sites/pragmaworks.dev/home/actions.json");
+    .toBe("sites/acme.example/home/actions.json");
 });
 
 test("side panel opens top-level settings for folder access when embedded in the page overlay", async ({ page }) => {
@@ -1518,7 +1518,7 @@ test("side panel opens top-level settings for folder access when embedded in the
           return { id: 606, ...createProperties };
         },
         async query() {
-          return [{ id: 505, url: "https://pragmaworks.dev/" }];
+          return [{ id: 505, url: "https://acme.example/" }];
         },
         async sendMessage() {
           return { ok: true };
@@ -1549,9 +1549,9 @@ test("top-level settings loads the whole selected storage repo instead of filter
         protocol: "actions.json",
         tools: [{ name: "amazon.continue_watching.scan", description: "Scan", input_schema: { type: "object" } }],
       }),
-      "scopes/shared/pragmaworks/sites/pragmaworks.dev/home/actions.json": JSON.stringify({
+      "scopes/shared/acme/sites/acme.example/home/actions.json": JSON.stringify({
         protocol: "actions.json",
-        tools: [{ name: "pragmaworks.site.map", description: "Map", input_schema: { type: "object" } }],
+        tools: [{ name: "acme.site.map", description: "Map", input_schema: { type: "object" } }],
       }),
     };
     function directoryHandle(prefix = "") {
@@ -1644,7 +1644,7 @@ test("top-level settings loads the whole selected storage repo instead of filter
     .toEqual([
       "storage.json",
       "scopes/private/sites/amazon.com/prime-video/actions.json",
-      "scopes/shared/pragmaworks/sites/pragmaworks.dev/home/actions.json",
+      "scopes/shared/acme/sites/acme.example/home/actions.json",
     ]);
 });
 

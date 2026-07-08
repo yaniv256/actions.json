@@ -1,0 +1,33 @@
+[package]
+name = "chrome-launcher-helper"
+version = "0.1.0"
+edition = "2021"
+description = "Native-Windows pipe owner for chrome-launcher: spawns Chrome --remote-debugging-pipe, installs our unpacked extension via Extensions.loadUnpacked, and relays CDP between the pipe and a local WebSocket. Cross-compiled x86_64-pc-windows-gnu. Ports windows/pipe_session.mjs + load_unpacked.mjs."
+license = "MIT"
+
+[[bin]]
+name = "chrome-launcher-helper"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
+[dev-dependencies]
+tempfile = "3.24"
+
+# Chrome's --remote-debugging-pipe hands the caller extra inherited fds/handles (3=write,
+# 4=read on POSIX; a pair of inheritable HANDLEs on Windows). Owning those requires the
+# Windows process-extension API when the target is Windows.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Pipes",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_Memory",
+    "Win32_System_Console",
+] }

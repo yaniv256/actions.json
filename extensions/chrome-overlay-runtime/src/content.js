@@ -2198,11 +2198,13 @@
   };
 
   const findScopedElement = (scope = {}) => {
+    const root = frameRootFor(scope);
+    if (!root) return null; // frame error (recorded in lastLocatorFrameError)
     const selectors = selectorListFrom(scope, ["body"]);
     const candidates = [];
     for (const selector of selectors) {
       try {
-        candidates.push(...Array.from(document.querySelectorAll(selector)));
+        candidates.push(...Array.from(root.querySelectorAll(selector)));
       } catch (_error) {
         // Invalid selector hints are ignored; a later selector may still match.
       }
@@ -2404,9 +2406,15 @@
     const selector = typeof args.selector === "string" && args.selector.trim() ? args.selector.trim() : "*";
     const textContains = normalizeText(args.text_contains || args.textContains).toLowerCase();
     const maxPayloadBytes = Math.max(1000, Math.min(Number(args.max_payload_bytes ?? args.maxPayloadBytes ?? 16000), 256000));
+    const root = frameRootFor(args);
+    if (!root) {
+      return primitiveError("dom.observe.visible", lastLocatorFrameError.code,
+        lastLocatorFrameError.message || `Frame '${lastLocatorFrameError.frame}' could not be targeted.`,
+        { frame: lastLocatorFrameError.frame });
+    }
     let candidates;
     try {
-      candidates = Array.from(document.querySelectorAll(selector));
+      candidates = Array.from(root.querySelectorAll(selector));
     } catch (_error) {
       return primitiveError("dom.observe.visible", "invalid_selector", "The selector could not be queried.", { selector });
     }
@@ -2505,9 +2513,15 @@
     const textContains = normalizeText(args.text_contains || args.textContains).toLowerCase();
     const maxSections = Math.max(1, Math.min(Number(args.max_sections ?? args.maxSections ?? 100), 500));
     const maxHeadingLength = Math.max(12, Math.min(Number(args.max_heading_length ?? args.maxHeadingLength ?? 120), 500));
+    const root = frameRootFor(args);
+    if (!root) {
+      return primitiveError("dom.list_sections", lastLocatorFrameError.code,
+        lastLocatorFrameError.message || `Frame '${lastLocatorFrameError.frame}' could not be targeted.`,
+        { frame: lastLocatorFrameError.frame });
+    }
     let candidates;
     try {
-      candidates = Array.from(document.querySelectorAll(selector));
+      candidates = Array.from(root.querySelectorAll(selector));
     } catch (_error) {
       return primitiveError("dom.list_sections", "invalid_selector", "The section selector could not be queried.", { selector });
     }
@@ -2553,9 +2567,15 @@
   const domSnapshotText = (args = {}) => {
     const selector = typeof args.selector === "string" && args.selector.trim() ? args.selector.trim() : "body";
     const maxChars = Math.max(1, Math.min(Number(args.max_chars ?? args.maxChars ?? 12000), 100000));
+    const root = frameRootFor(args);
+    if (!root) {
+      return primitiveError("dom.snapshot_text", lastLocatorFrameError.code,
+        lastLocatorFrameError.message || `Frame '${lastLocatorFrameError.frame}' could not be targeted.`,
+        { frame: lastLocatorFrameError.frame });
+    }
     let elements;
     try {
-      elements = Array.from(document.querySelectorAll(selector)).filter(isElementVisible);
+      elements = Array.from(root.querySelectorAll(selector)).filter(isElementVisible);
     } catch (_error) {
       return primitiveError("dom.snapshot_text", "invalid_selector", "The selector could not be queried.", { selector });
     }
@@ -2592,9 +2612,13 @@
     if (!text) {
       return primitiveError("runtime.agent.user_message", "invalid_input", "runtime.agent.user_message requires non-empty text.", {});
     }
+    // mode: "queue" (default, wait for an in-flight response) or "interrupt"
+    // (cancel the active response and send now).
+    const mode = args.mode === "interrupt" ? "interrupt" : "queue";
     const response = await sendRuntimeMessage({
       type: "actions-json:agent-session-user-message",
       text,
+      mode,
       responseMode: "text_only_transcript",
     });
     return primitiveSuccess("runtime.agent.user_message", response.result || response);
@@ -2723,14 +2747,82 @@
     };
   };
 
+  // Resolve the document a locator should query, given an optional `frame`.
+  // `frame` is a CSS selector (or array, outer->inner) for iframe(s) to step
+  // into. Same-origin only: a cross-origin frame's contentDocument is
+  // unreachable from page JS -> frame_cross_origin. Returns {ok:true, root} or
+  // {ok:false, error:{code, frame, message?}}.
+  const resolveFrameRoot = (frame, topDocument) => {
+    if (frame === undefined || frame === null || frame === "") {
+      return { ok: true, root: topDocument };
+    }
+    const selectors = Array.isArray(frame) ? frame : [frame];
+    let root = topDocument;
+    for (const sel of selectors) {
+      const el = root.querySelector(sel);
+      const isFrame = el && (el.tagName === "IFRAME" || el.tagName === "FRAME");
+      if (!isFrame) {
+        return { ok: false, error: { code: "frame_not_found", frame: sel } };
+      }
+      let innerDoc = null;
+      try {
+        innerDoc = el.contentDocument;
+      } catch (_error) {
+        innerDoc = null;
+      }
+      if (!innerDoc) {
+        return {
+          ok: false,
+          error: {
+            code: "frame_cross_origin",
+            frame: sel,
+            message: "Frame is cross-origin; its contents cannot be targeted from page JS.",
+          },
+        };
+      }
+      root = innerDoc;
+    }
+    return { ok: true, root };
+  };
+
+  let lastLocatorFrameError = null;
+
+  // Resolve the document a selector/scope-based resolver should query, honoring
+  // an optional `frame` field (universal targeting dimension). Records any frame
+  // error in lastLocatorFrameError and returns null on failure so callers yield
+  // empty results (not a silent top-document query that would hide the bad
+  // frame). Every element-resolution subsystem (locators, extract scope,
+  // dom.observe/list_sections/snapshot_text) funnels its root through this — a
+  // resolver that hard-codes `document` instead is a frame-blind regression.
+  const frameRootFor = (spec = {}) => {
+    lastLocatorFrameError = null;
+    const frame = spec && typeof spec === "object" ? spec.frame : undefined;
+    if (frame === undefined || frame === null || frame === "") {
+      return document;
+    }
+    const result = resolveFrameRoot(frame, document);
+    if (!result.ok) {
+      lastLocatorFrameError = result.error;
+      return null;
+    }
+    return result.root;
+  };
+
   const resolveLocatorCandidates = (locator) => {
+    lastLocatorFrameError = null;
     if (!locator || typeof locator !== "object") return [];
+    const frameResult = resolveFrameRoot(locator.frame, document);
+    if (!frameResult.ok) {
+      lastLocatorFrameError = frameResult.error;
+      return [];
+    }
+    const root = frameResult.root;
     let candidates = [];
     if (typeof locator.selector === "string" && locator.selector.trim()) {
-      candidates = queryRelative(document, locator.selector.trim(), { visible_only: false });
+      candidates = queryRelative(root, locator.selector.trim(), { visible_only: false });
     } else {
       candidates = Array.from(
-        document.querySelectorAll("button, a, input, textarea, select, [role], [aria-label], [data-testid], [data-test], [data-actions-json-target]")
+        root.querySelectorAll("button, a, input, textarea, select, [role], [aria-label], [data-testid], [data-test], [data-actions-json-target]")
       );
     }
     const text = normalizeText(locator.text || locator.text_contains || locator.text_equals);
@@ -2778,6 +2870,14 @@
     const renderedCandidates = resolveLocatorCandidates(locator).filter(isElementRendered);
     const element = renderedCandidates[0] || null;
     if (!element) {
+      if (lastLocatorFrameError) {
+        return primitiveError(
+          "locator.element_info",
+          lastLocatorFrameError.code,
+          lastLocatorFrameError.message || `Frame '${lastLocatorFrameError.frame}' could not be targeted.`,
+          { locator, frame: lastLocatorFrameError.frame },
+        );
+      }
       return primitiveError("locator.element_info", "target_not_found", "No visible element matched the locator.", {
         locator
       });
@@ -2840,6 +2940,39 @@
     return primitiveSuccess("locator.text_content", {
       locator,
       text: normalizeText(element.textContent || element.getAttribute("aria-label"))
+    });
+  };
+
+  // dom.focus — move keyboard focus to a specific element by locator. Some
+  // transient surfaces (an overlay search/find field, a command palette) keep
+  // keyboard focus after they close, so a later type/keypress lands in the wrong
+  // place; an explicit focus step re-seats focus on the intended target. Reports
+  // whether focus took and the text selection before/after, so callers can tell
+  // whether focusing preserved or collapsed an existing selection (e.g. a
+  // Find-match selection on a canvas editor).
+  const domFocus = (args = {}) => {
+    const locator = args.locator;
+    const element = resolveSingleVisibleLocator(locator);
+    if (!element) {
+      return primitiveError("dom.focus", "target_not_found", "No visible element matched the locator.", { locator });
+    }
+    if (typeof element.focus !== "function") {
+      return primitiveError("dom.focus", "target_not_focusable", "Matched element has no focus() method.", {
+        locator,
+        tag_name: element.tagName ? element.tagName.toLowerCase() : null,
+      });
+    }
+    const selectionBefore = (window.getSelection && window.getSelection().toString()) || "";
+    element.focus({ preventScroll: false });
+    const selectionAfter = (window.getSelection && window.getSelection().toString()) || "";
+    const active = document.activeElement;
+    return primitiveSuccess("dom.focus", {
+      focused: active === element,
+      tag_name: element.tagName ? element.tagName.toLowerCase() : null,
+      active_is_target: active === element,
+      selection_preserved: selectionBefore.length > 0 && selectionBefore === selectionAfter,
+      selection_before_length: selectionBefore.length,
+      selection_after_length: selectionAfter.length,
     });
   };
 
@@ -3057,7 +3190,7 @@
     };
   };
 
-  const dispatchPointerClick = (target, { x, y, button, detail = 1 }) => {
+  const dispatchPointerClick = (target, { x, y, button, detail = 1, modifiers = [] }) => {
     const buttonCode = button === "middle" ? 1 : button === "right" ? 2 : 0;
     const common = {
       bubbles: true,
@@ -3070,7 +3203,11 @@
       button: buttonCode,
       buttons: 1 << buttonCode,
       detail,
-      view: window
+      view: window,
+      altKey: modifiers.includes("alt") || modifiers.includes("option"),
+      ctrlKey: modifiers.includes("control") || modifiers.includes("ctrl"),
+      metaKey: modifiers.includes("meta") || modifiers.includes("cmd") || modifiers.includes("command"),
+      shiftKey: modifiers.includes("shift")
     };
     for (const type of ["pointerover", "pointerenter", "mouseover", "mouseenter", "pointermove", "mousemove", "pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
       const EventCtor = type.startsWith("pointer") && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;
@@ -3104,6 +3241,8 @@
     return null;
   };
 
+  const KNOWN_POINTER_MODIFIERS = new Set(["shift", "alt", "option", "control", "ctrl", "meta", "cmd", "command"]);
+
   const pointerClick = (args = {}) => {
     const missingError = requirePointCoordinates("pointer.click", args);
     if (missingError) return missingError;
@@ -3111,13 +3250,21 @@
     const y = Number(args.y);
     const viewportError = validateViewportPoint("pointer.click", x, y, args);
     if (viewportError) return viewportError;
+    const modifiers = (Array.isArray(args.modifiers) ? args.modifiers : [])
+      .map((modifier) => String(modifier).toLowerCase());
+    const unknownModifier = modifiers.find((modifier) => !KNOWN_POINTER_MODIFIERS.has(modifier));
+    if (unknownModifier) {
+      return primitiveError("pointer.click", "invalid_input", `Unknown pointer modifier "${unknownModifier}". Supported: shift, alt/option, control/ctrl, meta/cmd/command.`, {
+        modifiers: args.modifiers
+      });
+    }
     const target = document.elementFromPoint(x, y);
     if (!target) {
       return primitiveError("pointer.click", "target_not_found", "No element exists at the requested point.", { x, y });
     }
     moveVisiblePointer(x, y);
-    dispatchPointerClick(target, { x, y, button: args.button || "left" });
-    return primitiveSuccess("pointer.click", { clicked: true, x, y });
+    dispatchPointerClick(target, { x, y, button: args.button || "left", modifiers });
+    return primitiveSuccess("pointer.click", { clicked: true, x, y, modifiers });
   };
 
   const pointerMove = (args = {}) => {
@@ -3218,9 +3365,9 @@
     if (!targetSpec) return document.activeElement;
     if (typeof targetSpec === "string") return document.querySelector(targetSpec);
     if (typeof targetSpec !== "object") return null;
-    if (typeof targetSpec.selector === "string" && targetSpec.selector.trim()) {
-      return resolveSingleLocator({ selector: targetSpec.selector.trim() });
-    }
+    // Pass the WHOLE locator through (including `frame`, text_*, etc.) so
+    // frame-aware resolution applies — do NOT rebuild a selector-only locator,
+    // which would silently drop `frame`.
     if (targetSpec.locator && typeof targetSpec.locator === "object") {
       return resolveSingleLocator(targetSpec.locator);
     }
@@ -3282,12 +3429,24 @@
       .join("");
   };
 
-  const syntheticClipboardEvent = (text) => {
+  // Decide the text/html clipboard flavor. When the caller supplies a non-empty
+  // html string, use it verbatim (they control it — e.g. a <table> that Google
+  // Sheets expands into a real range). Otherwise derive paragraph structure from
+  // the plain text (back-compat: every current caller keeps working). An empty
+  // string is treated as absent so a caller passing "" does not silently strip
+  // the html flavor.
+  const clipboardHtmlFlavor = (text, html) => {
+    return typeof html === "string" && html.length > 0
+      ? html
+      : clipboardHtmlFromText(text);
+  };
+
+  const syntheticClipboardEvent = (text, html) => {
     let clipboardData = null;
     if (typeof DataTransfer === "function") {
       clipboardData = new DataTransfer();
       clipboardData.setData("text/plain", text);
-      clipboardData.setData("text/html", clipboardHtmlFromText(text));
+      clipboardData.setData("text/html", clipboardHtmlFlavor(text, html));
     }
     let event;
     try {
@@ -3304,6 +3463,18 @@
       Object.defineProperty(event, "clipboardData", { value: clipboardData });
     }
     return event;
+  };
+
+  // Where a clipboard/selection event dispatches: the resolved locator target,
+  // or the focused element when no locator was given. Frame targeting (reaching
+  // inside an iframe) is handled by the locator's `frame` field, not here — the
+  // caller points a target locator at the inner element and the frame-aware
+  // resolver descends. Paste stays dumb and configurable.
+  const pasteTargetKind = (resolved, activeElement) => {
+    if (resolved) {
+      return { target: resolved, target_kind: "resolved-locator" };
+    }
+    return { target: activeElement, target_kind: "activeElement" };
   };
 
   const insertTextIntoEditable = async (primitive, args = {}) => {
@@ -3379,6 +3550,171 @@
     return insertTextIntoEditable("text.insert", args);
   };
 
+  // text.type — type a string into the focused element as keystrokes. Synthetic by
+  // default (portable). With { trusted:true } it relays to the background CDP
+  // Input.insertText, which REPLACES the active selection and reaches canvas editors
+  // (Docs/Slides/Sheets) — the overtype path for a keyboard-made selection, where
+  // clipboard.paste does not route to the live selection.
+  const textType = async (args = {}) => {
+    const text = String(args.text ?? "");
+    if (args.trusted === true) {
+      const relayed = await chrome.runtime.sendMessage({
+        type: "actions-json:marker-trusted-text",
+        text,
+        select_back_chars: args.select_back_chars,
+      });
+      if (!relayed?.ok) {
+        return primitiveError("text.type", "trusted_text_failed", relayed?.error || "Trusted text relay failed.", { length: text.length });
+      }
+      return primitiveSuccess("text.type", { typed: true, length: text.length, selected_back: relayed.selected_back ?? 0, fidelity: "trusted" });
+    }
+    // Synthetic: insert at the focused editable (same path as text.insert, no target).
+    const result = insertTextIntoEditable("text.type", { text, mode: args.mode || "insert" });
+    return result;
+  };
+
+  // clipboard.paste — write into a DOM element via a synthetic paste event
+  // (clipboard -> page). With args.text: paste that text. Without: paste the
+  // current system clipboard. Dispatches at the focused element by default, or a
+  // resolved target; an iframe target falls back to the focused inner element
+  // (pasteTargetKind). This is the write path for iframe-hosted editors (Google
+  // Docs/Sheets/Slides) that text.insert cannot reach.
+  const clipboardPaste = async (args = {}) => {
+    const resolved = args.target ? resolveEditableTarget(args.target) : null;
+    const { target, target_kind } = pasteTargetKind(resolved, document.activeElement);
+    if (!target) {
+      return primitiveError("clipboard.paste", "no_paste_target",
+        "No focused or resolvable element to paste into; click into the editor first.", {});
+    }
+    let payload = args.text;
+    let source = "argument";
+    if (payload === undefined || payload === null) {
+      source = "system-clipboard";
+      try {
+        payload = await navigator.clipboard.readText();
+      } catch (error) {
+        return primitiveError("clipboard.paste", "clipboard_read_denied",
+          `Could not read the system clipboard: ${error?.message || error}`, {});
+      }
+    }
+    payload = String(payload);
+    target.focus?.();
+    const pasteEvent = syntheticClipboardEvent(payload, args.html);
+    target.dispatchEvent(pasteEvent);
+    return primitiveSuccess("clipboard.paste", {
+      pasted: true,
+      inserted_length: payload.length,
+      input_method: "synthetic-paste",
+      default_prevented: pasteEvent.defaultPrevented,
+      html_provided: typeof args.html === "string" && args.html.length > 0,
+      target_kind,
+      source,
+    });
+  };
+
+  // clipboard.read / clipboard.write — pure system-clipboard I/O, no page touch.
+  const clipboardRead = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      return primitiveSuccess("clipboard.read", { text, length: text.length });
+    } catch (error) {
+      return primitiveError("clipboard.read", "clipboard_read_denied",
+        `Could not read the system clipboard: ${error?.message || error}`, {});
+    }
+  };
+
+  const clipboardWrite = async (args = {}) => {
+    const text = String(args.text ?? "");
+    try {
+      await navigator.clipboard.writeText(text);
+      return primitiveSuccess("clipboard.write", { written: true, length: text.length });
+    } catch (error) {
+      return primitiveError("clipboard.write", "clipboard_write_denied",
+        `Could not write the system clipboard: ${error?.message || error}`, {});
+    }
+  };
+
+  // text.select — select a range on the page (page only). Precursor to copy.
+  const textSelect = (args = {}) => {
+    const resolved = args.target ? resolveEditableTarget(args.target) : null;
+    const { target, target_kind } = pasteTargetKind(resolved, document.activeElement);
+    if (!target) {
+      return primitiveError("text.select", "no_select_target",
+        "No focused or resolvable element to select.", {});
+    }
+    target.focus?.();
+    const selected = selectEditableContents(target, "replace");
+    return primitiveSuccess("text.select", {
+      selected: true,
+      selected_length: (selected || "").length,
+      target_kind,
+    });
+  };
+
+  // clipboard.copy — move the current selection into the system clipboard
+  // (page -> clipboard). Dispatches a synthetic copy event so page-side copy
+  // handlers (e.g. Google) run, then writes the selection text to the clipboard.
+  const clipboardCopy = async (args = {}) => {
+    const resolved = args.target ? resolveEditableTarget(args.target) : null;
+    const { target } = pasteTargetKind(resolved, document.activeElement);
+    const copyEvent = new ClipboardEvent("copy", { bubbles: true, cancelable: true, composed: true });
+    target?.dispatchEvent?.(copyEvent);
+    const selectionText = String(document.getSelection?.() || "");
+    let clipboard_write = "ok";
+    try {
+      if (selectionText) await navigator.clipboard.writeText(selectionText);
+      else clipboard_write = "empty_selection";
+    } catch (error) {
+      clipboard_write = "denied";
+    }
+    return primitiveSuccess("clipboard.copy", {
+      copied: true,
+      copied_length: selectionText.length,
+      clipboard_write,
+    });
+  };
+
+  // page.fetch — authenticated same-origin GET from the page context. Returns
+  // the raw response body so a site map's workflow action can parse a
+  // page-published text/HTML view (Google Docs /mobilebasic, Sheets /htmlview)
+  // that the canvas-rendered DOM does not expose. Read-only by construction:
+  // same-origin + GET only; no method/body params, no cross-origin.
+  const isSameOrigin = (url, pageOrigin) => {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch (_error) {
+      return false;
+    }
+    return parsed.origin === pageOrigin;
+  };
+
+  const pageFetch = async (args = {}) => {
+    const url = String(args.url ?? "");
+    if (!isSameOrigin(url, location.origin)) {
+      let requested = null;
+      try { requested = new URL(url).origin; } catch (_error) { requested = null; }
+      return primitiveError("page.fetch", "page_fetch_cross_origin",
+        "page.fetch only allows same-origin GET requests.",
+        { requested_origin: requested, page_origin: location.origin });
+    }
+    let response;
+    try {
+      response = await fetch(url, { credentials: "include", method: "GET", redirect: "follow" });
+    } catch (error) {
+      return primitiveError("page.fetch", "page_fetch_failed",
+        `Fetch failed: ${error?.message || error}`, { url });
+    }
+    const body = await response.text();
+    return primitiveSuccess("page.fetch", {
+      ok: response.ok,
+      status: response.status,
+      content_type: response.headers.get("content-type"),
+      length: body.length,
+      body,
+    });
+  };
+
   const transferBufferAction = async (primitive, args = {}) => {
     const response = await sendRuntimeMessage({
       type: "actions-json:transfer-buffer",
@@ -3444,7 +3780,9 @@
     for (const type of ["keydown", "keyup"]) {
       target.dispatchEvent(new KeyboardEvent(type, eventInit));
     }
-    return primitiveSuccess("keyboard.press", { pressed: true, key, modifiers, fidelity: "page_level" });
+    // Synthetic (untrusted) dispatch. Canvas editors (Slides/Docs/Sheets) ignore
+    // these; for those, call keyboard.press with trusted:true (background CDP path).
+    return primitiveSuccess("keyboard.press", { pressed: true, key, modifiers, fidelity: "synthetic" });
   };
 
   window.actionsJsonOverlay = {
@@ -3479,15 +3817,179 @@
     return stateProjectionModulePromise;
   };
 
+  // Per-tab marker registry (KTD3): markers are stable anchors minted by a
+  // projection run; coordinates are NEVER stored (KTD4) — the marker-runner
+  // resolves a marker's recipe live at query/move time. Cleared naturally on
+  // navigation (content script reload); re-running a projection replaces its
+  // own markers.
+  const stateMarkerRegistry = new Map();
+
+  const registerStateMarkers = (projectionName, markers) => {
+    for (const [id, existing] of stateMarkerRegistry) {
+      if (existing.projection === projectionName) stateMarkerRegistry.delete(id);
+    }
+    for (const marker of markers) {
+      stateMarkerRegistry.set(marker.id, {
+        ...marker,
+        projection: projectionName,
+        registered_at: new Date().toISOString(),
+      });
+    }
+  };
+
   const executeStateProjection = async (message) => {
     const module = await loadStateProjectionModule();
-    return module.executeStateProjection({
+    const result = await module.executeStateProjection({
       bundle: message.bundle,
       pageUrl: location.href,
       document,
       projectionName: message.projection_name,
       summaryName: message.summary_name || null,
       maxBytes: message.max_bytes,
+    });
+    if (result?.ok && Array.isArray(result.markers)) {
+      registerStateMarkers(result.projection || message.projection_name, result.markers);
+    }
+    return result;
+  };
+
+  // --- Marker-runner (action layer, KTD1/KTD2) -------------------------------
+  // A marker's recipe is a declarative sequence of existing portable primitives.
+  // The runner executes it live at query/move time — coordinates are never
+  // stored (KTD4). The consumer holds only the marker id + its typed promise.
+
+  const runMarkerRecipeStep = async (step) => {
+    const args = step.args || {};
+    switch (step.primitive) {
+      case "keyboard.press":
+        if (args.trusted === true) {
+          // Content scripts cannot attach the debugger; relay to the background
+          // worker, which dispatches the real CDP key on this same tab.
+          const relayed = await chrome.runtime.sendMessage({
+            type: "actions-json:marker-trusted-key",
+            key: args.key,
+            modifiers: args.modifiers || [],
+            repeat: args.repeat,
+          });
+          if (!relayed?.ok) {
+            return primitiveError("keyboard.press", "trusted_key_failed", relayed?.error || "Trusted key relay failed.", { key: args.key });
+          }
+          return primitiveSuccess("keyboard.press", { pressed: true, key: args.key, repeat: relayed.repeat ?? 1, fidelity: "trusted" });
+        }
+        return keyboardPress(args);
+      case "pointer.click":
+        return pointerClick(args);
+      case "pointer.move":
+        return pointerMove(args);
+      case "pointer.double_click":
+        return pointerDoubleClick(args);
+      case "locator.element_info":
+        return locatorElementInfo(args);
+      case "locator.wait_for":
+        return locatorWaitFor(args);
+      case "dom.focus":
+        return domFocus(args);
+      case "text.insert":
+        return textInsert(args);
+      case "text.type":
+        return textType(args);
+      case "viewport.scroll":
+        return viewportScroll(args);
+      default:
+        return primitiveError("marker.query", "invalid_recipe_step", `Recipe step primitive "${step.primitive}" is not allowed.`, { step });
+    }
+  };
+
+  const runMarkerRecipe = async (marker) => {
+    // Seed location from a static anchor coordinate when the projection author
+    // supplied one — on canvas surfaces (Docs/Slides) text has no DOM coordinate,
+    // so the marker's anchor {x,y} IS its resolved location and the recipe just
+    // enacts it (e.g. pointer.click). A later step may refine this.
+    let location = (marker.anchor && Number.isFinite(marker.anchor.x) && Number.isFinite(marker.anchor.y))
+      ? { x: marker.anchor.x, y: marker.anchor.y }
+      : null;
+    for (let index = 0; index < marker.recipe.length; index += 1) {
+      const step = marker.recipe[index];
+      const result = await runMarkerRecipeStep(step);
+      const ok = result?.ok !== false && result?.value?.ok !== false;
+      if (!ok) {
+        return {
+          ok: false,
+          error: {
+            code: "marker_recipe_step_failed",
+            message: `Marker "${marker.id}" recipe step ${index + 1} (${step.primitive}) failed.`,
+            step_index: index,
+            primitive: step.primitive,
+            cause: result?.error || result?.value?.error || result,
+          },
+        };
+      }
+      const value = result?.value || result;
+      // A step resolves the location if it exposes one — a locator's
+      // clickable_center, or a plain {x,y} (pointer.click / pointer.move return this).
+      if (value?.clickable_center && Number.isFinite(value.clickable_center.x)) {
+        location = { x: value.clickable_center.x, y: value.clickable_center.y };
+      } else if (Number.isFinite(value?.x) && Number.isFinite(value?.y)) {
+        location = { x: value.x, y: value.y };
+      }
+    }
+    return { ok: true, location };
+  };
+
+  const resolveRegisteredMarker = (primitive, markerId) => {
+    if (typeof markerId !== "string" || !markerId) {
+      return { error: primitiveError(primitive, "invalid_input", "A marker id is required.", { marker: markerId }) };
+    }
+    const marker = stateMarkerRegistry.get(markerId);
+    if (!marker) {
+      return {
+        error: primitiveError(primitive, "marker_not_found", `No registered marker "${markerId}". Re-run the projection that mints it — markers clear on navigation.`, {
+          marker: markerId,
+          registered: [...stateMarkerRegistry.keys()],
+        }),
+      };
+    }
+    return { marker };
+  };
+
+  const markerQuery = async (args = {}) => {
+    const { marker, error } = resolveRegisteredMarker("marker.query", args.id ?? args.marker);
+    if (error) return error;
+    const run = await runMarkerRecipe(marker);
+    if (!run.ok) return primitiveError("marker.query", run.error.code, run.error.message, run.error);
+    return primitiveSuccess("marker.query", {
+      marker: marker.id,
+      type: marker.type,
+      location: run.location,
+      resolved_at: new Date().toISOString(),
+    });
+  };
+
+  const markerMoveTo = async (primitive, expectedType, args = {}) => {
+    const { marker, error } = resolveRegisteredMarker(primitive, args.marker ?? args.id);
+    if (error) return error;
+    if (marker.type !== expectedType) {
+      return primitiveError(primitive, "marker_type_mismatch", `Marker "${marker.id}" is a ${marker.type} marker; ${primitive} requires a ${expectedType} marker.`, {
+        marker: marker.id,
+        type: marker.type,
+      });
+    }
+    const run = await runMarkerRecipe(marker);
+    if (!run.ok) return primitiveError(primitive, run.error.code, run.error.message, run.error);
+    if (expectedType === "pointer") {
+      if (!run.location) {
+        return primitiveError(primitive, "marker_promise_unkept", `Marker "${marker.id}" recipe completed but produced no location to move the pointer to. Its recipe must end with a locating step (e.g. locator.element_info).`, {
+          marker: marker.id,
+        });
+      }
+      moveVisiblePointer(run.location.x, run.location.y);
+    }
+    return primitiveSuccess(primitive, {
+      marker: marker.id,
+      type: marker.type,
+      moved: true,
+      location: run.location,
+      resolved_at: new Date().toISOString(),
     });
   };
 
@@ -3556,10 +4058,18 @@
       output = await runJavascript(message.arguments || {});
     } else if (message.name === "debug.run_javascript") {
       output = await debugRunJavascript(message.arguments || {});
+    } else if (message.name === "marker.query") {
+      output = await markerQuery(message.arguments || {});
+    } else if (message.name === "cursor.move_to") {
+      output = await markerMoveTo("cursor.move_to", "cursor", message.arguments || {});
+    } else if (message.name === "pointer.move_to") {
+      output = await markerMoveTo("pointer.move_to", "pointer", message.arguments || {});
     } else if (message.name === "locator.element_info") {
       output = await locatorElementInfo(message.arguments || {});
     } else if (message.name === "locator.text_content") {
       output = locatorTextContent(message.arguments || {});
+    } else if (message.name === "dom.focus") {
+      output = domFocus(message.arguments || {});
     } else if (message.name === "locator.wait_for") {
       output = await locatorWaitFor(message.arguments || {});
     } else if (message.name === "viewport.scroll") {
@@ -3574,6 +4084,20 @@
       output = pointerDrag(message.arguments || {});
     } else if (message.name === "text.insert") {
       output = await textInsert(message.arguments || {});
+    } else if (message.name === "text.type") {
+      output = await textType(message.arguments || {});
+    } else if (message.name === "clipboard.paste") {
+      output = await clipboardPaste(message.arguments || {});
+    } else if (message.name === "clipboard.read") {
+      output = await clipboardRead();
+    } else if (message.name === "clipboard.write") {
+      output = await clipboardWrite(message.arguments || {});
+    } else if (message.name === "text.select") {
+      output = textSelect(message.arguments || {});
+    } else if (message.name === "clipboard.copy") {
+      output = await clipboardCopy(message.arguments || {});
+    } else if (message.name === "page.fetch") {
+      output = await pageFetch(message.arguments || {});
     } else if (message.name === "transfer.write") {
       output = await transferBufferAction("transfer.write", message.arguments || {});
     } else if (message.name === "transfer.read") {
@@ -3585,7 +4109,26 @@
     } else if (message.name === "storage.read_file") {
       output = await storageReadFile(message.arguments || {});
     } else if (message.name === "keyboard.press") {
-      output = keyboardPress(message.arguments || {});
+      // Honor trusted:true here too (workflow/runtime dispatch path). Without
+      // this, a workflow's keyboard.press{trusted:true} fell through to the
+      // SYNTHETIC keyboardPress and canvas editors (Docs/Slides/Sheets) ignored
+      // it — so Find's Enter/Escape never committed inside a composed action,
+      // even though the same call worked as a direct primitive. Mirrors the
+      // direct-path trusted relay.
+      const kargs = message.arguments || {};
+      if (kargs.trusted === true) {
+        const relayed = await chrome.runtime.sendMessage({
+          type: "actions-json:marker-trusted-key",
+          key: kargs.key,
+          modifiers: kargs.modifiers || [],
+          repeat: kargs.repeat,
+        });
+        output = relayed?.ok
+          ? primitiveSuccess("keyboard.press", { pressed: true, key: kargs.key, repeat: relayed.repeat ?? 1, fidelity: "trusted" })
+          : primitiveError("keyboard.press", "trusted_key_failed", relayed?.error || "Trusted key relay failed.", { key: kargs.key });
+      } else {
+        output = keyboardPress(kargs);
+      }
     } else if (message.name === "page.info") {
       output = pageInfo();
     } else if (message.name === "dom.observe.visible") {

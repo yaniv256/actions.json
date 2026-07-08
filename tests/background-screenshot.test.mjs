@@ -605,7 +605,7 @@ test("background fills hosted agent tools when popup starts voice with an empty 
       },
       tabs: {
         async query() {
-          return [{ id: 101, url: "https://pragmaworks.dev/" }];
+          return [{ id: 101, url: "https://acme.example/" }];
         },
         onUpdated: {
           addListener() {},
@@ -742,7 +742,7 @@ test("background merges default primitive tools into caller-provided hosted site
       },
       tabs: {
         async query() {
-          return [{ id: 101, url: "https://pragmaworks.dev/" }];
+          return [{ id: 101, url: "https://acme.example/" }];
         },
         onUpdated: {
           addListener() {},
@@ -799,16 +799,16 @@ test("background serves hosted actions.site from uploaded extension storage with
       protocol: "actions.json.storage.bundle",
       entries: [
         {
-          path: "scopes/shared/pragmaworks/sites/pragmaworks.dev/home/actions.json",
+          path: "scopes/shared/acme/sites/acme.example/home/actions.json",
           content: JSON.stringify({
             protocol: "actions.json",
             tools: [
               {
-                name: "pragmaworks.site.map",
-                description: "Return the PragmaWorks site map.",
+                name: "acme.site.map",
+                description: "Return the Acme site map.",
                 input_schema: { type: "object", additionalProperties: false },
                 x_actions: {
-                  static_output: { ok: true, site: "pragmaworks.dev" },
+                  static_output: { ok: true, site: "acme.example" },
                 },
               },
             ],
@@ -862,7 +862,7 @@ test("background serves hosted actions.site from uploaded extension storage with
       tabs: {
         async query(query) {
           assert.deepEqual(JSON.parse(JSON.stringify(query)), { active: true, currentWindow: true });
-          return [{ id: 190778180, url: "https://pragmaworks.dev/" }];
+          return [{ id: 190778180, url: "https://acme.example/" }];
         },
         onUpdated: {
           addListener() {},
@@ -900,11 +900,11 @@ test("background serves hosted actions.site from uploaded extension storage with
       call_id: "call-actions-site",
       output: {
         ok: true,
-        target_url_contains: "https://pragmaworks.dev/",
+        target_url_contains: "https://acme.example/",
         actions: [
           {
-            name: "pragmaworks.site.map",
-            description: "Return the PragmaWorks site map.",
+            name: "acme.site.map",
+            description: "Return the Acme site map.",
             input_schema: { type: "object", additionalProperties: false },
             target_url_contains: null,
           },
@@ -956,7 +956,7 @@ test("background records hosted tool routing decisions in the session log", asyn
       tabs: {
         async query(query) {
           assert.deepEqual(JSON.parse(JSON.stringify(query)), { active: true, currentWindow: true });
-          return [{ id: 190778180, url: "https://pragmaworks.dev/#research" }];
+          return [{ id: 190778180, url: "https://acme.example/#research" }];
         },
         async sendMessage() {
           throw new Error("content runtime absent");
@@ -977,8 +977,8 @@ test("background records hosted tool routing decisions in the session log", asyn
         async json() {
           return {
             error: "no runtime URL matched target_url_contains",
-            target_url_contains: "https://genspec.dev/",
-            runtimes: [{ runtime_id: "runtime-a", url: "https://pragmaworks.dev/#research" }],
+            target_url_contains: "https://beta.example/",
+            runtimes: [{ runtime_id: "runtime-a", url: "https://acme.example/#research" }],
           };
         },
         async text() {
@@ -998,7 +998,7 @@ test("background records hosted tool routing decisions in the session log", asyn
         call: {
           name: "browser.screenshot",
           call_id: "call-screenshot",
-          arguments: { target_url_contains: "https://genspec.dev/" },
+          arguments: { target_url_contains: "https://beta.example/" },
         },
       },
       {},
@@ -1029,8 +1029,8 @@ test("background records hosted tool routing decisions in the session log", asyn
       type: "routing",
       tool: "browser.screenshot",
       call_id: "call-screenshot",
-      active_tab_url: "https://pragmaworks.dev/#research",
-      requested_target_url_contains: "https://genspec.dev/",
+      active_tab_url: "https://acme.example/#research",
+      requested_target_url_contains: "https://beta.example/",
       route: "bridge",
       ok: false,
       bridge_status: 404,
@@ -1081,7 +1081,7 @@ test("background returns structured local hosted primitive failures without brid
       tabs: {
         async query(query) {
           assert.deepEqual(JSON.parse(JSON.stringify(query)), { active: true, currentWindow: true });
-          return [{ id: 190778180, url: "https://pragmaworks.dev/greenfield" }];
+          return [{ id: 190778180, url: "https://acme.example/greenfield" }];
         },
         async sendMessage(_tabId, message) {
           assert.equal(message.name, "dom.observe.visible");

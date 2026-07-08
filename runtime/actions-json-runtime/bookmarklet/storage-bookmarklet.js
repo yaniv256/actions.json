@@ -128,7 +128,7 @@
       },
     ],
   };
-  const primitiveDictionaryMetadata = { version: 1, stage: 1, host: "embed", primitives: [["browser.screenshot","unsupported","capability_unavailable","privileged",false],["browser.claimed_tabs.list","unsupported","capability_unavailable","privileged",false],["browser.claimed_tabs.activate","unsupported","capability_unavailable","privileged",false],["browser.navigate","unsupported","capability_unavailable","privileged",false],["browser.open_tab","unsupported","capability_unavailable","privileged",false],["browser.close_tab","unsupported","capability_unavailable","privileged",false],["browser.dismiss_dialog","unsupported","capability_unavailable","privileged",false],["pointer.move","supported",null,"portable",true],["pointer.click","supported",null,"portable",true],["pointer.double_click","supported",null,"portable",true],["pointer.drag","supported",null,"portable",true],["viewport.scroll","supported",null,"portable",true],["storage.read_file","unsupported","capability_unavailable","privileged",false],["text.insert","supported",null,"portable",true],["keyboard.press","partial","trusted_key_events_unavailable","mixed",false],["transfer.insert","unsupported","capability_unavailable","privileged",false],["transfer.clear","unsupported","capability_unavailable","privileged",false],["transfer.read","unsupported","capability_unavailable","privileged",false],["transfer.write","unsupported","capability_unavailable","privileged",false],["clipboard.write","unsupported","capability_unavailable","privileged",false],["clipboard.read","unsupported","capability_unavailable","privileged",false],["runtime.session.name","unsupported","capability_unavailable","privileged",false],["runtime.session.finalize_tabs","unsupported","capability_unavailable","privileged",false],["page.info","supported",null,"portable",true],["dom.observe.visible","supported",null,"portable",true],["dom.snapshot_text","supported",null,"portable",true],["dom.list_sections","supported",null,"portable",true],["locator.element_info","supported",null,"portable",true],["locator.text_content","supported",null,"portable",true],["locator.wait_for","supported",null,"portable",true],["overlay.open","supported",null,"privileged",false],["overlay.register_launcher","supported",null,"privileged",false],["overlay.close","supported",null,"privileged",false]].map(([name, support, reason, capability_class, portable]) => ({ name, support, reason, capability_class, portable })) };
+  const primitiveDictionaryMetadata = { version: 1, stage: 1, host: "embed", primitives: [["browser.screenshot","unsupported","capability_unavailable","privileged",false],["browser.claimed_tabs.list","unsupported","capability_unavailable","privileged",false],["browser.claimed_tabs.activate","unsupported","capability_unavailable","privileged",false],["browser.navigate","unsupported","capability_unavailable","privileged",false],["browser.open_tab","unsupported","capability_unavailable","privileged",false],["browser.close_tab","unsupported","capability_unavailable","privileged",false],["browser.dismiss_dialog","unsupported","capability_unavailable","privileged",false],["pointer.move","supported",null,"portable",true],["pointer.click","supported",null,"portable",true],["pointer.double_click","supported",null,"portable",true],["pointer.drag","supported",null,"portable",true],["viewport.scroll","supported",null,"portable",true],["storage.read_file","unsupported","capability_unavailable","privileged",false],["text.insert","supported",null,"portable",true],["keyboard.press","partial","trusted_key_events_unavailable","mixed",false],["transfer.insert","unsupported","capability_unavailable","privileged",false],["transfer.clear","unsupported","capability_unavailable","privileged",false],["transfer.read","unsupported","capability_unavailable","privileged",false],["transfer.write","unsupported","capability_unavailable","privileged",false],["clipboard.write","unsupported","capability_unavailable","portable",true],["clipboard.read","unsupported","capability_unavailable","portable",true],["runtime.session.name","unsupported","capability_unavailable","privileged",false],["runtime.session.finalize_tabs","unsupported","capability_unavailable","privileged",false],["page.info","supported",null,"portable",true],["dom.observe.visible","supported",null,"portable",true],["dom.snapshot_text","supported",null,"portable",true],["dom.list_sections","supported",null,"portable",true],["locator.element_info","supported",null,"portable",true],["locator.text_content","supported",null,"portable",true],["locator.wait_for","supported",null,"portable",true],["overlay.open","supported",null,"privileged",false],["overlay.register_launcher","supported",null,"privileged",false],["overlay.close","supported",null,"privileged",false]].map(([name, support, reason, capability_class, portable]) => ({ name, support, reason, capability_class, portable })) };
 
   const existing = document.getElementById(ROOT_ID);
   if (existing) {
@@ -1476,13 +1476,22 @@
     const y = Number(args.y);
     const viewportError = validateViewportPoint("pointer.click", x, y, args);
     if (viewportError) return viewportError;
+    const knownModifiers = ["shift", "alt", "option", "control", "ctrl", "meta", "cmd", "command"];
+    const modifiers = (Array.isArray(args.modifiers) ? args.modifiers : [])
+      .map((modifier) => String(modifier).toLowerCase());
+    const unknownModifier = modifiers.find((modifier) => !knownModifiers.includes(modifier));
+    if (unknownModifier) {
+      return primitiveError("pointer.click", "invalid_input", `Unknown pointer modifier "${unknownModifier}". Supported: shift, alt/option, control/ctrl, meta/cmd/command.`, {
+        modifiers: args.modifiers,
+      });
+    }
     const target = document.elementFromPoint(x, y);
     if (!target) {
       return primitiveError("pointer.click", "target_not_found", "No element exists at the requested point.", { x, y });
     }
     moveVisiblePointer(x, y);
-    dispatchPointerClick(target, { x, y, button: args.button || "left" });
-    return primitiveSuccess("pointer.click", { clicked: true, x, y });
+    dispatchPointerClick(target, { x, y, button: args.button || "left", modifiers });
+    return primitiveSuccess("pointer.click", { clicked: true, x, y, modifiers });
   }
 
   function pointerMove(args = {}) {
@@ -1589,7 +1598,7 @@
     }, 140);
   }
 
-  function dispatchPointerClick(target, { x, y, button, detail = 1 }) {
+  function dispatchPointerClick(target, { x, y, button, detail = 1, modifiers = [] }) {
     const buttonCode = button === "middle" ? 1 : button === "right" ? 2 : 0;
     const common = {
       bubbles: true,
@@ -1603,6 +1612,10 @@
       buttons: 1 << buttonCode,
       detail,
       view: window,
+      altKey: modifiers.includes("alt") || modifiers.includes("option"),
+      ctrlKey: modifiers.includes("control") || modifiers.includes("ctrl"),
+      metaKey: modifiers.includes("meta") || modifiers.includes("cmd") || modifiers.includes("command"),
+      shiftKey: modifiers.includes("shift"),
     };
     for (const type of ["pointerover", "pointerenter", "mouseover", "mouseenter", "pointermove", "mousemove", "pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
       const EventCtor = type.startsWith("pointer") && typeof PointerEvent === "function" ? PointerEvent : MouseEvent;

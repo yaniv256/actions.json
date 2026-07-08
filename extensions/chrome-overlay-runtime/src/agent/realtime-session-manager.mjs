@@ -456,6 +456,16 @@ export class HostedRealtimeSessionManager {
     this.lastRealtimeInboundEventType = null;
     this.lastRealtimeOutboundEventType = null;
     this.transport = null;
+    // Active-response tracking (single-flight guard). The Realtime API allows
+    // exactly one response generating at a time; we model that from the
+    // response.created / response.done lifecycle events we already receive so
+    // sends can serialize instead of colliding.
+    this.activeResponseId = null;
+    this._responseIdle = Promise.resolve(); // idle at construction
+    this._resolveResponseIdle = null;
+    // Response ids cancelled via interrupt — a late tool result from one of
+    // these is discarded rather than delivered to the (no-longer-live) turn.
+    this._cancelledResponseIds = new Set();
     this.expenditureObserver =
       typeof expenditureObserver === "function" ? expenditureObserver : null;
     this.resetExpenditure();
@@ -470,7 +480,133 @@ export class HostedRealtimeSessionManager {
   }
 
   getState() {
-    return { ...this.state };
+    return {
+      ...this.state,
+      busy: this.isBusy(),
+      activeResponseId: this.activeResponseId,
+    };
+  }
+
+  // Whether a response is currently generating (single-flight busy signal).
+  isBusy() {
+    return this.activeResponseId !== null;
+  }
+
+  // A promise that is resolved whenever no response is active, and re-armed
+  // (unresolved) while one is. Callers await it to serialize response.create.
+  get responseIdle() {
+    return this._responseIdle;
+  }
+
+  _armResponseIdle() {
+    // Only arm a fresh pending promise if we don't already have an unresolved one.
+    if (this._resolveResponseIdle) return;
+    this._responseIdle = new Promise((resolve) => {
+      this._resolveResponseIdle = resolve;
+    });
+  }
+
+  _markResponseActive(responseId) {
+    if (!responseId) return;
+    this.activeResponseId = responseId;
+    this._armResponseIdle();
+  }
+
+  _clearActiveResponse(responseId) {
+    // Only clear if this event refers to the currently-active response (ignore
+    // stale done/error for an already-superseded response).
+    if (responseId && responseId !== this.activeResponseId) return;
+    this.activeResponseId = null;
+    if (this._resolveResponseIdle) {
+      const resolve = this._resolveResponseIdle;
+      this._resolveResponseIdle = null;
+      resolve();
+    }
+  }
+
+  // The ONE sanctioned way to emit response.create. It serializes against the
+  // single-flight active-response state so a send never collides with an
+  // in-flight response (the "Conversation already has an active response in
+  // progress" reject) and a tool-result follow-up never silently stalls.
+  //
+  //   mode: "queue"    (default) — if a response is active, wait for it to
+  //                     finish (bounded by the developer-text timeout), then send.
+  //   mode: "interrupt" — cancel the active response, then send (added in U4).
+  //
+  // `response` is the response.create payload body ({} for a bare send).
+  async createResponse({ mode = "queue", response = {} } = {}) {
+    // Serialize concurrent createResponse calls against EACH OTHER (not just the
+    // initially-active response): chain each send behind the previous one's
+    // completion, so a second queued send waits for the first send's own
+    // response to finish rather than colliding with it.
+    const prior = this._sendChain || Promise.resolve();
+    let release;
+    this._sendChain = new Promise((resolve) => { release = resolve; });
+    try {
+      await prior;
+      if (this.isBusy()) {
+        if (mode === "interrupt") {
+          await this._interruptActiveResponse();
+        } else {
+          // queue: wait our turn, bounded so a wedged response can't hang forever.
+          await this._awaitResponseIdle();
+        }
+      }
+      // Preserve the bare `{type:"response.create"}` shape when no response
+      // body is supplied (the post-tool-call path), only attaching `response`
+      // when there's a payload.
+      const event = { type: "response.create" };
+      if (response && Object.keys(response).length > 0) {
+        event.response = response;
+      }
+      await this.sendRealtimeEvent(event);
+    } finally {
+      release();
+    }
+  }
+
+  // Await responseIdle with the developer-text timeout as a ceiling, so a
+  // response that never completes cannot block sends indefinitely.
+  async _awaitResponseIdle() {
+    const timeoutMs = this.developerTextResponseTimeoutMs;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      await this.responseIdle;
+      return;
+    }
+    let timer = null;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    });
+    try {
+      await Promise.race([this.responseIdle, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  // Cancel the in-flight response so a new send can take over immediately.
+  // response.cancel ends the MODEL turn only; a tool call already dispatched by
+  // the cancelled response is allowed to finish, but its result is discarded
+  // (see tool-delivery gating on the originating response id). We await the
+  // resulting response.cancelled/done (bounded) so activeResponseId is cleared
+  // before the replacement send fires.
+  async _interruptActiveResponse() {
+    const cancelledId = this.activeResponseId;
+    if (!cancelledId) return;
+    // Remember which response was cancelled so its late tool results are dropped.
+    this._cancelledResponseIds.add(cancelledId);
+    try {
+      await this.sendRealtimeEvent({ type: "response.cancel" });
+    } catch {
+      // if cancel can't be sent, still fall through to the bounded wait
+    }
+    await this._awaitResponseIdle();
+  }
+
+  // A tool result is discarded when the response that requested it was
+  // interrupted (cancelled) — its output no longer belongs to a live turn.
+  _shouldDiscardToolResult(job) {
+    return Boolean(job?.originResponseId) && this._cancelledResponseIds.has(job.originResponseId);
   }
 
   resetExpenditure() {
@@ -691,12 +827,14 @@ export class HostedRealtimeSessionManager {
               }),
         },
       }, transport);
-      await this.sendRealtimeEvent({
-        type: "response.create",
+      // Route the session-start greet through createResponse too, so it is the
+      // single sanctioned response.create emitter. First response of the
+      // session — nothing is in flight, so queue fires immediately.
+      await this.createResponse({
         response: {
           instructions: this.initialResponseInstructions(),
         },
-      }, transport);
+      });
 
       this.state = {
         status: "connected",
@@ -797,7 +935,7 @@ export class HostedRealtimeSessionManager {
     return this.getState();
   }
 
-  async sendUserMessage({ text } = {}) {
+  async sendUserMessage({ text, mode = "queue" } = {}) {
     const prompt = typeof text === "string" ? text.trim() : "";
     if (!prompt) {
       throw new Error("runtime.agent.user_message requires non-empty text");
@@ -846,8 +984,8 @@ export class HostedRealtimeSessionManager {
         ],
       },
     });
-    await this.sendRealtimeEvent({
-      type: "response.create",
+    await this.createResponse({
+      mode,
       response: {
         output_modalities: ["text"],
         instructions: "Respond to this developer-injected test prompt with text only. Do not produce audio.",
@@ -912,12 +1050,23 @@ export class HostedRealtimeSessionManager {
 
   async handleRealtimeEvent(event) {
     this.lastRealtimeInboundEventType = event?.type || null;
+    const eventResponseId = event?.response?.id || event?.response_id || null;
+    // Single-flight active-response tracking (drives serialization of sends).
+    if (event?.type === "response.created") {
+      this._markResponseActive(eventResponseId);
+    } else if (
+      event?.type === "response.done" ||
+      event?.type === "response.cancelled" ||
+      event?.type === "error"
+    ) {
+      this._clearActiveResponse(eventResponseId);
+    }
     if (event?.type === "response.done") {
       this.trackResponseUsage(event);
     }
     const finalText = realtimeFinalText(event);
     if (event?.type === "response.created") {
-      const responseId = event.response?.id || event.response_id || null;
+      const responseId = eventResponseId;
       if (responseId && this.pendingDeveloperTextRequests.length > 0) {
         this.developerTextRequestByResponseId.set(responseId, this.pendingDeveloperTextRequests.shift());
       }
@@ -1129,6 +1278,9 @@ export class HostedRealtimeSessionManager {
       status: "queued",
       delivered: false,
       policyExceptionReport,
+      // The response that produced this tool call. If that response is later
+      // cancelled via interrupt, this job's result is discarded (U4).
+      originResponseId: this.activeResponseId,
       promise: null,
     };
     this.toolJobs.set(job.id, job);
@@ -1233,6 +1385,23 @@ export class HostedRealtimeSessionManager {
       output: result?.output || result,
     });
 
+    // U4 discard: if the response that requested this tool call was interrupted
+    // (cancelled), the result no longer belongs to a live turn — drop it rather
+    // than deliver it to the model or trigger a follow-up response.
+    if (this._shouldDiscardToolResult(job)) {
+      job.status = "discarded_interrupted";
+      job.delivered = false;
+      this.toolJobs.delete(job.id);
+      await recordAgentMemoryEvent(this.storage, {
+        type: "realtime",
+        name: "actions_json.tool.discarded",
+        ok: true,
+        summary: `${job.name} result discarded — its response was interrupted.`,
+        input: { call_id: job.id, origin_response_id: job.originResponseId },
+      }).catch(() => {});
+      return;
+    }
+
     const bridgeCall = { ...originalCall, name: job.name };
     const modelResult = modelSafeToolResult(bridgeCall, result);
     try {
@@ -1279,7 +1448,9 @@ export class HostedRealtimeSessionManager {
     }
 
     try {
-      await this.sendRealtimeEvent({ type: "response.create" });
+      // Queue behind any in-flight response — a tool-result follow-up must
+      // never interrupt itself, and this used to silently stall when it raced.
+      await this.createResponse({ mode: "queue" });
     } catch (error) {
       await this.recordToolDeliveryFailure({ job, outgoingType: "response.create", error, result, deliveredToModel: true });
     }
