@@ -121,6 +121,21 @@ const ALLOWED_STEP_KEYS = new Set([
   "settle_after",
 ]);
 
+// `after_each` runs between retry attempts to let the page settle. It is a WAIT
+// slot. Validating only "is this a known primitive" let two defects ship:
+//   after_each: keyboard.press Shift   -> waits for nothing; attempts run back-to-back
+//   after_each: pointer.click          -> a MUTATION, fired up to max_attempts-1 times
+// Both were live in the Trello map. Restrict to primitives that observe or are
+// idempotent. See investigations/trello-delete-confirm-anchor-and-silent-noop-family.md
+const AFTER_EACH_PRIMITIVES = new Set([
+  "locator.wait_for",
+  "locator.element_info",
+  "dom.observe.visible",
+  "viewport.scroll",
+  "overlay.menu.hide",
+  "overlay.menu.show",
+]);
+
 function unknownPrimitiveError(stepId, primitiveName) {
   return {
     ok: false,
@@ -235,6 +250,15 @@ export function validateWorkflow(workflow, limits = DEFAULT_LIMITS) {
       }
       if (step.after_each && knownPrimitives && !knownPrimitives.has(step.after_each.primitive)) {
         return unknownPrimitiveError(step.id, step.after_each.primitive);
+      }
+      if (step.after_each && !AFTER_EACH_PRIMITIVES.has(step.after_each.primitive)) {
+        return {
+          ok: false,
+          error: {
+            code: "invalid_workflow",
+            message: `Workflow step ${step.id} after_each uses ${step.after_each.primitive}; a retry's after_each is a WAIT slot and must be observational or idempotent (${[...AFTER_EACH_PRIMITIVES].join(", ")}).`,
+          },
+        };
       }
     }
     if (step.on_error && step.on_error !== "stop" && step.on_error !== "continue") {
@@ -559,6 +583,25 @@ export async function executeWorkflowAction({
       let settle;
       if (step.settle_after !== undefined) {
         settle = await runSettle({ settle: step.settle_after, executePrimitive });
+        // A settle_after is the author saying "this step is not finished until X
+        // is on the page." If X never arrives, the step did not finish. Recording
+        // the timeout into the summary and proceeding lets the workflow march past
+        // a surface that never appeared, and every later failure is then reported
+        // at the wrong step.
+        if (settle?.ok === false && step.on_error !== "continue") {
+          const settleFailure = {
+            ok: false,
+            error: {
+              code: "workflow_settle_timeout",
+              step_id: step.id,
+              message: `Workflow step ${step.id} completed but its settle_after never resolved.`,
+              cause: settle,
+            },
+          };
+          context.steps[step.save_as || step.id] = settleFailure;
+          stepSummaries.push(summarizeStep({ step, result, startedAt, settle }));
+          return workflowFailure({ step, result: settleFailure, steps: stepSummaries });
+        }
       }
       stepSummaries.push(summarizeStep({ step, result, startedAt, settle }));
     } catch (error) {

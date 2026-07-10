@@ -47,6 +47,7 @@ import {
 import {
   agentEventFromSessionEvent,
 } from "./agent/agent-event-map.mjs";
+import { DEFAULT_MODEL } from "./agent/realtime-model.mjs";
 
 const SESSION_STATE_KEY = "ACTIONS_JSON_OVERLAY_SESSION_STATE";
 const AGENT_KEY_STORAGE_KEY = "ACTIONS_JSON_OPENAI_API_KEY";
@@ -155,6 +156,18 @@ let bridgeState = null;
 let bridgeReconnectTimer = null;
 let bridgeReconnectAttempts = 0;
 const bridgeRuntimeRoutes = new Map();
+
+// Honest routing-failure next-steps, mirroring the bridge's route_error_next_step
+// (mcp/actions-json-mcp/src/lib.rs). Both surfaces speak one error vocabulary so
+// a wrong route self-corrects in one read, whichever side names the failure. The
+// opaque `no_claimed_tab` is retired in favor of tab_closed / claim_missing here.
+const ROUTE_ERROR_NEXT_STEP = {
+  tab_closed:
+    "The tab has closed. Re-list runtimes (bridge/runtimes) and reopen or re-claim the target before retrying.",
+  claim_missing:
+    "No claimed tab resolved for this call. Claim the target tab (claim_tab), then retry.",
+};
+
 const transferBuffer = new TransferBuffer();
 const stateProjectionSnapshots = new Map();
 const bridgeOutputDeliveryQueue = new BridgeOutputDeliveryQueue({
@@ -274,6 +287,37 @@ const sessionStore = new SessionStore();
 const hasTabId = (tab) => tab && typeof tab.id === "number";
 
 const runtimeKeyForTab = (tabId) => `chrome-tab:${tabId}`;
+
+// U8 (R6-for-real): a MACHINE/BROWSER label, e.g. "mac · 7c19". The bridge's
+// `host` is the SITE host (trello.com), so two browsers on the same page are
+// indistinguishable without this (live-caught 2026-07-09: ext deployed on both
+// Windows and Mac, agent could not tell them apart). Label = platform OS +
+// a stable per-install id, so two Chromes on the SAME OS still differ.
+// chrome.runtime.getPlatformInfo() needs no permission. Computed once, cached.
+const DEVICE_ID_STORAGE_KEY = "actionsJsonDeviceId";
+let deviceLabelPromise = null;
+const getDeviceLabel = () => {
+  if (!deviceLabelPromise) {
+    deviceLabelPromise = (async () => {
+      try {
+        const stored = await chrome.storage.local.get(DEVICE_ID_STORAGE_KEY);
+        let id = stored?.[DEVICE_ID_STORAGE_KEY];
+        if (typeof id !== "string" || !id) {
+          // Short, stable, install-scoped. Survives restarts; regenerates only
+          // on a fresh install/profile — which IS a different browser.
+          id = Math.random().toString(36).slice(2, 6);
+          await chrome.storage.local.set({ [DEVICE_ID_STORAGE_KEY]: id });
+        }
+        const info = await chrome.runtime.getPlatformInfo().catch(() => null);
+        const os = info?.os || "unknown";
+        return `${os} · ${id}`;
+      } catch (_error) {
+        return null; // never block a claim on the label; the field is optional
+      }
+    })();
+  }
+  return deviceLabelPromise;
+};
 
 const newAuthorizationId = () => `authorization-${Date.now().toString(36)}-${Math.random()
   .toString(36)
@@ -403,6 +447,19 @@ const forgetRuntimeRoutesForTab = (tabId) => {
   for (const [key, mappedTabId] of bridgeRuntimeRoutes) {
     if (mappedTabId === tabId) bridgeRuntimeRoutes.delete(key);
   }
+};
+
+// The runtime_id(s) currently routed to a tab. Used at tab-close time to tell
+// the bridge exactly which runtime to reap, before the routes are forgotten.
+const runtimeIdsForTab = (tabId) => {
+  const ids = [];
+  if (!Number.isInteger(tabId)) return ids;
+  for (const [key, mappedTabId] of bridgeRuntimeRoutes) {
+    if (mappedTabId === tabId && key.startsWith("runtime_id:")) {
+      ids.push(key.slice("runtime_id:".length));
+    }
+  }
+  return ids;
 };
 
 const resolveBridgeItemTabId = (item) => {
@@ -544,11 +601,14 @@ const routeBridgeItemToTab = async (item) => {
   });
 };
 
-const decorateReadyItemForReplay = ({ readyItem, tab, claim, bridgeSessionId, reason, attempt, claimedAtMs }) => ({
+const decorateReadyItemForReplay = async ({ readyItem, tab, claim, bridgeSessionId, reason, attempt, claimedAtMs }) => ({
   ...readyItem,
   runtime_key: readyItem.runtime_key || claim.runtimeKey || runtimeKeyForTab(tab.id),
   authorization_id: readyItem.authorization_id || claim.authorizationId || null,
   extension_version: readyItem.extension_version || chrome.runtime.getManifest().version,
+  // U8: which MACHINE/BROWSER this runtime lives on, distinct from the site host.
+  // Null when unavailable — the bridge omits the field rather than storing null.
+  device: readyItem.device || (await getDeviceLabel()),
   url: readyItem.url || tab.url || claim.url || null,
   tab: {
     tab_id: tab.id,
@@ -560,7 +620,9 @@ const decorateReadyItemForReplay = ({ readyItem, tab, claim, bridgeSessionId, re
     bridge_session_id: bridgeSessionId,
     reason,
     attempt,
-    claimed_at_ms: claim.claimedAtMs || null,
+    // R10: never a constant null. Prefer an explicit claim time; fall back to
+    // the claim record, then to now (the replay is happening for a live claim).
+    claimed_at_ms: claimedAtMs || claim.claimedAtMs || Date.now(),
     replayed_at_ms: Date.now(),
   },
 });
@@ -628,7 +690,7 @@ const replayClaimedTabsToBridge = async ({ bridgeUrl, bridgeSessionId, reason = 
 
       try {
         const readyItem = await requestRuntimeReadyForClaimedTab({ tabId, tab, claim, bridgeUrl });
-        const decorated = decorateReadyItemForReplay({
+        const decorated = await decorateReadyItemForReplay({
           readyItem,
           tab,
           claim,
@@ -703,7 +765,7 @@ const connectBackgroundBridge = async (state, options = {}) => {
   // loss), reuse it — register the runtime on the existing transport and return.
   // The guard lives HERE (not only at the bridge-connect call site) so no current
   // or future caller can re-introduce the per-tab socket churn incident (2026-07-03).
-  if (!options.reconnectAttempt && attachRuntimeToOpenBridge({
+  if (!options.reconnectAttempt && await attachRuntimeToOpenBridge({
     bridgeUrl: state.bridgeUrl,
     tabId: state.tabId,
     readyItem: state.readyItem,
@@ -843,6 +905,26 @@ const connectBackgroundBridge = async (state, options = {}) => {
         });
         return;
       }
+      if (item?.type === "runtime_probe") {
+        // U3 probe-at-dispatch: the bridge suspects this runtime is stale and
+        // asks us to confirm the tab still exists via chrome.tabs.get before it
+        // dispatches a real call. Answer alive/dead; a get that throws = dead.
+        (async () => {
+          const probeId = item?.probe_id || null;
+          const tabId = resolveBridgeItemTabId(item);
+          let alive = false;
+          if (Number.isInteger(tabId)) {
+            try {
+              await chrome.tabs.get(tabId);
+              alive = true;
+            } catch (_error) {
+              alive = false;
+            }
+          }
+          sendBridgeItem({ type: "runtime_probe_result", probe_id: probeId, alive });
+        })();
+        return;
+      }
       if (item?.type === "credential_hydration") {
         handleCredentialHydrationItem(item)
           .catch((error) => rejectCredentialHydrationItem(item, error))
@@ -950,7 +1032,11 @@ const connectBackgroundBridge = async (state, options = {}) => {
 // URL, DON'T rebuild it — just register the new tab (and any relayed runtimes) ON the
 // existing socket, exactly the way a replay registers each tab, and keep the local
 // route. Only fall through to a full (re)connect when there is no healthy socket.
-const attachRuntimeToOpenBridge = ({ bridgeUrl, tabId, readyItem, relayedReadyItems }) => {
+// async because decorateReadyItemForReplay is. Its sole caller (connectBackgroundBridge) is
+// already async and MUST await this: the return value is a boolean guard, and an un-awaited
+// Promise is always truthy — which would report `reused_socket: true` on every reconnect and
+// silently skip the socket rebuild.
+const attachRuntimeToOpenBridge = async ({ bridgeUrl, tabId, readyItem, relayedReadyItems }) => {
   if (
     bridgeSocket?.readyState !== WebSocket.OPEN ||
     !bridgeState ||
@@ -960,9 +1046,23 @@ const attachRuntimeToOpenBridge = ({ bridgeUrl, tabId, readyItem, relayedReadyIt
   ) {
     return false;
   }
-  const decorated = decorateReadyItemForReplay({
+  // Ask Chrome for the tab instead of synthesizing one. A hardcoded `title: null`
+  // here reached the registry verbatim, and `runtime_matches_intent` matches on
+  // url OR title OR host — so intent routing by title ("the Zara board runtime")
+  // silently died for every runtime that attached to an already-open socket, which
+  // is every runtime after the first reconnect. The other two callers of
+  // decorateReadyItemForReplay already pass the real tab; this one was the outlier.
+  let tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch (_error) {
+    // The tab vanished between claim and attach. Degrade to what we know rather
+    // than asserting a title we never read.
+    tab = { id: tabId, url: readyItem.url || null };
+  }
+  const decorated = await decorateReadyItemForReplay({
     readyItem,
-    tab: { id: tabId, url: readyItem.url || null, title: null, active: false },
+    tab,
     claim: { runtimeKey: readyItem.runtime_key, authorizationId: readyItem.authorization_id, url: readyItem.url },
     bridgeSessionId: bridgeState.bridgeSessionId || null,
     reason: "bridge_attach",
@@ -1084,16 +1184,33 @@ const claimAuthorizedTab = async (message) => {
   };
 };
 
-const serializeClaimedTab = (session, tab, claim) => ({
-  tab_id: tab.id,
-  runtime_key: claim.runtimeKey || runtimeKeyForTab(tab.id),
-  authorization_id: claim.authorizationId || null,
-  bridge_url: claim.bridgeUrl || DEFAULT_BRIDGE_URL,
-  url: tab.url || claim.url || null,
-  title: tab.title || null,
-  active: Boolean(session.activeTabId === tab.id || tab.active),
-  window_id: typeof tab.windowId === "number" ? tab.windowId : null,
-});
+// U7: claimed_tabs.list agrees with the unified bridge/runtimes view on one
+// agent-facing id space — runtime_id, derived from the route map — and no
+// longer leads with runtime_key (kept only as an internal debugging field).
+const hostFromUrlLabel = (url) => {
+  if (!url) return null;
+  try {
+    return new URL(url).host || null;
+  } catch (_error) {
+    return null;
+  }
+};
+const serializeClaimedTab = (session, tab, claim) => {
+  const url = tab.url || claim.url || null;
+  return {
+    runtime_id: runtimeIdsForTab(tab.id)[0] || null,
+    tab_id: tab.id,
+    url,
+    title: tab.title || null,
+    host: hostFromUrlLabel(url),
+    active: Boolean(session.activeTabId === tab.id || tab.active),
+    window_id: typeof tab.windowId === "number" ? tab.windowId : null,
+    authorization_id: claim.authorizationId || null,
+    bridge_url: claim.bridgeUrl || DEFAULT_BRIDGE_URL,
+    // Internal id, retained for debugging; not the agent's addressing key.
+    _runtime_key: claim.runtimeKey || runtimeKeyForTab(tab.id),
+  };
+};
 
 const listClaimedTabs = async () => {
   const entries = await sessionStore.getSessionEntries();
@@ -1266,15 +1383,19 @@ const resolveClaimedTarget = async (tabIdArg) => {
 // it stays drivable after the load. Defaults to the active claimed tab.
 const navigateClaimedTab = async (message = {}) => {
   const url = typeof message.url === "string" ? message.url.trim() : "";
-  if (!url) throw new Error("browser.navigate requires a url.");
-  if (/^(chrome|about|file|edge):/i.test(url)) {
+  const reload = message.reload === true;
+  // A url is required only when we are actually navigating somewhere. Reload has
+  // always been implemented below, but this guard rejected the call before it
+  // could run, so the documented escape from a wedged tab was unreachable.
+  if (!url && !reload) throw new Error("browser.navigate requires a url or reload:true.");
+  if (url && /^(chrome|about|file|edge):/i.test(url)) {
     throw new Error("browser.navigate refuses chrome/about/file/edge URLs.");
   }
   const { session, tabId, claim } = await resolveClaimedTarget(
     Number(message.tab_id ?? message.tabId)
   );
 
-  if (message.reload === true) {
+  if (reload) {
     await chrome.tabs.reload(tabId);
   } else {
     await chrome.tabs.update(tabId, { url });
@@ -1287,11 +1408,40 @@ const navigateClaimedTab = async (message = {}) => {
   // Re-establish the content runtime on the freshly loaded document.
   // connectClaimedTab now also refreshes the local route (rememberRuntimeRoute),
   // so the reconnected runtime stays reachable across the navigation.
-  await connectClaimedTab(tabId, claim).catch(() => {});
+  //
+  // Do NOT swallow. A navigate whose reconnect fails leaves a runtime that is
+  // still in the bridge registry but no longer heartbeating; the TTL sweep reaps
+  // it ~60-80s later and the caller sees a 404 on a runtime_id this very call
+  // handed back. (Incident 2026-07-09, the sibling of the open_tab swallow.)
+  let connected = false;
+  let connectError = null;
+  try {
+    await connectClaimedTab(tabId, claim);
+    connected = true;
+  } catch (error) {
+    connectError = error?.message || String(error);
+  }
+  if (!connected) {
+    return {
+      ok: false,
+      navigated: true,
+      tab: serializeClaimedTab(session, tab, claim),
+      connected,
+      error: {
+        code: "runtime_reconnect_failed",
+        message:
+          "The tab navigated, but its content script did not reconnect to the bridge transport, so the runtime will stop heartbeating and be reaped as stale.",
+        recoverable: true,
+        next_step: "Reload the tab and re-claim it; verify the runtime's last_seen_ms advances in actions-json://bridge/runtimes.",
+        cause: connectError,
+      },
+    };
+  }
 
   return {
     ok: true,
     navigated: true,
+    connected,
     reloaded: message.reload === true,
     tab: serializeClaimedTab(session, tab, claim),
   };
@@ -1331,6 +1481,11 @@ const openClaimedTab = async (message = {}) => {
   const tab = await chrome.tabs.get(tabId);
   let readyItem = null;
   let registered = false;
+  // `registered` says a row exists in the bridge registry. `connected` says the
+  // content script is plugged into the transport that carries heartbeats. Only
+  // the second keeps the runtime alive past the TTL sweep. Report both.
+  let connected = false;
+  let connectError = null;
   try {
     readyItem = await requestRuntimeReadyForClaimedTab({
       tabId,
@@ -1340,7 +1495,7 @@ const openClaimedTab = async (message = {}) => {
     });
     // Register the new runtime with the bridge NOW, the same way replay does —
     // otherwise the tab is claimed locally but the bridge never learns of it.
-    const decorated = decorateReadyItemForReplay({
+    const decorated = await decorateReadyItemForReplay({
       readyItem,
       tab,
       claim: session.tabs[String(tabId)],
@@ -1360,17 +1515,53 @@ const openClaimedTab = async (message = {}) => {
     // tabs were deaf to content primitives; the re-claim path was not.) The connect
     // reuses the already-open shared socket via attachRuntimeToOpenBridge, so it no
     // longer churns the transport the other tabs depend on.
-    await connectClaimedTab(tabId, session.tabs[String(tabId)]).catch(() => {});
+    // Do NOT swallow this. Registration puts a row in the bridge registry;
+    // CONNECT is what plugs the content script into the transport carrying
+    // heartbeats. A runtime that is registered but not connected never advances
+    // last_seen_ms, so the bridge's TTL sweep reaps it ~60-80s later -- and the
+    // caller, having been told registered:true, blames the sweep. Two states,
+    // one word. (Incident 2026-07-09: a `.catch(() => {})` here silently
+    // degraded every fresh tab to "will replay on next bridge open", which may
+    // be hours away. It guarded the fix for incident 2026-07-03.)
+    await connectClaimedTab(tabId, session.tabs[String(tabId)]);
+    connected = true;
   } catch (error) {
-    // Best-effort: the tab is still claimed and will replay on next bridge open.
+    connectError = error?.message || String(error);
     appendBackgroundDiagnosticEvent({
       type: "navigation",
-      name: "background.open_tab.ready_failed",
+      name: "background.open_tab.connect_failed",
       ok: false,
-      summary: "Opened tab was claimed but runtime_ready failed; will replay.",
+      summary: "Opened tab was claimed and registered but never connected to the bridge transport; it will be reaped as stale.",
       input: { tab_id: tabId, url },
-      output: { error_message: error.message || String(error) },
+      output: { error_message: connectError },
     }).catch(() => {});
+  }
+
+  // A runtime that registered but never connected is a ghost: it is in the
+  // registry, it may serve one dispatch, and the TTL sweep reaps it within
+  // ~80s because last_seen_ms never advances. Fail loudly now rather than hand
+  // the caller a runtime_id that dies under them.
+  if (registered && !connected) {
+    return {
+      ok: false,
+      opened: true,
+      tab_id: tabId,
+      runtime_id: readyItem?.runtime_id || null,
+      runtime_key: runtimeKeyForTab(tabId),
+      authorization_id: authorizationId,
+      url: tab.url || url,
+      ready: Boolean(readyItem),
+      registered,
+      connected,
+      error: {
+        code: "runtime_registered_but_not_connected",
+        message:
+          "The tab was claimed and registered, but its content script never connected to the bridge transport, so it will never heartbeat and the bridge will reap it as stale.",
+        recoverable: true,
+        next_step: "Reload the tab, or re-claim it; then verify the runtime appears in actions-json://bridge/runtimes and its last_seen_ms advances.",
+        cause: connectError,
+      },
+    };
   }
 
   return {
@@ -1383,6 +1574,7 @@ const openClaimedTab = async (message = {}) => {
     url: tab.url || url,
     ready: Boolean(readyItem),
     registered,
+    connected,
   };
 };
 
@@ -1409,6 +1601,15 @@ const closeClaimedTab = async (message = {}) => {
     session.activeTabId = remaining.length ? Number(remaining[0]) : null;
   }
   await sessionStore.save();
+  // Reap the runtime on the bridge NOW, BEFORE we wipe the routes. The route map
+  // is the ONLY tabId -> runtime_id lookup, so forgetting it first makes the
+  // onRemoved reap a silent no-op and the bridge keeps advertising the dead tab
+  // until the TTL sweep ages it out ~30s later (live-caught 2026-07-09 on ext
+  // 0.1.187: browser.close_tab did not reap instantly). Emit here rather than
+  // relying on onRemoved, because THIS path clears the routes synchronously.
+  for (const runtimeId of runtimeIdsForTab(tabId)) {
+    sendBridgeItem({ type: "runtime_removed", runtime_id: runtimeId });
+  }
   forgetRuntimeRoutesForTab(tabId);
   await chrome.tabs.remove(tabId).catch(() => {});
 
@@ -1571,6 +1772,14 @@ if (chrome.tabs?.onRemoved?.addListener) {
             }
             changed = true;
           }
+        }
+        // Tell the bridge to reap this tab's runtime NOW, while our WS stays
+        // open — a single tab closing does not tear down the connection, so
+        // without this the bridge keeps advertising a dead runtime (the
+        // drag-504 lying-liveness gap). Emit before forgetting the routes, so
+        // we still know which runtime_id(s) mapped to the closed tab.
+        for (const runtimeId of runtimeIdsForTab(tabId)) {
+          sendBridgeItem({ type: "runtime_removed", runtime_id: runtimeId });
         }
         // Always drop the local routes for a removed tab, even if it wasn't in
         // session.tabs — otherwise bridgeRuntimeRoutes leaks stale entries for
@@ -2636,14 +2845,19 @@ const handleBridgeStateProjectionCall = async (item) => {
   };
   const tabId = resolveBridgeItemTabId(item);
   if (!Number.isInteger(tabId)) {
-    fail("no_claimed_tab", "Bridge state projection call could not be routed to a claimed tab.");
+    fail("claim_missing", "Bridge state projection call could not be routed to a claimed tab.", {
+      next_step: ROUTE_ERROR_NEXT_STEP.claim_missing,
+    });
     return;
   }
   let tab = null;
   try {
     tab = await chrome.tabs.get(tabId);
   } catch (_error) {
-    fail("no_claimed_tab", "Bridge state projection call routed to a tab that no longer exists.", { tab_id: tabId });
+    fail("tab_closed", "Bridge state projection call routed to a tab that no longer exists.", {
+      tab_id: tabId,
+      next_step: ROUTE_ERROR_NEXT_STEP.tab_closed,
+    });
     return;
   }
   const result = await executeBridgeStateProjectionItem(item, tab);
@@ -2722,14 +2936,19 @@ const handleBridgeSiteActionCall = async (item) => {
   };
   const tabId = resolveBridgeItemTabId(item);
   if (!Number.isInteger(tabId)) {
-    fail("no_claimed_tab", "Bridge site action call could not be routed to a claimed tab.");
+    fail("claim_missing", "Bridge site action call could not be routed to a claimed tab.", {
+      next_step: ROUTE_ERROR_NEXT_STEP.claim_missing,
+    });
     return;
   }
   let tab = null;
   try {
     tab = await chrome.tabs.get(tabId);
   } catch (_error) {
-    fail("no_claimed_tab", "Bridge site action call routed to a tab that no longer exists.", { tab_id: tabId });
+    fail("tab_closed", "Bridge site action call routed to a tab that no longer exists.", {
+      tab_id: tabId,
+      next_step: ROUTE_ERROR_NEXT_STEP.tab_closed,
+    });
     return;
   }
   const result = await executeBridgeSiteActionItem(item, tab);
@@ -3371,15 +3590,58 @@ const executeSiteActionCallInTab = async (tab, { bundle, args, call }) => {
       input: resolved.workflow.input,
       ...(knownPrimitives ? { limits: { knownPrimitives } } : {}),
       executePrimitive: async (primitiveCall) => {
-        const primitiveResult = await executePrimitiveInTab(tab, {
-          ...call,
+        // A workflow step must reach the same handler a direct bridge call would.
+        // The a11y primitives and the trusted-CDP paths live in THIS worker (it
+        // owns chrome.debugger); forwarding them to content.js executeAction
+        // throws "No handler implemented". Route on the SAME predicate the
+        // direct-bridge path uses at bridgeItemNeedsBackground — never a second
+        // list, which would drift out of step with it.
+        const primitiveItem = {
+          type: "action_call",
           name: primitiveCall.name,
           arguments: primitiveCall.arguments,
-        });
+        };
+        const primitiveResult = bridgeItemNeedsBackground(primitiveItem)
+          ? await executeBackgroundHostedToolCall(
+              { name: primitiveCall.name, call_id: call.call_id, arguments: primitiveCall.arguments },
+              tab?.id,
+            )
+          : await executePrimitiveInTab(tab, {
+              ...call,
+              name: primitiveCall.name,
+              arguments: primitiveCall.arguments,
+            });
         if (primitiveResult?.ok === false) {
           return primitiveResult;
         }
-        return primitiveResult?.output || primitiveResult;
+        // Unwrap to the TRUE payload, then hand the engine an explicit {ok, output}
+        // so normalizeStepResult never has to guess.
+        //
+        // There are two envelopes, and only content-script results wear the second:
+        //   transport (both branches):  { ok, call_id, output, error }
+        //   adapter   (in-tab only):    output = { adapter, ok, primitive, value: <payload> }
+        // A background primitive's payload sits directly in `output`.
+        //
+        // Get this wrong in either direction and a gate silently reads undefined:
+        //   - unwrap too little -> a content-script gate sees output.value.clickable_center
+        //     instead of output.clickable_center (broke `verifyBoardBeforeSearch` in 0.1.192);
+        //   - unwrap too much / leave it bare -> normalizeStepResult's `value` heuristic
+        //     fires on a11y.query's payload, whose `value` is the node's accessible value
+        //     (null for a link), and steps.<id>.output becomes that null (0.1.191 and older).
+        let payload = primitiveResult;
+        if (payload && typeof payload === "object" && Object.hasOwn(payload, "output")) {
+          payload = payload.output;
+        }
+        if (
+          payload &&
+          typeof payload === "object" &&
+          Object.hasOwn(payload, "value") &&
+          Object.hasOwn(payload, "primitive")
+        ) {
+          // The adapter envelope always names the primitive it ran; a bare payload never does.
+          payload = payload.value;
+        }
+        return { ok: true, output: payload };
       },
     });
     let postconditionResult = null;
@@ -3807,7 +4069,7 @@ const sendExistingAgentOffscreenCommand = async (message) => {
 
 const disconnectedAgentSessionState = () => ({
   status: "disconnected",
-  model: "gpt-realtime-2",
+  model: DEFAULT_MODEL,
   error: null,
   inputMuted: false,
   outputMuted: false,
@@ -3816,7 +4078,7 @@ const disconnectedAgentSessionState = () => ({
 
 const stoppedAgentSessionState = () => ({
   status: "stopped",
-  model: "gpt-realtime-2",
+  model: DEFAULT_MODEL,
   error: null,
   inputMuted: false,
   outputMuted: false,
@@ -4536,9 +4798,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({
         ok: false,
         error: {
-          code: "no_claimed_tab",
+          code: "claim_missing",
           message: "Bridge state projection call requires a content-script sender tab.",
           recoverable: true,
+          next_step: ROUTE_ERROR_NEXT_STEP.claim_missing,
         },
       });
       return true;
@@ -4562,9 +4825,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({
         ok: false,
         error: {
-          code: "no_claimed_tab",
+          code: "claim_missing",
           message: "Bridge site action call requires a content-script sender tab.",
           recoverable: true,
+          next_step: ROUTE_ERROR_NEXT_STEP.claim_missing,
         },
       });
       return true;

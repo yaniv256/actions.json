@@ -10,6 +10,10 @@ import { loadPipelineTarget } from "./storage-loader.mjs";
 
 const COMMANDS = new Set(["audit", "score", "package", "promotion-prep"]);
 
+// The audit emits only "medium" and "high" today. "low" and "critical" are ranked so that
+// --fail-on keeps working if the vocabulary grows, without a second place to update.
+const SEVERITY_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
+
 export async function runCli(argv = []) {
   const { command, target, options } = parseArgs(argv);
   const context = await loadPipelineTarget(target);
@@ -17,6 +21,26 @@ export async function runCli(argv = []) {
     const ledger = await loadAcceptedGapLedger(context.siteFolder, options.ledger);
     const report = runAudit(context, { ledger });
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    // Without --fail-on this reported findings and exited 0 — on a map whose only step was a
+    // destructive broad-selector click, as much as on a clean one. A check that cannot fail is
+    // not a check; it is a report with an opinion. The flag is OPT-IN because the corpus carries
+    // real findings today and a default-fail would break every existing workflow — and a gate you
+    // must disable to get work done is a gate that stays disabled.
+    if (options.failOn) {
+      const threshold = SEVERITY_RANK[options.failOn];
+      if (threshold === undefined) {
+        throw new Error(`--fail-on expects one of ${Object.keys(SEVERITY_RANK).join(", ")}`);
+      }
+      const blocking = (report.findings || []).filter(
+        (finding) => finding.status !== "accepted" && (SEVERITY_RANK[finding.severity] ?? 0) >= threshold,
+      );
+      if (blocking.length > 0) {
+        process.stderr.write(
+          `audit: ${blocking.length} finding(s) at or above severity "${options.failOn}"\n`,
+        );
+        process.exitCode = 1;
+      }
+    }
     return;
   }
   if (command === "score") {
@@ -76,6 +100,9 @@ export function parseArgs(argv = []) {
     const arg = rest[index];
     if (arg === "--ledger") {
       options.ledger = rest[index + 1];
+      index += 1;
+    } else if (arg === "--fail-on") {
+      options.failOn = rest[index + 1];
       index += 1;
     } else if (arg === "--audit") {
       options.audit = rest[index + 1];

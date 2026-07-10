@@ -691,7 +691,19 @@ test("settle_after delay waits before the next step", async () => {
   assert.equal(result.steps.find((step) => step.id === "act").settle.mode, "delay");
 });
 
-test("settle_after locator timeout is non-fatal and execution proceeds", async () => {
+// A settle_after is the author saying "this step is not finished until X is on the page."
+// If X never arrives, the step did not finish. Before 6a3903f the timeout was recorded into
+// the step summary and discarded, so the workflow marched past a surface that never appeared
+// and every later failure was reported at the wrong step.
+//
+// That is not a cosmetic reporting bug. It is the entry condition for a WRONG MUTATION.
+// Measured on live Trello 2026-07-09: trello.card.delete's `clickArchive` waits for the
+// archive popover; when that settle times out silently, `findDeleteButton` (on_error:
+// "continue") resolves its then-unscoped locator to the card's *Delete checklist* button,
+// and `clickDelete` (on_error: null) clicks it. The checklist is destroyed, the card
+// survives, and verifyCardGone does not object. The map-side locator scoping is the other
+// half of that fix (storage.public 3df593b); this test guards the engine half.
+test("settle_after locator timeout FAILS its step and halts the workflow", async () => {
   const primitiveCalls = [];
   const result = await executeWorkflowAction({
     actionName: "settle.timeout",
@@ -704,6 +716,53 @@ test("settle_after locator timeout is non-fatal and execution proceeds", async (
           id: "openCard",
           primitive: "pointer.click",
           args: {},
+          settle_after: { locator: { selector: "#never" }, timeout_ms: 10 },
+        },
+        { id: "next", primitive: "locator.element_info", args: {} },
+      ],
+      output: "{% steps.next.output %}",
+    },
+    async executePrimitive(call) {
+      primitiveCalls.push(call.name);
+      if (call.name === "locator.wait_for") {
+        return { ok: false, error: { code: "timeout", message: "no match" } };
+      }
+      return { ok: true, output: { done: true } };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  // The outer code is the generic step failure; `workflow_settle_timeout` is the CAUSE.
+  // Assert both: the outer code is what callers switch on, and the cause is the diagnostic
+  // that tells an agent the step's surface never appeared rather than its click missing.
+  assert.equal(result.error.code, "workflow_step_failed");
+  assert.equal(result.error.step_id, "openCard");
+  assert.equal(result.error.cause.code, "workflow_settle_timeout");
+  assert.equal(result.error.cause.cause.reason, "timeout");
+  assert.equal(result.error.retryable, false);
+  // The step after the failed settle must NOT run — that marching-on is the whole defect.
+  assert.deepEqual(primitiveCalls, ["pointer.click", "locator.wait_for"]);
+  const openStep = result.steps.find((step) => step.id === "openCard");
+  assert.equal(openStep.settle.ok, false);
+  assert.equal(openStep.settle.reason, "timeout");
+});
+
+// The escape hatch is explicit, not implicit. An author who genuinely wants an advisory
+// settle says so, and then the old behavior is exactly what they get.
+test("settle_after timeout stays advisory when the author opts out with on_error: continue", async () => {
+  const primitiveCalls = [];
+  const result = await executeWorkflowAction({
+    actionName: "settle.timeout.opted-out",
+    input: {},
+    workflow: {
+      version: 1,
+      expression_language: "jsonata",
+      steps: [
+        {
+          id: "openCard",
+          primitive: "pointer.click",
+          args: {},
+          on_error: "continue",
           settle_after: { locator: { selector: "#never" }, timeout_ms: 10 },
         },
         { id: "next", primitive: "locator.element_info", args: {} },

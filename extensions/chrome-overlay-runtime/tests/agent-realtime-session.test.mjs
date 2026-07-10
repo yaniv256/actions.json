@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { saveOpenAiApiKey } from "../src/agent/credential-store.mjs";
-import { HostedRealtimeSessionManager } from "../src/agent/realtime-session-manager.mjs";
+import { DEFAULT_MODEL, HostedRealtimeSessionManager } from "../src/agent/realtime-session-manager.mjs";
 import {
   getAgentSessionLog,
   recordAgentMemoryEvent,
@@ -96,7 +96,7 @@ test("hosted realtime session fails closed when no OpenAI key is configured", as
   assert.deepEqual(transportFactory.calls, []);
   assert.deepEqual(manager.getState(), {
     status: "error",
-    model: "gpt-realtime-2",
+    model: DEFAULT_MODEL,
     error: "OpenAI API key is required",
     inputMuted: true,
     outputMuted: true,
@@ -106,7 +106,7 @@ test("hosted realtime session fails closed when no OpenAI key is configured", as
   });
 });
 
-test("hosted realtime session starts gpt-realtime-2 with a fake transport and redacted public state", async () => {
+test("hosted realtime session starts the default model with a fake transport and redacted public state", async () => {
   const storage = createStorage();
   await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
   const transportFactory = createFakeTransportFactory();
@@ -116,7 +116,7 @@ test("hosted realtime session starts gpt-realtime-2 with a fake transport and re
 
   assert.deepEqual(state, {
     status: "connected",
-    model: "gpt-realtime-2",
+    model: DEFAULT_MODEL,
     error: null,
     inputMuted: true,
     outputMuted: true,
@@ -125,13 +125,13 @@ test("hosted realtime session starts gpt-realtime-2 with a fake transport and re
     activeResponseId: null,
   });
   assert.equal(transportFactory.calls[0][0], "create");
-  assert.equal(transportFactory.calls[0][1].model, "gpt-realtime-2");
+  assert.equal(transportFactory.calls[0][1].model, DEFAULT_MODEL);
   assert.equal(transportFactory.calls[0][1].apiKey, "sk-proj-session-secret-value-123456");
   const publicState = await manager.getPublicState();
   assert.equal(JSON.stringify(publicState).includes("session-secret"), false);
   assert.deepEqual(publicState, {
     status: "connected",
-    model: "gpt-realtime-2",
+    model: DEFAULT_MODEL,
     error: null,
     inputMuted: true,
     outputMuted: true,
@@ -148,7 +148,7 @@ test("hosted realtime session starts gpt-realtime-2 with a fake transport and re
   assert.equal(sentEvents.length, 2);
   assert.equal(sentEvents[0].type, "session.update");
   assert.equal(sentEvents[0].session.type, "realtime");
-  assert.equal(sentEvents[0].session.model, "gpt-realtime-2");
+  assert.equal(sentEvents[0].session.model, DEFAULT_MODEL);
   assert.equal(sentEvents[0].session.modalities, undefined);
   assert.deepEqual(sentEvents[0].session.output_modalities, ["text"]);
   assert.match(sentEvents[0].session.instructions, /actions\.json/);
@@ -369,7 +369,7 @@ test("hosted realtime session stop closes the active transport and clears transi
   assert.equal(transportFactory.transports[0].closed, true);
   assert.deepEqual(state, {
     status: "stopped",
-    model: "gpt-realtime-2",
+    model: DEFAULT_MODEL,
     error: null,
     inputMuted: false,
     outputMuted: false,
@@ -1225,7 +1225,7 @@ test("hosted realtime session records delivery failure and skips follow-up respo
 
   assert.deepEqual(manager.getState(), {
     status: "error",
-    model: "gpt-realtime-2",
+    model: DEFAULT_MODEL,
     error: "Realtime data channel is not open: closed",
     inputMuted: true,
     outputMuted: true,

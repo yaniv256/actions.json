@@ -1,3 +1,5 @@
+import { DEFAULT_MODEL } from "./agent/realtime-model.mjs";
+
 const statusEl = document.getElementById("status");
 const voiceStateEl = document.getElementById("voiceState");
 const startVoiceEl = document.getElementById("startVoice");
@@ -41,7 +43,7 @@ const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:17345/extension";
 
 let currentVoiceState = {
   status: "disconnected",
-  model: "gpt-realtime-2",
+  model: DEFAULT_MODEL,
   error: null,
   inputMuted: false,
 };

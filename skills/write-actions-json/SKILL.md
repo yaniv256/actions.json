@@ -130,6 +130,49 @@ no eyes — clear names, announced state, reversible-by-default, discoverable,
 serial-order-friendly.** See [[accessibility-is-for-blind-agents]]. Sources: WCAG
 POUR + screen-reader UX practice; Nielsen's 10 usability heuristics.
 
+### The MCP tool/status/error surface is ALSO UX-for-a-blind-agent — hold it to the same laws
+
+The blind agent does not only read your *maps*. It reads the **MCP's own runtime,
+status, and error output** to decide *which runtime to route to, whether it is
+alive, and what a failure means* — and that output is a user interface just as
+much as an `actions.site list` is. The recurring, expensive class of "operated
+against the wrong / dead runtime, then mis-diagnosed the failure" (incidents #106,
+#163, the trello-drag-504 dead-tab wedge) traces to treating that surface as mere
+plumbing instead of UX. **When you design or review the bridge/runtime/status
+output, apply every principle above to it.** Concretely:
+
+- **Announce liveness as ground truth, never a proxy.** A runtime's "connected"
+  must reflect *does its tab actually exist / has it heartbeated within a TTL*,
+  probed against reality — not "a WebSocket is open" or "the map is non-empty."
+  A status field derived from a convenient proxy that diverges from the truth is
+  the accessibility sin of *announcing a state you never verified*. Reap or
+  mark-dead so a dead runtime never appears selectable.
+- **One identity the consumer routes by.** Do not expose two id spaces
+  (`runtime_id` vs `runtime_key` vs a per-instance `chrome-tab:` key) and make the
+  agent reconcile them. Present ONE authoritative "your live runtimes" view, keyed
+  by the SAME id every call accepts, and label each with the human-meaningful
+  `url` / `title` / **host-or-browser** (so "which of my two Chromes" is never
+  ambiguous). Prefer intent-based routing ("the Trello board runtime") over
+  hand-picked ids.
+- **Error codes name the distinguishable CAUSE + the recovery.** Never collapse
+  "tab closed" / "never claimed" / "mis-routed" / "dispatch timed out" into one
+  opaque token (`no_claimed_tab`). Each names a different next action; conflating
+  them makes every failure read as the scariest one. Carry a `next_step`.
+- **No vestigial signals.** A field that is serialized but never populated
+  (`claimed_at_ms` always null) is *worse than absent* — it invites a false
+  inference (it anchored an entire wrong diagnosis once). Populate it or delete it.
+- **The same "verify by ground truth, not the surface you emit" rule you apply to
+  edits applies to the STATUS surface:** when the status output and reality can
+  disagree (a `connected:true` on a closed tab), the consumer will trust the
+  surface — so the surface must not be able to lie. This is the runtime-layer
+  twin of the projection/screenshot verification discipline.
+
+The rule to carry: **every surface the blind agent reads — the maps AND the MCP's
+own tool/status/error output — obeys the same UX laws. If operating the tool
+requires the agent to compensate for a misleading surface, the surface is the
+defect, not the agent.** (Learned: investigations/trello-drag-504-claim-loss-wedge;
+see [[mcp-is-my-ui-blame-the-interface]].)
+
 ## Mental Model
 
 The project has three cooperating pieces:
@@ -1042,10 +1085,34 @@ Verified engine-contract facts to author against, not guess at:
   before it.
 - `args` is optional. A no-argument primitive step (for example
   `overlay.menu.hide`) is valid with no `args` key.
-- `settle_after` waits for a locator or delay after a step but its timeout is
-  non-fatal — it does not, by itself, make the step fail. Do not rely on it as a
-  postcondition; add an explicit verification step whose own success encodes the
-  result.
+- `settle_after` waits for a locator or delay after a step, and **a locator that
+  never resolves FAILS the step** (`workflow_step_failed`, with
+  `cause.code: "workflow_settle_timeout"`), halting the workflow — unless the
+  author explicitly opts out with `on_error: "continue"` on that step. Changed
+  2026-07-09; it used to be silently advisory.
+  **A `settle_after` is you saying "this step is not finished until X is on the
+  page."** And X must be a surface **THIS step** created — the composer closing,
+  the popover opening. **Surface readiness never depends on the caller's data.** A
+  `settle_after` whose locator interpolates an input (`text_contains:
+  "{% input.title %}"`) is not asserting readiness; it is re-asserting the
+  workflow's GOAL, which a later verify step already owns. Since a timed-out
+  settle is FATAL, a goal-assertion there turns a workflow that SUCCEEDED into a
+  loud false failure — and on any list that scrolls, the target is off-screen, so
+  it fails *every* time. That is not hypothetical: `trello.card.create` and
+  `trello.board.list.create` did exactly this, reported `ok:false` on every
+  success, and cost a day of investigation into a wedge that does not exist.
+  The audit now gates it (`settle_after_asserts_goal_not_surface`); the prose
+  above had been right since the first draft and stopped nobody. If X never arrives, the step did not finish, and marching on is how a
+  workflow ends up acting on a surface that never appeared. That is not a
+  reporting nicety: on live Trello it was the entry condition for a **wrong
+  mutation** — `trello.card.delete`'s archive-popover settle timed out silently,
+  and the next step's under-scoped locator then resolved to the card's *Delete
+  checklist* button, which the following step clicked. The checklist was
+  destroyed, the card survived, and the tool reported success.
+  It is therefore a **real postcondition for the step's surface**, and a good
+  one. It is still **not** a postcondition for the step's *effect* — that the
+  composer opened does not prove the card was created. Keep an explicit
+  verification step whose own success encodes the result.
 - **When a step needs a real inter-operation DWELL** (let an animated menu open,
   a search widget register, a dialog blur before the next key), use the
   `settle_after: { "delay_ms": N }` FIELD on that step — it is a genuine timed
@@ -1061,6 +1128,13 @@ Verified engine-contract facts to author against, not guess at:
   Choose the `retry_until` predicate to match the axis of progress you are making
   (`candidate_count > 0` to prove an element is merely present;
   `clickable_center.x != null` to prove it is on-screen and clickable).
+  **A retry loop is armed by `on_error: "continue"`.** An attempt whose primitive
+  errors aborts the workflow on attempt 1 unless `on_error` is `"continue"` — and
+  `locator.element_info` errors on exactly what you retry for (`target_not_found`,
+  `target_not_actionable`). Exhausting `max_attempts` raises
+  `workflow_retry_exhausted`, which hard-fails the workflow *ignoring* `on_error`,
+  so `"continue"` here is strict, not lax. See *A Step That Cannot Fail Is Not A
+  Check*.
 - For `viewport.scroll`, the scope element must pass `isElementVisible`; the
   engine then walks from it to the nearest scrollable ancestor whose axis matches
   your non-zero delta. Scope to a *visible* container, never to an off-screen
@@ -1110,6 +1184,17 @@ popover needs a popover projection; a modal editor needs an editor projection.
 If the agent can open a state but cannot inspect it structurally, the map is
 not complete for that state.
 
+State-specific projections must have a real state anchor and fail fast when
+that state is not mounted. Never add a broad fallback such as `body`, `main`, or
+`[role='dialog']` to a projection whose meaning depends on a specific view,
+popover, editor, or mode. A Calendar projection scoped to
+`[data-testid='calendar-wrapper'], body` is worse than no projection: on Board
+view it will happily return ordinary card links and let the agent "validate"
+Calendar without ever entering Calendar. The projection's first selector is the
+precondition; if the Calendar wrapper, popover, editor, or modal is absent, the
+read should return `scope not found`, `complete:false`, or an explicit
+`wrong_state` result, not silently widen its scope.
+
 This is the replacement for screenshot-driven operation. Screenshots are useful
 evidence during authoring, but they are token-heavy and visually ambiguous.
 The finished map should let the hosted agent orient itself with compact JSON:
@@ -1152,7 +1237,10 @@ Author state coverage alongside navigation:
 2. For each mutating action, name the projection that proves the postcondition.
 3. For each nested surface opened by an action, add a matching projection before
    declaring the action reliable.
-4. Include coverage metadata when the page virtualizes or collapses data:
+4. For each projection, name the state anchor that proves the intended surface
+   is actually mounted. Do not include a broad fallback scope that can return
+   plausible data from the wrong state.
+5. Include coverage metadata when the page virtualizes or collapses data:
    `complete: true/false`, visible item counts, expected counts when visible,
    and a clear `truncation_reason` instead of silently returning partial state.
    If the page hides completed rows, filters items, or virtualizes long lists,
@@ -1161,7 +1249,7 @@ Author state coverage alongside navigation:
    rows must expose the visible count, known total/progress when available, the
    filter/collapse state, and a next action for revealing or scrolling more
    rows.
-5. Prefer several focused projections over one giant raw text dump. The goal is
+6. Prefer several focused projections over one giant raw text dump. The goal is
    low-token situational awareness at every step of navigation.
 
 Use the standard stack:
@@ -1700,6 +1788,70 @@ nested scrollers when scoping that scroll: a combined selector list resolves in
 document order, so `"[role='dialog'] main, [role='dialog']"` scopes to the
 outer dialog, not `main` — scope to the actual scrolled container only.
 
+### Measurement Tools Are A Locus Of Suspicion (validate the instrument before you trust the experiment)
+
+Almost everything you author in a map is a **measurement tool**: a `settle_after`,
+a `retry_until` predicate, a verify step, a `verified:` output flag, a state
+projection, a `match_count`, an audit rule, a test, a screenshot, `ok: true`.
+None of them are the world. Each is a *claim about* the world made by code you
+wrote, seen through a locator that can be wrong.
+
+**An unvalidated measurement tool does not merely fail to find bugs. It invents
+them.** A false green ships a bug — bounded, one bug. A false red *manufactures*
+one, and investigating it feels virtuous, so you will spend real days on a
+phenomenon that was never there. (2026-07-09: a `settle_after` on
+`trello.card.create` asserted the workflow's *goal* through a visibility-filtered
+locator, on a card that lands off-screen. It reported `ok:false` on every success.
+Reading its output as evidence cost a full day, eleven hypotheses, and two elegant
+mechanisms committed and retracted, for a wedge that does not exist.)
+
+**Why this compounds, and why it is the whole game.** Capability rests on
+measurement, and every new instrument is built and validated *using older
+instruments*. That is a ladder, and a rotten rung does not stay local: the audit
+rule you write to police `settle_after`s inherits whatever `settle_after` taught
+you "correct" means; the eval that scores the audit inherits both. A bad
+measurement tool's capacity to spread confusion is unbounded, because you will
+keep building on top of it. So an instrument is not a means to the work — for as
+long as you are building it, **it is the work**, and it earns paranoia that a
+mere bug never does.
+
+**Ordering, which is the counter-intuitive part.** Validating an instrument
+outranks fixing a bug. Not "write more instruments" — write *and extensively
+validate* the ones you write, before they pass into the system. A bug costs you
+the bug. A bad instrument taxes every measurement you will ever take through it,
+and you will not be able to tell which of its outputs to believe.
+
+**How to calibrate. There is only one method:**
+
+1. **Known-answer test, in BOTH directions, against the real corpus.** Point the
+   instrument at input you *know* is broken: it must fire, and name the right
+   thing. Point it at input you *know* is good: it must stay silent. Synthetic
+   unit fixtures are not sufficient — false positives live in real data.
+2. **Triangulate: validate against *several* independent instruments, never one.**
+   Truth is direction-invariant — it reads the same no matter which way you
+   measure it. So when two instruments disagree, one of them is lying, and you
+   have *localized* the liar. One corroborating instrument only tells you two
+   things agree, which a shared assumption also produces. Validate a DOM read
+   against a screenshot *and* the app's own state; validate a workflow's report
+   against the site's ground truth *and* a projection.
+3. **Prove the instrument can fire at all before you read a zero from it.** A
+   null result must first demonstrate its own premise. (A `ResizeObserver`
+   fixture that grew an element by `+0.0001px` hit a pixel-snapping fixed point;
+   the loop it existed to reproduce never started, and its silence was one step
+   from being filed as a refutation.)
+4. **Prefer a check derived from a PRINCIPLE over one derived from a PATTERN.**
+   *"Surface readiness never depends on the caller's data"* → 3 fires, 3 true.
+   *"A later step resolves the same locator"* → 14 fires, 2 true, and it would
+   have deleted the very settles guarding the wrong-mutation family. Precision
+   comes free from the principle; a pattern only correlates with it.
+5. **For anything that prompts an edit, false positives are worse than false
+   negatives.** A missed finding leaves the code as it was. A false finding
+   makes you break working code with confidence.
+
+The corollary rules below — bind the postcondition to the target's identity, and
+never ship a step that cannot fail — are two specific instruments this discipline
+is aimed at. Read them as instances, not as separate gotchas.
+
 ### Postconditions Must Assert The Specific Result, Not "Something Happened"
 
 A mutating action that opens or selects a specific object must verify that **the
@@ -1716,8 +1868,11 @@ Two traps seen together on the same action:
 - **Stale-object match.** If a previous object of the same kind is still open, a
   selector like `[data-testid='card-back-name']` matches the *old* one and the
   check passes for the wrong target. Always start the action from a known base
-  state (for example, press Escape and `settle_after` the prior modal becoming
-  `hidden`) so a leftover object cannot satisfy the check.
+  state so a leftover object cannot satisfy the check — press Escape, then assert
+  the prior modal is gone with a `dom.observe.visible` + `match_count = 0` retry
+  (see *A Step That Cannot Fail Is Not A Check*). Do **not** reach for
+  `settle_after` / `wait_for` with `state: "hidden"`: that state is not
+  implemented and the wait resolves on the element being *visible*.
 
 Write the postcondition to bind the target identity. Prefer a title/text-scoped
 locator (`[data-testid='card-back-name']` with `text_contains: "{% input.title
@@ -1735,6 +1890,86 @@ exact title, source URL or provenance marker when relevant, and expected
 container when placement matters. If the projection is spatially partial, either
 scroll/read until the target appears or use a title-scoped verification action
 that navigates to the target; otherwise report verification as incomplete.
+
+### A Step That Cannot Fail Is Not A Check — Three Ways A Workflow Silently Does Nothing
+
+Ambiguous anchors and weak postconditions (the two rules above) are *not* the
+only ways a workflow reports success without mutating. Three more come straight
+from the engine's contract, and every one of them has shipped in a mature map.
+Audit every step by asking **"what fails if this is wrong?"** If the answer is
+"nothing," the step is documentation, not a check.
+
+**1. Never gate a REQUIRED mutation on its own target.** `when` expresses *a
+branch you are willing not to take*. The moment you write
+
+```json
+{ "id": "clickSave", "primitive": "pointer.click",
+  "args": { "x": "{% steps.findSave.output.clickable_center.x %}", ... },
+  "when": "{% $exists(steps.findSave.output.clickable_center.x) %}" }
+```
+
+you have said "if Save isn't clickable, skip saving and call it a success." A
+matched-but-unclickable control now silently no-ops while the workflow returns
+ok. Real: `trello.card.description.set` typed a new description, skipped Save,
+and reported success — the API showed the description unchanged. If the step
+*must* run for the action to mean anything, its target's absence is a **failure**,
+not a branch: drop the `when` and set `on_error: "stop"`.
+
+The tell is self-reference: the `when` names the same step that supplies the
+click's own `x`/`y`. Guards on a *different* element are fine and often
+necessary — an inverted idempotency check (`$exists(x) ? false : true`, "click
+*Add list* only if the composer isn't already open") or a precondition on a
+container (`planner.close` gating on the planner *panel*, not on its own toggle).
+
+**2. `retry_until` is armed by `on_error: "continue"` — the opposite of
+intuition.** Inside a retry loop, an attempt whose primitive *errors* aborts the
+whole workflow immediately unless `on_error` is `"continue"`. And
+`locator.element_info` errors precisely on the states you are retrying for —
+`target_not_found` (no match) and `target_not_actionable` (matched, not
+clickable). So `retry_until` + `on_error: "stop"` means **"abort on attempt 1"**:
+the ladder never runs. Meanwhile, exhausting `max_attempts` raises
+`workflow_retry_exhausted`, which fails the workflow **ignoring `on_error`** and
+cannot be swallowed. Therefore `on_error: "continue"` inside a `retry_until` loop
+is the *strict* combination — it lets the loop run, and exhaustion still hard-fails:
+
+```json
+{ "id": "findSave", "primitive": "locator.element_info",
+  "args": { "locator": { "selector": "[data-testid='description-save-button']" } },
+  "retry_until": "{% $exists(steps.findSave.output.clickable_center.x) %}",
+  "max_attempts": 4,
+  "after_each": { "primitive": "locator.wait_for", "args": { "locator": { ... }, "state": "visible", "timeout_ms": 1500 } },
+  "on_error": "continue" }
+```
+
+Authors copy a working ladder's *shape* and change `on_error`, silently disarming
+it. Audited on the public Trello map: **31 of 48** self-referential `retry_until`
+steps could never retry.
+
+**3. Assert ABSENCE with `dom.observe.visible`, never `wait_for` or
+`element_info`.** There is exactly one absence sensor in the dictionary:
+
+- `locator.wait_for` **ignores `state: "hidden"`** — it returns success only when
+  the element *is* found. A `state: "hidden"` wait succeeds while the element is
+  visible and times out once it is gone. Exactly inverted; do not use it, and do
+  not use it in `settle_after` either.
+- `locator.element_info` **errors** on absence, so it cannot observe absence. With
+  `on_error: "continue"` it reports nothing; without it, it aborts.
+- `dom.observe.visible` returns success with `{ matches: [], match_count: 0 }` and
+  never errors on no-match. That is the sensor:
+
+```json
+{ "id": "verifyCardGone", "primitive": "dom.observe.visible",
+  "args": { "selector": "[data-testid='card-back-name']" },
+  "retry_until": "{% steps.verifyCardGone.output.match_count = 0 %}",
+  "max_attempts": 4, "on_error": "continue" }
+```
+
+Exhaustion hard-fails, so this *positively asserts* the card is gone. The broken
+form it replaces — a `verify*Gone` step that is an `element_info` presence read
+with `on_error: "continue"` — reports success whether the object was deleted (the
+error is swallowed) **or** still there (the read succeeds). It cannot distinguish
+the two in either direction. That is the real defect behind "delete says it
+worked but the card is still on the board."
 
 For parameterized mutations, bind every requested parameter in the proof. A
 date action that was asked for "tomorrow at 9:00 AM" has not succeeded because
@@ -1819,13 +2054,21 @@ Result*.)
 
 **The positive style to copy** (from the same audit's clean actions): a Trello
 date-picker save binds `[data-testid='save-date-button']` and verifies via
-`button[aria-pressed='true']`; `checklist_item.add` binds `check-item-name-input`
-+ `check-item-add-button` and verifies the item text appears in the specific
-`checklist-container`; `description.set` binds `description-save-button` and
-re-reads the saved text. Every step a unique stable anchor; every mutation a real
-postcondition. When you catch yourself writing `text_contains` for a control that
-has a testid, or returning `:true` without reading the specific effect, stop —
+`button[aria-pressed='true']`. Every step a unique stable anchor; every mutation a
+real postcondition. When you catch yourself writing `text_contains` for a control
+that has a testid, or returning `:true` without reading the specific effect, stop —
 that is this anti-pattern forming.
+
+**A cautionary note about that audit.** It checked whether each mutation *had* a
+uniquely-anchored verify step, and passed anything that did. A later audit
+(2026-07-09) found that a step can hold a perfect anchor and still certify
+nothing: `description.set` bound `description-save-button` correctly, yet a
+self-referential `when` skipped the click entirely, and its `verifyDescriptionText`
+was a `locator.text_content` over the whole `[role='dialog']` with
+`on_error: "continue"` and no consumer of its output — three safeguards, all
+decorative. It was cited *here* as the positive example. Anchors and postconditions
+are necessary and not sufficient; also run the checks in the sibling rule *A Step
+That Cannot Fail Is Not A Check*.
 
 ### Verify URLs By Href, Never By Visible Text
 
@@ -2431,15 +2674,61 @@ actions.json.storage/
     public/sites/<host>/<surface>/actions.json    ← the shelf — a redacted MIRROR
 ```
 
-- **PRECEDENCE — private WINS.** The runtime loader probes `scopes/private/<host>`
-  **before** `scopes/public/<host>` (`storage-bundle.mjs relevantStorageProbePaths`).
-  So for the same host+surface, **the private map shadows/outranks the public one.**
-  An action that exists only in `public` is a **latent shadow bug** — it is
-  outranked by private and can silently vanish. (It may appear to work today only
-  because the current sync merges both scopes; do not rely on that.)
-- **WHERE TO EDIT — always the PRIVATE map.** Private is the workbench AND it's
-  what actually loads. **Never edit the public map directly.** If you're adding or
-  fixing an action, you edit `scopes/private/...`, full stop.
+- **PRECEDENCE — PRIVATE ALWAYS WINS, per NAME.** Yaniv's rule (2026-07-09):
+  *"Private always overrides public — in projections, in actions, in everything.
+  We develop on private and we share on public; public is like an older copy."*
+  The two scopes are **merged**, not shadowed: the runtime scans *every* map, and
+  only when the **same name is declared in more than one map** does precedence
+  apply — `private (0) > shared (1) > public (2) > unscoped (3)`
+  (`mcp/actions-json-mcp/src/lib.rs storage_scope_precedence_rank`, under
+  `if matches.len() > 1`). A name that exists **only** in `public` has exactly one
+  match and dispatches normally. **It is not a shadow bug.** The bookmarklet reads
+  both site directories and concatenates their entries
+  (`storage-bookmarklet.js readDirectoryIfPresent`; its `seen` set is keyed on the
+  directory prefix, so it only prevents reading the *same* directory twice).
+
+  > **KNOWN BUG — actions and projections disagree today.** The bridge ranks
+  > duplicate **action** names, but a duplicate **state_projection** name returns
+  > `409 state_projection_ambiguous` (`lib.rs:5447`) on *every* `state_read` of
+  > that name. That is a defect, not a design: under the rule above it should rank
+  > and dispatch the private one. Until it is fixed, **a private map must not
+  > re-declare a projection name that public already declares.** Guarded by
+  > `tools/actions-json-pipeline/tests/cross-scope-name-collisions.test.mjs`.
+
+- **A PRIVATE MAP IS A MINIMAL DIFF, NEVER A COPY.** Surface header
+  (`protocol`/`version`/`surface`/`requires`) plus only the tool(s) you are adding
+  or overriding. A full copy duplicates every action *and* every projection name,
+  and — because private wins — the copy becomes what actually dispatches. Measured
+  2026-07-09: nine private maps were verbatim copies; the stale, **unredacted**
+  private versions were serving real contact names while the fixed public ones lost.
+  When you need a public tool's shape as a template, read it in place.
+
+  > **Corrected 2026-07-09.** This section previously claimed the loader "probes
+  > `scopes/private/<host>` **before** `scopes/public/<host>`, so the private map
+  > shadows the public one," citing `storage-bundle.mjs relevantStorageProbePaths`.
+  > That inference read file-level precedence out of a `flatMap` ordering. The
+  > extension's copy of that function returns `rootScopeSitePaths` and **nothing
+  > reads it**; the only consumer is the bookmarklet, and it merges. No runtime
+  > implements map-level shadowing. The rule was traced to evidence **E1** in
+  > `investigations/storage-scope-model-blindspot.md`, which recorded the
+  > ordering as "High" confidence without checking a consumer — an instrument
+  > error that then propagated into this skill and nearly caused a 98-action
+  > public map to be migrated into private "for compliance."
+
+- **WHERE TO EDIT — the PRIVATE map, as *policy*, not because public silently
+  fails.** Private is the workbench: unreviewed, unredacted, safe to break. Public
+  is the reviewed shelf, and edits to it skip the redaction/approval gate. So
+  author and iterate in `scopes/private/...`, then promote. **But know why:** it is
+  a review-process rule, not a load-order rule. A public map is not inert — it is
+  live, and a careless edit to it ships live. Editing public directly is a
+  *process* violation with real consequences (an unreviewed action reaching every
+  consumer of that map), not a silent no-op.
+
+  **The exception, stated so it is not smuggled:** when a map already exists
+  *only* in public — as a mature site map typically does — a bug fix to it has no
+  private counterpart to edit. Fix it where it lives, and say so in the commit.
+  Do **not** fork 98 actions into private to satisfy a rule about where new work
+  starts.
 - **THE PROCESS — private first, then promote:**
   1. Edit the **private** map.
   2. `storage.sync` to the runtime and **validate live**.
@@ -2518,10 +2807,85 @@ Do not leave important thought-leadership content only in free-form context
 fields. If a visitor can ask about it, the agent needs a callable way to confirm
 the relevant page/section and, when useful, bring it into view.
 
+### Count The Matches Before You Ship The Locator (the gate this skill was missing)
+
+**Every rule below this line is prose you can read and then not do.** On 2026-07-09 an audit of
+a mature Trello map found six defects, and *every one* was a rule this document already stated:
+
+| defect that shipped | the rule it violated, already in this file |
+|---|---|
+| six tools bound `[data-testid='check-item-name']` — present in **zero** elements | — (no rule existed: **this one**) |
+| `trello.card.delete` bound `[role='dialog'] button` + `text_contains: "Delete"` | *The Ambiguous-Anchor Anti-Pattern* — which names this exact bug and prescribes `[data-testid='popover'] button` |
+| `checklist.read` bound `checklist-progress-bar-percentage` (0) and fell back to an **ancestor** that shadows it forever | *Bind Targets By Canonical Attributes* |
+| `#168` closed as "live-verified" on a postcondition + a REST read | *A Step That Cannot Fail Is Not A Check* |
+
+The knowledge was here. Nothing forced anyone to check. **So check.**
+
+Before a locator ships, resolve it against the live DOM and read the count:
+
+```js
+// in the authoring debugger, on the real page, in the real state
+document.querySelectorAll(SELECTOR).length
+```
+
+- **0** → the locator is fiction. `dom.observe.visible` returns `match_count: 0` **without an
+  error**, and `on_error: "continue"` swallows the rest. It will ship, run, and do nothing.
+- **1** → good. Note *which state* you were in; re-check in the state where the surface is absent.
+- **>1** → ambiguous. `text_contains` **narrows** a candidate set; it does **not scope** it. Resolve
+  by a container, not by hoping the text disambiguates.
+
+**And for anything destructive, enumerate what the locator matches in the WRONG state** — the
+state where the surface it expects is *absent*. That is where the stranger lives. Live example:
+with a Trello card open and the archive popover closed, `[role='dialog'] button` +
+`text_contains: "Delete"` resolved to exactly one element — the card's *Delete checklist* button.
+The next step clicked it. Checklist destroyed, card intact, `ok: true`.
+
+**The worst readiness bug: a `settle_after` that matches its own trigger.** It fires on every
+run, because the button you just clicked is by definition still on the page. Trello's
+`board.create` waited for `button` + `text_contains: "Create board"` after clicking a button
+whose `aria-label` is *"Create board or Workspace"* — and `resolveLocatorCandidates` searches
+`textContent + aria-label + title + value`. The settle was satisfied **before the click even
+happened**, and reported the menu open whether or not it opened.
+
+Note what this means for auditing: the collision was between the settle's literal and the
+trigger's **rendered accessible name**, which is in the DOM, not in the map. **No static check
+can find it.** Only counting the matches, live, in the state before the click, can. That is why
+the count is the gate and the audit is only the floor.
+
+Three properties, none of which a text search can establish, all of which one probe can:
+
+1. **Existence** — does the testid exist at all? (`check-item-name`: no.)
+2. **Uniqueness** — in the state the step runs in, and in the state where it does not.
+3. **Ancestry** — in a comma-list, does an earlier alternative `.contains()` a later one? Then the
+   later one is dead code forever, because a selector list resolves in **document order**, not in
+   selector order. (`[data-testid='checklist-progress-percentage'], [data-testid='checklist-container']`
+   always returned the container.)
+
+**A visibility-filtered resolver cannot see a visually-hidden element**, no matter how correct the
+selector. Trello's checklist item names live only in the `aria-label` of a 1×1 `clip:rect(1px…)`
+input: 9 in the DOM, **0** through `dom.observe.visible`. There is no CSS locator that reaches
+them. `a11y.query {role, name_contains}` does — which is why it is the **first-choice resolver**
+at the top of this document, and not a fallback.
+
 ## Verification Checklist
 
 Before calling a site map ready:
 
+- **The static audit passes as a GATE, not as a report:**
+
+  ```bash
+  node tools/actions-json-pipeline/bin/actions-json.js audit <site-folder> --fail-on medium
+  ```
+
+  Without `--fail-on` it prints findings and exits `0` — on a clean map and on a map whose only
+  step is a destructive broad-selector click alike. Run it with the flag, or you have not run a
+  check. (It catches `broad_selector`, `self_skipping_mutation`, `disarmed_retry_loop`,
+  `weak_postcondition`, `inverted_absence_check` and the rest of the silent-no-op family. It
+  cannot resolve a selector against a DOM — that is the next item, and no tool does it for you.)
+- **Every locator was resolved against the live DOM and its match count recorded** — existence,
+  uniqueness *in both the present and absent states of its surface*, and (for comma-lists) that no
+  alternative is an ancestor of another. A locator that has never been counted has never been
+  checked.
 - Existing stored actions were tried before debugger fallback.
 - Any debugger discovery was converted into `actions.json`.
 - The updated storage bundle was synced/reloaded without a bridge restart.

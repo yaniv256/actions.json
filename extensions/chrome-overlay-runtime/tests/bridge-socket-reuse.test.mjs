@@ -30,9 +30,9 @@ test("connectBackgroundBridge reuses an open socket internally before closing it
   // bridge-connect call site) so no current or future caller can re-introduce the
   // per-tab socket churn. The attach attempt must precede closeBridgeSocket().
   const body = bodyOf("const connectBackgroundBridge = async (state, options = {}) =>", 1400);
-  const attachIdx = body.indexOf("attachRuntimeToOpenBridge(");
+  const attachIdx = body.indexOf("await attachRuntimeToOpenBridge(");
   const closeIdx = body.indexOf("closeBridgeSocket()");
-  assert.ok(attachIdx >= 0, "connectBackgroundBridge must attempt attachRuntimeToOpenBridge");
+  assert.ok(attachIdx >= 0, "connectBackgroundBridge must AWAIT attachRuntimeToOpenBridge — it is async, and an un-awaited Promise is always truthy");
   assert.ok(closeIdx >= 0, "connectBackgroundBridge must still close the socket on a real rebuild");
   assert.ok(
     attachIdx < closeIdx,
@@ -49,7 +49,7 @@ test("connectBackgroundBridge does NOT reuse on a genuine reconnect attempt", ()
 });
 
 test("attachRuntimeToOpenBridge only reuses a socket that is OPEN for the same bridge URL", () => {
-  const body = bodyOf("const attachRuntimeToOpenBridge = (", 1400);
+  const body = bodyOf("const attachRuntimeToOpenBridge = async (", 1400);
   assert.ok(
     /bridgeSocket\?\.readyState !== WebSocket\.OPEN/.test(body),
     "must bail unless the shared socket is OPEN",
@@ -65,7 +65,7 @@ test("attachRuntimeToOpenBridge only reuses a socket that is OPEN for the same b
 });
 
 test("attachRuntimeToOpenBridge registers the runtime on the existing socket (no teardown)", () => {
-  const body = bodyOf("const attachRuntimeToOpenBridge = (", 1400);
+  const body = bodyOf("const attachRuntimeToOpenBridge = async (", 1400);
   assert.ok(/sendBridgeItem\(/.test(body), "must register the tab on the open socket");
   assert.ok(/rememberRuntimeRoute\(/.test(body), "must record the local route");
   assert.ok(

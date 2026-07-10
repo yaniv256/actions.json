@@ -59,7 +59,7 @@ async function installPopupHarness(page) {
               ok: true,
               state: window.__actionsJsonInitialVoiceState || {
                 status: "connected",
-                model: "gpt-realtime-2",
+                model: "gpt-realtime-2.1",
                 error: null,
                 inputMuted: false,
               },
@@ -71,18 +71,18 @@ async function installPopupHarness(page) {
           if (message.type === "actions-json:agent-session-start") {
             return {
               ok: true,
-              state: { status: "connected", model: "gpt-realtime-2", error: null, inputMuted: false },
+              state: { status: "connected", model: "gpt-realtime-2.1", error: null, inputMuted: false },
             };
           }
           if (message.type === "actions-json:agent-session-mute") {
             return {
               ok: true,
-              state: { status: "connected", model: "gpt-realtime-2", error: null, inputMuted: true },
+              state: { status: "connected", model: "gpt-realtime-2.1", error: null, inputMuted: true },
             };
           }
           return {
             ok: true,
-            state: { status: "stopped", model: "gpt-realtime-2", error: null, inputMuted: false },
+            state: { status: "stopped", model: "gpt-realtime-2.1", error: null, inputMuted: false },
           };
         },
       },
@@ -152,7 +152,7 @@ test("popup exposes direct durable voice session controls", async ({ page }) => 
   await page.addInitScript(() => {
     window.__actionsJsonInitialVoiceState = {
       status: "disconnected",
-      model: "gpt-realtime-2",
+      model: "gpt-realtime-2.1",
       error: null,
       inputMuted: false,
     };

@@ -421,7 +421,7 @@ test("background starts hosted agent through an offscreen realtime document", as
           calls.push(["runtime.sendMessage", message]);
           return {
             ok: true,
-            state: { status: "connected", model: "gpt-realtime-2", error: null },
+            state: { status: "connected", model: "gpt-realtime-2.1", error: null },
           };
         },
         onInstalled: {
@@ -477,7 +477,7 @@ test("background starts hosted agent through an offscreen realtime document", as
 
   assert.deepEqual(JSON.parse(JSON.stringify(response)), {
     ok: true,
-    state: { status: "connected", model: "gpt-realtime-2", error: null },
+    state: { status: "connected", model: "gpt-realtime-2.1", error: null },
   });
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     [
@@ -575,7 +575,7 @@ test("background fills hosted agent tools when popup starts voice with an empty 
           calls.push(["runtime.sendMessage", message]);
           return {
             ok: true,
-            state: { status: "connected", model: "gpt-realtime-2", error: null },
+            state: { status: "connected", model: "gpt-realtime-2.1", error: null },
           };
         },
         onInstalled: {
@@ -712,7 +712,7 @@ test("background merges default primitive tools into caller-provided hosted site
           calls.push(["runtime.sendMessage", message]);
           return {
             ok: true,
-            state: { status: "connected", model: "gpt-realtime-2", error: null },
+            state: { status: "connected", model: "gpt-realtime-2.1", error: null },
           };
         },
         onInstalled: {
@@ -1172,7 +1172,7 @@ test("background reports hosted agent state without creating an offscreen docume
         },
         async sendMessage(message) {
           calls.push(["runtime.sendMessage", message]);
-          return { ok: true, state: { status: "connected", model: "gpt-realtime-2", error: null } };
+          return { ok: true, state: { status: "connected", model: "gpt-realtime-2.1", error: null } };
         },
         onInstalled: {
           addListener() {},
@@ -1212,7 +1212,7 @@ test("background reports hosted agent state without creating an offscreen docume
 
   assert.deepEqual(JSON.parse(JSON.stringify(response)), {
     ok: true,
-    state: { status: "disconnected", model: "gpt-realtime-2", error: null, inputMuted: false },
+    state: { status: "disconnected", model: "gpt-realtime-2.1", error: null, inputMuted: false },
   });
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     [
@@ -1258,7 +1258,7 @@ test("background closes a durable hosted agent offscreen session without requiri
           calls.push(["runtime.sendMessage", message]);
           return {
             ok: true,
-            state: { status: "stopped", model: "gpt-realtime-2", error: null, inputMuted: false },
+            state: { status: "stopped", model: "gpt-realtime-2.1", error: null, inputMuted: false },
           };
         },
         onInstalled: {
@@ -1300,7 +1300,7 @@ test("background closes a durable hosted agent offscreen session without requiri
   assert.deepEqual(JSON.parse(JSON.stringify(response)), {
     ok: true,
     closed: true,
-    state: { status: "stopped", model: "gpt-realtime-2", error: null, inputMuted: false },
+    state: { status: "stopped", model: "gpt-realtime-2.1", error: null, inputMuted: false },
   });
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     [

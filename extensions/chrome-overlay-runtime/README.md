@@ -6,7 +6,7 @@ The extension is both:
 
 - a browser runtime that can execute `actions.json` primitives on authorized
   tabs; and
-- a hosted `gpt-realtime-2` agent surface that uses the user's OpenAI API key,
+- a hosted `gpt-realtime-2.1` agent surface that uses the user's OpenAI API key,
   uploaded storage, screenshots, and runtime tools.
 
 For user-facing setup, start with

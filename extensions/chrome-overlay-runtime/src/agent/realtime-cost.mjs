@@ -1,4 +1,4 @@
-// gpt-realtime-2 cost estimator, ported from RoomJinni
+// gpt-realtime-2.1 cost estimator, ported from RoomJinni
 // (heycode crates/b3-server/src/roomjinni.rs
 // estimated_openai_cost_cents_for_gpt_realtime_usage), reporting USD.
 // Parity with the Rust implementation is pinned by tests/realtime-cost.test.mjs
@@ -8,8 +8,8 @@
 // prices: update these, bump PRICING_VERSION, and set PRICING_CONFIRMED_ON to
 // the day you re-checked https://openai.com/api/pricing — the anti-drift test
 // fails any release whose confirmation is older than 60 days.
-export const PRICING_VERSION = "openai-gpt-realtime-2-2026-05-24";
-export const PRICING_CONFIRMED_ON = "2026-07-04";
+export const PRICING_VERSION = "openai-gpt-realtime-2.1-2026-07-09";
+export const PRICING_CONFIRMED_ON = "2026-07-09";
 export const DRAIN_INPUT_FLOOR_TOKENS = 4000;
 
 const PRICES = {

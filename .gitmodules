@@ -10,3 +10,6 @@
 [submodule "examples/actions.json.storage"]
 	path = examples/actions.json.storage
 	url = https://github.com/yaniv256/actions.json.storage.git
+[submodule "skills/agent-task-os"]
+	path = skills/agent-task-os
+	url = https://github.com/yaniv256/agent-task-os.git

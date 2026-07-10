@@ -1,0 +1,122 @@
+{
+ "_comment": [
+  "Captured live 2026-07-10 from trello.com/c/TcE3br7d, an open card modal with one",
+  "checklist (9 items, 89%). browser.extract_elements {item_selector:\"[data-testid]\"}",
+  "scoped to the card-back-name ancestor. READ-ONLY capture; no mutation.",
+  "",
+  "WHY THIS FILE EXISTS: three static-lint hypotheses for catching dead testids were",
+  "each refuted by a positive control (investigations/trello-checklist-operations-",
+  "unreliable.md). A selector string cannot say whether a testid exists, nor whether",
+  "one testid WRAPS another -- containment lives only in the rendered DOM. This is that",
+  "DOM, frozen. With it, 'does this testid exist' is a lookup instead of a guess.",
+  "",
+  "CAUTION, learned the hard way: a scoped enumeration lists DESCENDANTS of its scope.",
+  "'Absent from a scoped query' NEVER means 'does not exist'. checklist-container was",
+  "declared dead on exactly that error -- it is the PARENT of checklist-section.",
+  "",
+  "⚠️ SECOND CAUTION, learned 2026-07-10 by generalising from this very file:",
+  "This card had ONE settled checklist, so checklist-container and checklist-section",
+  "had identical text and I inferred they wrap one-to-one. THEY DO NOT.",
+  "Trello renders ONE checklist-container PER CHECKLIST. Only a HYDRATED checklist",
+  "additionally gets an inner checklist-section / checklist-title. A freshly created",
+  "one has a container and nothing else.",
+  "",
+  "So a DOM fixture answers 'does this testid exist' -- in the state captured. It cannot",
+  "answer 'does it exist in the state my workflow will encounter', nor 'how many are",
+  "there when N objects exist'. Capture the states the workflow traverses. n=1 is not",
+  "an ontology.",
+  "",
+  "⚠️ THIRD CAUTION, 2026-07-10, caught by a control before it cost anything:",
+  "DO NOT write an audit rule of the form `testid not in fixture.testids => dead`.",
+  "This census is SCOPED to 'ancestor of [data-testid=card-back-name]', and a scoped",
+  "enumeration lists DESCENDANTS -- so the scope ANCHOR ITSELF is absent from the list.",
+  "`card-back-name` is not in `testids`, yet it exists (live count: 1) and",
+  "checklist_item.complete's assertCardModal binds it successfully on every run.",
+  "That rule would have flagged a healthy step and told me to delete it. False positives",
+  "on a detector that prompts edits cost more than false negatives (reliable-measurement",
+  "§5.5): a missed finding leaves the code as it was; a false one makes you break working",
+  "code, confidently.",
+  "",
+  "THE SOUND PREDICATE is membership in `known_dead` -- a CURATED set, where every entry",
+  "names the live instruments that corroborated its absence. Absence from `testids` is",
+  "evidence of nothing. Adding an entry requires two independent live probes."
+ ],
+ "surface": "trello.com/card-modal",
+ "captured_at": "2026-07-10T04:38:10Z",
+ "scope": "ancestor of [data-testid='card-back-name']",
+ "testids": [
+  "DownIcon",
+  "card-back-cover-button",
+  "card-back-actions-button",
+  "card-back-header",
+  "card-done-state",
+  "card-done-state-completion-button",
+  "card-done-state-icon-container",
+  "card-back-title-input",
+  "DescriptionIcon",
+  "description-content-area",
+  "checklist-container",
+  "checklist-section",
+  "ChecklistIcon",
+  "checklist-title-container",
+  "checklist-title",
+  "checklist-delete-button",
+  "checklist-progress-percentage",
+  "progress-bar",
+  "checklist-items",
+  "check-item-container",
+  "clickable-checkbox",
+  "check-item-name",
+  "card-back-panel",
+  "show-details-button",
+  "card-back-new-comment-input-skeleton",
+  "card-back-action",
+  "card-back-action-copy-button",
+  "card-back-activity-button"
+ ],
+ "containment": {
+  "_comment": "Inferred from identical text content: a parent whose text equals its child's wraps it with nothing between. This is the relationship no CSS selector can express.",
+  "checklist-container": [
+   "checklist-section"
+  ],
+  "checklist-section": [
+   "checklist-title-container",
+   "checklist-delete-button",
+   "checklist-progress-percentage",
+   "progress-bar",
+   "checklist-items"
+  ],
+  "checklist-title-container": [
+   "checklist-title"
+  ],
+  "checklist-items": [
+   "check-item-container"
+  ],
+  "check-item-container": [
+   "clickable-checkbox",
+   "check-item-name"
+  ]
+ },
+ "text_samples": {
+  "checklist-title": "Steps",
+  "checklist-progress-percentage": "89%",
+  "checklist-delete-button": "Delete",
+  "checklist-container": "StepsHide checked itemsDelete89%L1: finish trello.card.delete fix..."
+ },
+ "known_dead": {
+  "_comment": "Testids referenced by maps but ABSENT from this capture. Verified absent, not merely out-of-scope: this census was scoped to the whole card modal.",
+  "checklist-progress-bar-percentage": "0 matches. checklist.read binds it FIRST, with checklist-container (its ANCESTOR) as fallback -- the fallback always wins, so the read silently returns the wrong element. This is #171.",
+  "check-item-name-input": "absent while no item composer is open; capture again with the composer open before calling it dead",
+  "checklist-add-button": "absent while no popover is open; NOT dead -- lives in the add-checklist popover",
+  "checklist-button": "absent from the modal; lives in the card HEADER, outside this scope",
+  "card-back-content": "0 matches. Corroborated live 2026-07-10 by TWO independent instruments: viewport.scroll{scope} -> target_not_found, and debug.run_javascript querySelectorAll -> 0. Not state-dependent: it purports to be the card-body SCROLL CONTAINER, which would exist in every state if it existed at all. checklist_item.complete scrolled it behind on_error:'continue', so the step failed silently on EVERY run and nothing ever scrolled. The real container is an unlabelled <main> with a hashed class -- never bind it; use locator.element_info, which auto-scrolls its match. This is #208."
+ },
+ "state_caveats": {
+  "captured_state": "one settled checklist ('Steps', 8/9), no popover open, no item composer open",
+  "checklist-container": "ONE PER CHECKLIST. Present even for a brand-new checklist. Disambiguate with text_contains.",
+  "checklist-section": "only on a HYDRATED checklist. Absent immediately after create.",
+  "checklist-title": "only on a HYDRATED checklist. Absent immediately after create.",
+  "checklist-delete-button": "only on a HYDRATED checklist. The single match on a mixed card belongs to the OLD one -- clicking it destroys the wrong checklist.",
+  "add-checklist popover": "carries NO data-testid. Title field is id='id-checklist'; the copy-from select is id='copy-items-from-select'."
+ }
+}

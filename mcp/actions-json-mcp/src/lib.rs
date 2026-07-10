@@ -112,6 +112,10 @@ struct AppState {
     // browser.claimed_tabs.activate; defaulted to the first runtime to connect.
     active_runtime_id: Arc<Mutex<Option<String>>>,
     pending: Arc<Mutex<HashMap<String, PendingCall>>>,
+    // U3: in-flight liveness probes keyed by probe_id. A stale-but-unswept
+    // runtime is probed (extension chrome.tabs.get) before dispatch; the
+    // extension's runtime_probe_result resolves the matching oneshot here.
+    pending_probes: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
     last_replay_summary: Arc<Mutex<Option<Value>>>,
     last_credential_hydration: Arc<Mutex<Option<Value>>>,
     last_storage_hydration: Arc<Mutex<Option<Value>>>,
@@ -501,6 +505,25 @@ struct ActionCatalog {
     site_action_names: HashSet<String>,
 }
 
+/// A runtime is considered live only while its heartbeat is fresh. The
+/// extension pings on a 10s interval (see `handle_extension_socket`'s heartbeat
+/// task); this TTL is three missed pings' worth of slack, so a merely-slow ping
+/// does not evict a healthy tab, but a tab that has actually gone (closed, or a
+/// wedged socket) ages out within ~30s. This is the single liveness knob (KTD1).
+const RUNTIME_LIVENESS_TTL_MS: u128 = 30_000;
+
+/// Dispatch freshness window (KTD2), tighter than the liveness TTL. A runtime
+/// seen within this window is trusted for direct dispatch; a staler one — still
+/// inside the TTL, so not yet swept — is suspect and gets a liveness probe
+/// before we dispatch into it. Smaller than the TTL so the probe path engages
+/// well before the sweep would evict.
+const RUNTIME_DISPATCH_FRESHNESS_MS: u128 = 5_000;
+
+/// How long to wait for the extension's runtime_probe_result before treating the
+/// runtime as dead. Short: a live tab answers a chrome.tabs.get near-instantly,
+/// and we would rather evict a slow one than block a dispatch on it.
+const RUNTIME_PROBE_TIMEOUT_MS: u64 = 1_500;
+
 #[derive(Clone)]
 struct RuntimeClient {
     runtime_id: String,
@@ -508,12 +531,35 @@ struct RuntimeClient {
     runtime_key: Option<String>,
     authorization_id: Option<String>,
     extension_version: Option<String>,
+    /// U8 (R6-for-real): the MACHINE/BROWSER this runtime lives on, e.g.
+    /// "mac · 7c19" — OS plus a stable per-install id. Distinct from the site
+    /// `host` (derived from the url): two browsers on the same page share a
+    /// host but differ by device. Absent for extensions that don't report it.
+    device: Option<String>,
     url: Option<String>,
     tab: Option<Value>,
     replay: Option<Value>,
     connected_at_ms: u128,
     last_seen_ms: u128,
     tx: mpsc::UnboundedSender<Message>,
+}
+
+impl RuntimeClient {
+    /// Ground-truth liveness: the heartbeat is within the TTL. A dead runtime
+    /// (stopped heartbeat) is never live, so it is never listed, counted, or
+    /// dispatched to — the runtime liveness invariant, enforced at the read
+    /// path rather than trusting a non-empty registry.
+    fn is_live(&self, now_ms: u128) -> bool {
+        now_ms.saturating_sub(self.last_seen_ms) <= RUNTIME_LIVENESS_TTL_MS
+    }
+
+    /// Whether a dispatch to this runtime must be liveness-probed first (KTD2).
+    /// A recently-seen runtime is trusted for direct dispatch; a staler one —
+    /// still inside the TTL, so the sweep has not evicted it — is suspect and
+    /// must be probed before we send a real call into it.
+    fn needs_dispatch_probe(&self, now_ms: u128) -> bool {
+        now_ms.saturating_sub(self.last_seen_ms) > RUNTIME_DISPATCH_FRESHNESS_MS
+    }
 }
 
 struct PendingCall {
@@ -2002,6 +2048,7 @@ mod tests {
                     runtime_key: None,
                     authorization_id: None,
                     extension_version: None,
+            device: None,
                     url: Some("https://docs.example.com/".to_string()),
                     tab: None,
                     replay: None,
@@ -2079,6 +2126,603 @@ mod tests {
             "https://trello.com/b/abc",
             "the dropped tab's url must be recorded"
         );
+    }
+
+    // ---- U1: registry liveness core (TTL staleness + sweep + live-only view) ----
+    //
+    // The lying-liveness failure the invariant exists to kill: a runtime whose
+    // heartbeat stopped (its tab is gone) must never be advertised as connected
+    // or listed. `connected` and the runtime list are derived from *live*
+    // runtimes only, and a periodic sweep evicts the dead ones with a lifecycle
+    // log — enforced in depth, not by one signal.
+
+    /// Directly age a seeded runtime's heartbeat so it reads as stale, without
+    /// waiting real time. Sets `last_seen_ms` to `age_ms` in the past.
+    async fn age_runtime_last_seen(state: &AppState, runtime_id: &str, age_ms: u128) {
+        let mut runtimes = state.runtimes.lock().await;
+        let client = runtimes
+            .get_mut(runtime_id)
+            .expect("runtime should be seeded before ageing it");
+        client.last_seen_ms = now_ms().saturating_sub(age_ms);
+    }
+
+    #[tokio::test]
+    async fn fresh_runtime_is_listed_and_counts_as_connected() {
+        // A runtime whose heartbeat is within the TTL is live: listed, counted,
+        // connected: true. (Covers SC1.)
+        let state = two_runtime_state();
+        let resource = bridge_runtimes_resource(&state).await;
+        assert_eq!(resource["connected"], json!(true));
+        assert_eq!(resource["count"], json!(2));
+        let ids: Vec<&str> = resource["runtimes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["runtime_id"].as_str())
+            .collect();
+        assert!(ids.contains(&"rt-lab") && ids.contains(&"rt-trello"));
+    }
+
+    #[tokio::test]
+    async fn stale_runtime_is_absent_from_list_and_not_connected() {
+        // A runtime whose heartbeat is older than the TTL is dead: never listed,
+        // never counted, and `connected` is false when it was the only one.
+        let state = two_runtime_state();
+        // Age BOTH past the TTL — the whole registry is stale.
+        age_runtime_last_seen(&state, "rt-lab", RUNTIME_LIVENESS_TTL_MS + 1_000).await;
+        age_runtime_last_seen(&state, "rt-trello", RUNTIME_LIVENESS_TTL_MS + 1_000).await;
+
+        let resource = bridge_runtimes_resource(&state).await;
+        assert_eq!(
+            resource["connected"],
+            json!(false),
+            "an all-stale registry must not advertise connected"
+        );
+        assert_eq!(resource["count"], json!(0));
+        assert_eq!(resource["runtimes"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn one_stale_one_live_lists_only_the_live_one() {
+        // Mixed registry: the live runtime is listed and connected: true; the
+        // stale one is filtered out of the advertised view.
+        let state = two_runtime_state();
+        age_runtime_last_seen(&state, "rt-lab", RUNTIME_LIVENESS_TTL_MS + 1_000).await;
+
+        let resource = bridge_runtimes_resource(&state).await;
+        assert_eq!(resource["connected"], json!(true));
+        assert_eq!(resource["count"], json!(1));
+        let ids: Vec<&str> = resource["runtimes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["runtime_id"].as_str())
+            .collect();
+        assert_eq!(ids, vec!["rt-trello"], "only the live runtime is advertised");
+    }
+
+    #[tokio::test]
+    async fn sweep_evicts_stale_runtimes_and_is_idempotent() {
+        // The sweep physically evicts dead runtimes (so the registry shrinks,
+        // not just the view) and is idempotent — a second sweep is a no-op and
+        // an empty registry does not panic.
+        let root = tempdir().unwrap();
+        let state = state_from_catalog(
+            ActionCatalog {
+                base_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                map_paths: Vec::new(),
+                manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_action_names: HashSet::new(),
+            },
+            vec![
+                RuntimeSeed {
+                    runtime_id: "rt-live".to_string(),
+                    url: Some("https://live.example.com/".to_string()),
+                },
+                RuntimeSeed {
+                    runtime_id: "rt-dead".to_string(),
+                    url: Some("https://dead.example.com/".to_string()),
+                },
+            ],
+            Some(root.path().to_path_buf()),
+        );
+        age_runtime_last_seen(&state, "rt-dead", RUNTIME_LIVENESS_TTL_MS + 1_000).await;
+
+        let evicted = sweep_stale_runtimes(&state).await;
+        assert_eq!(evicted, 1, "one stale runtime evicted");
+        {
+            let runtimes = state.runtimes.lock().await;
+            assert!(runtimes.contains_key("rt-live"), "live runtime survives");
+            assert!(!runtimes.contains_key("rt-dead"), "dead runtime is gone");
+        }
+
+        // Idempotent: a second sweep evicts nothing.
+        let evicted_again = sweep_stale_runtimes(&state).await;
+        assert_eq!(evicted_again, 0, "second sweep is a no-op");
+
+        // The eviction is recorded in the persistent lifecycle log.
+        let log_path = root.path().join("logs").join("bridge-lifecycle.jsonl");
+        let contents = std::fs::read_to_string(&log_path)
+            .expect("lifecycle log should record the sweep eviction");
+        assert!(
+            contents.lines().any(|line| {
+                serde_json::from_str::<Value>(line)
+                    .map(|e| e["event"] == "disconnect" && e["reason"] == "liveness_sweep")
+                    .unwrap_or(false)
+            }),
+            "sweep eviction is logged with reason liveness_sweep"
+        );
+    }
+
+    // ---- U6: intent routing — resolve "the <description> runtime" to one live match ----
+    //
+    // The agent should route by intent (a board name, a host, a title fragment)
+    // instead of hand-copying a runtime_id. The existing url_contains resolver is
+    // widened to match url OR title OR host (case-insensitively), still errors on
+    // zero (runtime_not_found) and >1 (ambiguity naming candidates), and is
+    // live-only via select_runtime's registry.
+
+    #[test]
+    fn runtime_matches_intent_spans_url_title_and_host() {
+        let client = seed_client_with_tab(
+            "rt",
+            "https://trello.com/b/abc/quarterly-roadmap",
+            "Quarterly Roadmap | Trello",
+        );
+        assert!(runtime_matches_intent(&client, "quarterly-roadmap"), "url path");
+        assert!(runtime_matches_intent(&client, "Quarterly Roadmap"), "title");
+        assert!(runtime_matches_intent(&client, "TRELLO.COM"), "host, case-insensitive");
+        assert!(runtime_matches_intent(&client, "roadmap"), "title fragment, case-insensitive");
+        assert!(!runtime_matches_intent(&client, "gmail"), "non-match");
+    }
+
+    #[tokio::test]
+    async fn intent_phrase_matching_one_runtime_resolves_to_it() {
+        let state = empty_state();
+        {
+            let mut runtimes = state.runtimes.lock().await;
+            runtimes.insert(
+                "rt-trello".into(),
+                seed_client_with_tab("rt-trello", "https://trello.com/b/x", "Board X"),
+            );
+            runtimes.insert(
+                "rt-docs".into(),
+                seed_client_with_tab("rt-docs", "https://docs.google.com/d/y", "Doc Y"),
+            );
+        }
+        let mut call = bare_call("storage.list");
+        call.target_url_contains = Some("Doc Y".to_string()); // title-based intent
+        let chosen = select_runtime(&state, &call).await.unwrap();
+        assert_eq!(chosen.runtime_id, "rt-docs");
+    }
+
+    #[tokio::test]
+    async fn intent_phrase_matching_none_returns_runtime_not_found() {
+        let state = two_runtime_state();
+        let mut call = bare_call("storage.list");
+        call.target_url_contains = Some("nonexistent-site".to_string());
+        let err = select_runtime(&state, &call).await.err().unwrap();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert_eq!(err.1.0["error"]["code"], "runtime_not_found");
+        assert!(err.1.0["error"]["next_step"].is_string());
+    }
+
+    #[tokio::test]
+    async fn intent_phrase_matching_two_runtimes_is_an_ambiguity_naming_candidates() {
+        let state = empty_state();
+        {
+            let mut runtimes = state.runtimes.lock().await;
+            runtimes.insert(
+                "rt-a".into(),
+                seed_client_with_tab("rt-a", "https://trello.com/b/a", "Team Alpha"),
+            );
+            runtimes.insert(
+                "rt-b".into(),
+                seed_client_with_tab("rt-b", "https://trello.com/b/b", "Team Beta"),
+            );
+        }
+        let mut call = bare_call("storage.list");
+        call.target_url_contains = Some("trello.com".to_string()); // matches both
+        let err = select_runtime(&state, &call).await.err().unwrap();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert_eq!(err.1.0["error"]["code"], "ambiguous_intent");
+        // The candidates are named by the agent-facing shape so the agent can pick.
+        let candidates = err.1.0["error"]["evidence"]["candidates"].as_array().unwrap();
+        assert_eq!(candidates.len(), 2);
+        for c in candidates {
+            assert!(c["runtime_id"].is_string() && c["host"].is_string());
+        }
+    }
+
+    // ---- U5: unified live-runtime view — one id, url/title/host, no dead field ----
+    //
+    // One authoritative "your live runtimes" view: live-only, one agent-facing
+    // id, human-meaningful labels (url + title + host so two Chromes are
+    // unambiguous), an explicit is_live, and NO vestigial runtime_key /
+    // chrome-tab: id and NO always-null claimed_at_ms.
+
+    fn seed_client_with_tab(runtime_id: &str, url: &str, title: &str) -> RuntimeClient {
+        let (tx, _rx) = mpsc::unbounded_channel::<Message>();
+        RuntimeClient {
+            runtime_id: runtime_id.to_string(),
+            connection_id: "c".into(),
+            runtime_key: Some("chrome-tab:99".into()),
+            authorization_id: Some("auth".into()),
+            extension_version: Some("0.1.99".into()),
+            device: None,
+            url: Some(url.to_string()),
+            tab: Some(json!({ "id": 99, "title": title, "url": url, "active": true })),
+            replay: None,
+            connected_at_ms: now_ms(),
+            last_seen_ms: now_ms(),
+            tx,
+        }
+    }
+
+    // ---- U8: machine/browser label (R6-for-real) ----
+    //
+    // LIVE-CAUGHT (2026-07-09, Yaniv ran 0.1.187 on Windows AND Mac): U5's `host`
+    // is the SITE host (host_from_url), so two runtimes on the SAME url across two
+    // BROWSERS collapse to the same label and are indistinguishable. R6's real
+    // intent is a machine/browser label. The extension reports `device` at
+    // runtime_ready; the bridge surfaces it as a field DISTINCT from `host`.
+
+    fn seed_client_on_device(runtime_id: &str, url: &str, device: &str) -> RuntimeClient {
+        let mut client = seed_client_with_tab(runtime_id, url, "Same Page");
+        client.device = Some(device.to_string());
+        client
+    }
+
+    #[test]
+    fn two_runtimes_on_the_same_site_are_distinguished_by_device() {
+        // The exact scenario the live 2-machine test could not resolve: same url,
+        // same site host, two different browsers.
+        let win = seed_client_on_device("rt-win", "https://trello.com/b/x", "win · a3f2");
+        let mac = seed_client_on_device("rt-mac", "https://trello.com/b/x", "mac · 7c19");
+
+        let win_row = runtime_summary(&win);
+        let mac_row = runtime_summary(&mac);
+
+        // Site host is identical — that's the ambiguity.
+        assert_eq!(win_row["host"], mac_row["host"]);
+        assert_eq!(win_row["host"], "trello.com");
+
+        // `device` is what disambiguates them, and it is NOT the site host.
+        assert_eq!(win_row["device"], "win · a3f2");
+        assert_eq!(mac_row["device"], "mac · 7c19");
+        assert_ne!(win_row["device"], mac_row["device"]);
+        assert_ne!(win_row["device"], win_row["host"]);
+    }
+
+    #[test]
+    fn device_is_absent_not_null_when_the_extension_does_not_report_it() {
+        // Older extensions don't send `device`. Never serialize a constant null
+        // (R10) — omit the field instead.
+        let client = seed_client_with_tab("rt", "https://x.com/a", "X");
+        let row = runtime_summary(&client);
+        if let Some(device) = row.get("device") {
+            assert!(!device.is_null(), "device is real or absent, never null");
+        }
+    }
+
+    #[test]
+    fn host_from_url_extracts_the_site_label() {
+        assert_eq!(host_from_url("https://trello.com/b/abc"), Some("trello.com".into()));
+        assert_eq!(
+            host_from_url("https://docs.google.com/document/d/1"),
+            Some("docs.google.com".into())
+        );
+        assert_eq!(host_from_url("http://localhost:9223/x"), Some("localhost".into()));
+        assert_eq!(host_from_url("https://user@example.com:8080/p"), Some("example.com".into()));
+        assert_eq!(host_from_url(""), None);
+        assert_eq!(host_from_url("/relative/path"), None);
+    }
+
+    #[test]
+    fn runtime_summary_is_the_agent_facing_shape_without_dead_fields() {
+        let client = seed_client_with_tab(
+            "rt-1",
+            "https://trello.com/b/abc/my-board",
+            "My Board | Trello",
+        );
+        let summary = runtime_summary(&client);
+        // The agent-facing identity is exactly runtime_id.
+        assert_eq!(summary["runtime_id"], "rt-1");
+        // Human-meaningful labels.
+        assert_eq!(summary["url"], "https://trello.com/b/abc/my-board");
+        assert_eq!(summary["title"], "My Board | Trello");
+        assert_eq!(summary["host"], "trello.com", "host derived from url");
+        assert_eq!(summary["is_live"], json!(true));
+        // The vestigial id spaces are gone from the agent surface.
+        assert!(summary.get("runtime_key").is_none(), "no runtime_key");
+        assert!(summary.get("tab").is_none(), "no raw chrome tab object");
+        // claimed_at_ms is never serialized as a constant null.
+        if let Some(claimed) = summary.get("claimed_at_ms") {
+            assert!(!claimed.is_null(), "claimed_at_ms is real or absent, never null");
+        }
+    }
+
+    #[tokio::test]
+    async fn bridge_runtimes_view_labels_two_browsers_distinctly() {
+        // SC3: two live runtimes on different hosts each carry enough per-row
+        // labeling (host + title) to pick the intended one with no other tool.
+        let state = empty_state();
+        {
+            let mut runtimes = state.runtimes.lock().await;
+            runtimes.insert(
+                "rt-trello".into(),
+                seed_client_with_tab("rt-trello", "https://trello.com/b/x", "Board X"),
+            );
+            runtimes.insert(
+                "rt-docs".into(),
+                seed_client_with_tab("rt-docs", "https://docs.google.com/document/d/y", "Doc Y"),
+            );
+        }
+        let resource = bridge_runtimes_resource(&state).await;
+        let rows = resource["runtimes"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        let hosts: Vec<&str> = rows.iter().filter_map(|r| r["host"].as_str()).collect();
+        assert!(hosts.contains(&"trello.com") && hosts.contains(&"docs.google.com"));
+        // No row leaks a runtime_key / chrome-tab: id.
+        for row in rows {
+            assert!(row.get("runtime_key").is_none());
+        }
+    }
+
+    // ---- U3: probe-at-dispatch — freshness-gated hard guarantee ----
+    //
+    // A real call must never reach a runtime whose tab is gone, even inside the
+    // TTL window before the sweep runs. Fresh runtimes dispatch directly; a
+    // stale one is probed (extension chrome.tabs.get) and only dispatched on a
+    // positive result — a negative/timeout returns tab_closed and evicts.
+
+    #[test]
+    fn needs_dispatch_probe_only_when_staler_than_freshness_window() {
+        let (tx, _rx) = mpsc::unbounded_channel::<Message>();
+        let now = now_ms();
+        let mut client = RuntimeClient {
+            runtime_id: "rt".into(),
+            connection_id: "c".into(),
+            runtime_key: None,
+            authorization_id: None,
+            extension_version: None,
+            device: None,
+            url: None,
+            tab: None,
+            replay: None,
+            connected_at_ms: now,
+            last_seen_ms: now,
+            tx,
+        };
+        assert!(!client.needs_dispatch_probe(now), "just-seen: no probe");
+        client.last_seen_ms = now - (RUNTIME_DISPATCH_FRESHNESS_MS + 1_000);
+        assert!(client.needs_dispatch_probe(now), "stale: must probe");
+    }
+
+    #[tokio::test]
+    async fn fresh_runtime_is_dispatchable_without_a_probe() {
+        // A fresh runtime passes the dispatch gate directly; no probe is armed.
+        let state = two_runtime_state();
+        let client = state.runtimes.lock().await.get("rt-lab").unwrap().clone();
+        ensure_dispatchable(&state, &client)
+            .await
+            .expect("fresh runtime dispatches");
+        assert!(
+            state.pending_probes.lock().await.is_empty(),
+            "no probe was needed for a fresh runtime"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_runtime_with_dead_probe_returns_tab_closed_and_evicts() {
+        // The drag-504 guarantee: a stale-but-unswept runtime whose tab is gone
+        // must NOT be dispatched to. Probe comes back dead → tab_closed + evict.
+        let root = tempdir().unwrap();
+        let state = state_from_catalog(
+            ActionCatalog {
+                base_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                map_paths: Vec::new(),
+                manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_action_names: HashSet::new(),
+            },
+            vec![RuntimeSeed {
+                runtime_id: "rt-stale".to_string(),
+                url: Some("https://trello.com/b/stale".to_string()),
+            }],
+            Some(root.path().to_path_buf()),
+        );
+        age_runtime_last_seen(&state, "rt-stale", RUNTIME_DISPATCH_FRESHNESS_MS + 2_000).await;
+        // Give the runtime a live receiver so probe_runtime's send succeeds and a
+        // probe is actually registered (the seed drops its receiver).
+        let (tx, _rx) = mpsc::unbounded_channel::<Message>();
+        state.runtimes.lock().await.get_mut("rt-stale").unwrap().tx = tx;
+        let client = state.runtimes.lock().await.get("rt-stale").unwrap().clone();
+
+        // Spawn the gated dispatch; feed a DEAD probe result to its oneshot.
+        let state_for_probe = state.clone();
+        let gate = tokio::spawn(async move { ensure_dispatchable(&state_for_probe, &client).await });
+        let probe_id = await_single_probe_id(&state).await;
+        resolve_runtime_probe(&state, &probe_id, false).await;
+
+        let result = gate.await.unwrap();
+        assert!(result.is_err(), "a dead-probe runtime is not dispatchable");
+        let (status, body) = result.err().unwrap();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body.0["error"]["code"], "tab_closed");
+        assert!(
+            !state.runtimes.lock().await.contains_key("rt-stale"),
+            "the dead runtime is evicted, not left to time out"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_runtime_with_live_probe_dispatches_and_survives() {
+        // Stale but the tab still exists: probe positive → dispatchable, kept.
+        let state = two_runtime_state();
+        age_runtime_last_seen(&state, "rt-lab", RUNTIME_DISPATCH_FRESHNESS_MS + 2_000).await;
+        let (tx, _rx) = mpsc::unbounded_channel::<Message>();
+        state.runtimes.lock().await.get_mut("rt-lab").unwrap().tx = tx;
+        let client = state.runtimes.lock().await.get("rt-lab").unwrap().clone();
+
+        let state_for_probe = state.clone();
+        let gate = tokio::spawn(async move { ensure_dispatchable(&state_for_probe, &client).await });
+        let probe_id = await_single_probe_id(&state).await;
+        resolve_runtime_probe(&state, &probe_id, true).await;
+
+        gate.await.unwrap().expect("a live-probe runtime is dispatchable");
+        assert!(
+            state.runtimes.lock().await.contains_key("rt-lab"),
+            "a live runtime survives the probe"
+        );
+    }
+
+    /// Test helper: block until exactly one probe is registered, return its id.
+    async fn await_single_probe_id(state: &AppState) -> String {
+        for _ in 0..200 {
+            {
+                let probes = state.pending_probes.lock().await;
+                if let Some(id) = probes.keys().next().cloned() {
+                    return id;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("no probe was registered within the timeout");
+    }
+
+    // ---- U4: honest routing error codes with a recovery next_step ----
+    //
+    // The opaque `no_claimed_tab` conflated four distinct failures. Each now
+    // names its cause and carries a next_step in the agent's terms, so a wrong
+    // route self-corrects in one read instead of leaving the agent guessing.
+
+    #[test]
+    fn route_error_codes_each_carry_a_distinct_next_step() {
+        for code in [
+            "tab_closed",
+            "claim_missing",
+            "runtime_not_found",
+            "dispatch_timeout",
+        ] {
+            let step = route_error_next_step(code);
+            assert!(!step.is_empty(), "{code} must carry a next_step");
+        }
+        // The four next-steps are distinct — each failure points somewhere
+        // different, which is the whole point of splitting the opaque code.
+        let steps = [
+            route_error_next_step("tab_closed"),
+            route_error_next_step("claim_missing"),
+            route_error_next_step("runtime_not_found"),
+            route_error_next_step("dispatch_timeout"),
+        ];
+        for i in 0..steps.len() {
+            for j in (i + 1)..steps.len() {
+                assert_ne!(steps[i], steps[j], "next_steps must differ per cause");
+            }
+        }
+    }
+
+    #[test]
+    fn route_error_payload_names_code_and_next_step() {
+        let payload = route_error(
+            "runtime_not_found",
+            "Routed to a runtime id that is not in the live registry.",
+            json!({ "runtime_id": "rt-gone" }),
+        );
+        assert_eq!(payload.0["error"]["code"], "runtime_not_found");
+        assert_eq!(
+            payload.0["error"]["next_step"],
+            json!(route_error_next_step("runtime_not_found"))
+        );
+        assert_eq!(payload.0["error"]["evidence"]["runtime_id"], "rt-gone");
+        assert_eq!(payload.0["error"]["recoverable"], json!(true));
+    }
+
+    // ---- U2: per-runtime reap on tab-close (extension → bridge runtime_removed) ----
+    //
+    // The exact drag-504 gap: one tab closes but the browser (and its WS) stays
+    // alive, so `remove_runtimes_for_connection` never fires and the dead
+    // runtime lingers. `remove_single_runtime` reaps precisely that one id,
+    // immediately, leaving sibling runtimes on the same connection untouched.
+
+    #[tokio::test]
+    async fn runtime_removed_reaps_only_that_runtime_leaving_siblings() {
+        // Two runtimes on the SAME connection (one browser, two tabs). Reaping
+        // one leaves the other listed and connected — the WS stays open.
+        let root = tempdir().unwrap();
+        let state = state_from_catalog(
+            ActionCatalog {
+                base_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                map_paths: Vec::new(),
+                manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_action_names: HashSet::new(),
+            },
+            vec![
+                RuntimeSeed {
+                    runtime_id: "rt-closing".to_string(),
+                    url: Some("https://trello.com/b/closing".to_string()),
+                },
+                RuntimeSeed {
+                    runtime_id: "rt-staying".to_string(),
+                    url: Some("https://trello.com/b/staying".to_string()),
+                },
+            ],
+            Some(root.path().to_path_buf()),
+        );
+
+        let reaped = remove_single_runtime(&state, "rt-closing", "tab_closed").await;
+        assert!(reaped, "the targeted runtime was present and reaped");
+
+        let resource = bridge_runtimes_resource(&state).await;
+        assert_eq!(resource["connected"], json!(true), "sibling keeps it connected");
+        let ids: Vec<&str> = resource["runtimes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["runtime_id"].as_str())
+            .collect();
+        assert_eq!(ids, vec!["rt-staying"], "only the closed tab is reaped");
+
+        // The reap is recorded in the lifecycle log with the given reason.
+        let log_path = root.path().join("logs").join("bridge-lifecycle.jsonl");
+        let contents = std::fs::read_to_string(&log_path).expect("lifecycle log written");
+        assert!(
+            contents.lines().any(|line| {
+                serde_json::from_str::<Value>(line)
+                    .map(|e| {
+                        e["event"] == "disconnect"
+                            && e["reason"] == "tab_closed"
+                            && e["runtimes"][0]["runtime_id"] == "rt-closing"
+                    })
+                    .unwrap_or(false)
+            }),
+            "the tab-close reap is logged"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_removed_for_unknown_id_is_a_noop() {
+        // An unknown / already-removed id must not panic, must not error, and
+        // must not touch the surviving runtimes.
+        let state = two_runtime_state();
+        let reaped = remove_single_runtime(&state, "rt-nonexistent", "tab_closed").await;
+        assert!(!reaped, "nothing to reap returns false");
+        let resource = bridge_runtimes_resource(&state).await;
+        assert_eq!(resource["count"], json!(2), "surviving runtimes untouched");
+    }
+
+    #[tokio::test]
+    async fn reaping_the_active_runtime_reassigns_active() {
+        // If the reaped runtime was the active one, active is reassigned to a
+        // surviving runtime (mirrors remove_runtimes_for_connection).
+        let state = two_runtime_state();
+        *state.active_runtime_id.lock().await = Some("rt-lab".to_string());
+        remove_single_runtime(&state, "rt-lab", "tab_closed").await;
+        let active = state.active_runtime_id.lock().await.clone();
+        assert_eq!(active.as_deref(), Some("rt-trello"), "active moved to survivor");
     }
 
     #[tokio::test]
@@ -2257,9 +2901,9 @@ mod tests {
     async fn storage_site_actions_inherit_host_target_from_path() {
         let root = tempdir().unwrap();
         let trello_dir = root.path().join("scopes/private/sites/trello.com/board");
-        let graphify_dir = root.path().join("scopes/private/sites/graphifymd.com/home");
+        let example_dir = root.path().join("scopes/private/sites/example.org/home");
         std::fs::create_dir_all(&trello_dir).unwrap();
-        std::fs::create_dir_all(&graphify_dir).unwrap();
+        std::fs::create_dir_all(&example_dir).unwrap();
         std::fs::write(
             trello_dir.join("actions.json"),
             r#"{
@@ -2274,14 +2918,14 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            graphify_dir.join("actions.json"),
+            example_dir.join("actions.json"),
             r#"{
               "protocol": "actions.json",
               "tools": [{
-                "name": "graphifymd.site.map",
-                "description": "Graphify site action without explicit binding.",
+                "name": "exampleorg.site.map",
+                "description": "Example site action without explicit binding.",
                 "input_schema": { "type": "object" },
-                "x_actions": { "static_output": { "ok": true, "site": "graphify" } }
+                "x_actions": { "static_output": { "ok": true, "site": "example" } }
               }]
             }"#,
         )
@@ -2304,7 +2948,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(names.contains(&"trello.site.map"));
-        assert!(!names.contains(&"graphifymd.site.map"));
+        assert!(!names.contains(&"exampleorg.site.map"));
     }
 
     #[tokio::test]
@@ -2330,6 +2974,7 @@ mod tests {
                     runtime_key: Some("chrome-tab:101".to_string()),
                     authorization_id: Some("auth-101".to_string()),
                     extension_version: Some("0.1.87".to_string()),
+                    device: None,
                     url: Some("https://www.linkedin.com/messaging/".to_string()),
                     tab: Some(json!({
                         "tab_id": 101,
@@ -2341,8 +2986,10 @@ mod tests {
                         "reason": "bridge_open",
                         "attempt": 1
                     })),
-                    connected_at_ms: 100,
-                    last_seen_ms: 200,
+                    connected_at_ms: now_ms(),
+                    // A fresh heartbeat: this fixture asserts replay/tab metadata
+                    // is surfaced, so the runtime must be live to be advertised.
+                    last_seen_ms: now_ms(),
                     tx: mpsc::unbounded_channel().0,
                 },
             );
@@ -2364,11 +3011,19 @@ mod tests {
             value["last_replay_summary"]["registered_count"].as_u64(),
             Some(1)
         );
-        assert_eq!(value["runtimes"][0]["tab"]["tab_id"].as_u64(), Some(101));
+        // U5: the per-runtime row is the agent-facing shape — url/title/host,
+        // one runtime_id, no raw chrome `tab` object and no `replay` internals.
+        // The replay metadata lives at the top-level last_replay_summary instead.
+        let row = &value["runtimes"][0];
+        assert_eq!(row["runtime_id"].as_str(), Some("runtime-101"));
         assert_eq!(
-            value["runtimes"][0]["replay"]["bridge_session_id"].as_str(),
-            Some("bridge-session-test")
+            row["url"].as_str(),
+            Some("https://www.linkedin.com/messaging/")
         );
+        assert_eq!(row["host"].as_str(), Some("www.linkedin.com"));
+        assert_eq!(row["title"].as_str(), Some("LinkedIn Messaging"));
+        assert!(row.get("tab").is_none(), "no raw chrome tab in the agent view");
+        assert!(row.get("replay").is_none(), "no replay internals in the agent view");
     }
 }
 
@@ -2437,6 +3092,7 @@ async fn serve(
         Vec::new(),
     )
     .await?;
+    spawn_liveness_sweep(state.clone());
     let app = app_from_state(state, true);
 
     let listener = TcpListener::bind(bind).await?;
@@ -2469,6 +3125,7 @@ async fn mcp_stdio_server(
             config.payload_dir = dir;
         }
     }
+    spawn_liveness_sweep(state.clone());
     let app = app_from_state(state.clone(), false);
     let listener = TcpListener::bind(bind).await?;
     let actual_bind = listener.local_addr()?;
@@ -2843,8 +3500,8 @@ async fn browser_active_tab_set_call(
         if !runtimes.contains_key(id) {
             return Err((
                 StatusCode::NOT_FOUND,
-                structured_error(
-                    "runtime_id_not_found",
+                route_error(
+                    "runtime_not_found",
                     "No connected runtime has that runtime id.",
                     json!({ "runtime_id": id, "runtimes": runtime_summaries(&runtimes) }),
                 ),
@@ -2953,8 +3610,8 @@ async fn runtime_agent_await_event_call(
         if !runtimes.contains_key(id) {
             return Err((
                 StatusCode::NOT_FOUND,
-                structured_error(
-                    "runtime_id_not_found",
+                route_error(
+                    "runtime_not_found",
                     "No connected runtime has that runtime id.",
                     json!({ "runtime_id": id, "runtimes": runtime_summaries(&runtimes) }),
                 ),
@@ -3507,6 +4164,7 @@ fn state_from_catalog(
                     runtime_key: None,
                     authorization_id: None,
                     extension_version: None,
+            device: None,
                     url: seed.url,
                     tab: None,
                     replay: None,
@@ -3526,6 +4184,7 @@ fn state_from_catalog(
         )),
         runtimes: Arc::new(Mutex::new(seeded_runtimes)),
         pending: Arc::new(Mutex::new(HashMap::new())),
+        pending_probes: Arc::new(Mutex::new(HashMap::new())),
         last_replay_summary: Arc::new(Mutex::new(None)),
         last_credential_hydration: Arc::new(Mutex::new(None)),
         last_storage_hydration: Arc::new(Mutex::new(None)),
@@ -3957,17 +4616,23 @@ async fn bridge_runtimes_resource(state: &AppState) -> Value {
     let last_replay_summary = state.last_replay_summary.lock().await.clone();
     let credential_hydration = state.last_credential_hydration.lock().await.clone();
     let storage_hydration = state.last_storage_hydration.lock().await.clone();
+    let now = now_ms();
+    // Advertise only ground-truth-live runtimes. A dead runtime (heartbeat past
+    // the TTL) is filtered here at the read path, so `connected`, `count`, and
+    // the list can never lie about a tab that is gone — even before the periodic
+    // sweep has physically evicted it.
+    let live: Vec<&RuntimeClient> = runtimes.values().filter(|c| c.is_live(now)).collect();
     let active_runtime_id = state
         .active_runtime_id
         .lock()
         .await
         .clone()
-        .filter(|id| runtimes.contains_key(id));
+        .filter(|id| runtimes.get(id).map(|c| c.is_live(now)).unwrap_or(false));
     json!({
-        "connected": !runtimes.is_empty(),
-        "count": runtimes.len(),
+        "connected": !live.is_empty(),
+        "count": live.len(),
         "active_runtime_id": active_runtime_id,
-        "runtimes": runtime_summaries(&runtimes),
+        "runtimes": live.iter().map(|c| runtime_summary(c)).collect::<Vec<_>>(),
         "last_replay_summary": last_replay_summary,
         "credential_hydration": credential_hydration,
         "storage_hydration": storage_hydration
@@ -4091,13 +4756,10 @@ async fn actions(State(state): State<AppState>) -> Json<Value> {
 }
 
 async fn runtimes(State(state): State<AppState>) -> Json<Value> {
-    let runtimes = state.runtimes.lock().await;
-    let clients = runtime_summaries(&runtimes);
-    Json(json!({
-        "connected": !clients.is_empty(),
-        "count": clients.len(),
-        "runtimes": clients
-    }))
+    // The HTTP /runtimes surface is the same authoritative live view as the MCP
+    // bridge/runtimes resource — route through it so it, too, is live-only and
+    // never advertises a dead runtime (U1 + U5).
+    Json(bridge_runtimes_resource(&state).await)
 }
 
 async fn tools_list(State(state): State<AppState>) -> Json<Value> {
@@ -4317,6 +4979,10 @@ async fn dispatch_resolved_tool_call(
         }));
     }
     let runtime = select_runtime(state, &resolved).await?;
+    // U3: a real call must never reach a tab that is gone. If the runtime is
+    // stale, probe it and evict+fail with tab_closed rather than dispatching
+    // into the void and eating a 30s timeout.
+    ensure_dispatchable(state, &runtime).await?;
 
     let (response_tx, response_rx) = oneshot::channel::<Value>();
     state.pending.lock().await.insert(
@@ -4364,7 +5030,11 @@ async fn dispatch_resolved_tool_call(
             });
             (
                 StatusCode::GATEWAY_TIMEOUT,
-                Json(json!({ "error": "action timed out", "call_id": call_id, "pending_cleanup": "scheduled" })),
+                route_error(
+                    "dispatch_timeout",
+                    "The action was dispatched to the tab but no response arrived in time.",
+                    json!({ "call_id": call_id, "pending_cleanup": "scheduled" }),
+                ),
             )
         })?
         .map_err(|_| {
@@ -4810,6 +5480,8 @@ async fn dispatch_state_projection_call(
 ) -> Result<Json<ToolCallResponse>, (StatusCode, Json<Value>)> {
     let call_id = Uuid::new_v4().to_string();
     let runtime = select_runtime(state, &routing).await?;
+    // U3: probe-at-dispatch — never send into a tab that has closed.
+    ensure_dispatchable(state, &runtime).await?;
 
     let (response_tx, response_rx) = oneshot::channel::<Value>();
     state.pending.lock().await.insert(
@@ -4852,7 +5524,11 @@ async fn dispatch_state_projection_call(
             });
             (
                 StatusCode::GATEWAY_TIMEOUT,
-                Json(json!({ "error": "state projection call timed out", "call_id": call_id, "pending_cleanup": "scheduled" })),
+                route_error(
+                    "dispatch_timeout",
+                    "The state projection was dispatched to the tab but no response arrived in time.",
+                    json!({ "call_id": call_id, "pending_cleanup": "scheduled" }),
+                ),
             )
         })?
         .map_err(|_| {
@@ -5091,6 +5767,8 @@ async fn dispatch_site_action_call(
 ) -> Result<Json<ToolCallResponse>, (StatusCode, Json<Value>)> {
     let call_id = Uuid::new_v4().to_string();
     let runtime = select_runtime(state, &routing).await?;
+    // U3: probe-at-dispatch — never send into a tab that has closed.
+    ensure_dispatchable(state, &runtime).await?;
 
     let (response_tx, response_rx) = oneshot::channel::<Value>();
     state.pending.lock().await.insert(
@@ -5133,7 +5811,11 @@ async fn dispatch_site_action_call(
             });
             (
                 StatusCode::GATEWAY_TIMEOUT,
-                Json(json!({ "error": "site action call timed out", "call_id": call_id, "pending_cleanup": "scheduled" })),
+                route_error(
+                    "dispatch_timeout",
+                    "The site action was dispatched to the tab but no response arrived in time.",
+                    json!({ "call_id": call_id, "pending_cleanup": "scheduled" }),
+                ),
             )
         })?
         .map_err(|_| {
@@ -5989,6 +6671,47 @@ fn structured_error(code: &str, message: impl Into<String>, evidence: Value) -> 
     }))
 }
 
+/// The recovery next-step for each honest routing-failure code (R8/R9). The
+/// opaque `no_claimed_tab` gave the agent no way to tell "the tab closed" from
+/// "I never claimed one" from "that id is gone" from "the tab is just slow" —
+/// so a wrong route could not self-correct. Each code now points somewhere
+/// specific, in the agent's own terms.
+fn route_error_next_step(code: &str) -> &'static str {
+    match code {
+        "tab_closed" => {
+            "The tab has closed. Re-list runtimes (bridge/runtimes) and reopen or re-claim the target before retrying."
+        }
+        "claim_missing" => {
+            "No claimed tab resolved for this call. Claim the target tab (claim_tab), then retry."
+        }
+        "runtime_not_found" => {
+            "The routed runtime id is not in the live registry. Re-list runtimes and route to a currently-live id."
+        }
+        "dispatch_timeout" => {
+            "The tab is present but did not respond in time. Retry; if it persists the tab may be hung — reload it."
+        }
+        "ambiguous_intent" => {
+            "The intent phrase matched several live runtimes. Pick one from the named candidates and route by its runtime_id, or narrow the phrase."
+        }
+        _ => "Re-list runtimes (bridge/runtimes) and route to a currently-live runtime before retrying.",
+    }
+}
+
+/// Build an agent-facing routing error that names its cause and carries the
+/// recovery next-step for that cause. Same shape as `structured_error`, plus a
+/// `next_step` field — the single honest error builder for the routing surface.
+fn route_error(code: &str, message: impl Into<String>, evidence: Value) -> Json<Value> {
+    Json(json!({
+        "error": {
+            "code": code,
+            "message": message.into(),
+            "recoverable": true,
+            "next_step": route_error_next_step(code),
+            "evidence": evidence
+        }
+    }))
+}
+
 fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -6480,9 +7203,11 @@ async fn select_runtime(
     }
 
     if let Some(needle) = request.target_url_contains.as_deref() {
+        // U6: route by intent — match the phrase against url / title / host of
+        // each (live, per this registry) runtime, not just the url.
         let matches = runtimes
             .values()
-            .filter(|client| client.url.as_deref().unwrap_or("").contains(needle))
+            .filter(|client| runtime_matches_intent(client, needle))
             .cloned()
             .collect::<Vec<_>>();
 
@@ -6490,21 +7215,25 @@ async fn select_runtime(
             [client] => Ok(client.clone()),
             [] => Err((
                 StatusCode::NOT_FOUND,
-                Json(json!({
-                    "error": "no runtime URL matched target_url_contains",
-                    "target_url_contains": needle,
-                    "runtimes": runtime_summaries(&runtimes),
-                    "routing_trace": runtime_routing_trace(&runtimes, request, "no_match")
-                })),
+                route_error(
+                    "runtime_not_found",
+                    "No live runtime matched that intent phrase (url / title / host).",
+                    json!({
+                        "intent": needle,
+                        "runtimes": runtime_summaries(&runtimes),
+                    }),
+                ),
             )),
             _ => Err((
                 StatusCode::CONFLICT,
-                Json(json!({
-                    "error": "target_url_contains matched multiple runtimes",
-                    "target_url_contains": needle,
-                    "matches": matches.iter().map(runtime_summary).collect::<Vec<_>>(),
-                    "routing_trace": runtime_routing_trace(&runtimes, request, "multiple_matches")
-                })),
+                route_error(
+                    "ambiguous_intent",
+                    "The intent phrase matched more than one live runtime; narrow it or pass a runtime_id.",
+                    json!({
+                        "intent": needle,
+                        "candidates": matches.iter().map(runtime_summary).collect::<Vec<_>>(),
+                    }),
+                ),
             )),
         };
     }
@@ -6544,8 +7273,10 @@ fn runtime_routing_trace(
         .map(|client| {
             let url = client.url.as_deref().unwrap_or("");
             json!({
+                // U7: one agent-facing id space. The routing trace addresses
+                // runtimes by runtime_id only — runtime_key is an internal id
+                // the agent never sees or routes by.
                 "runtime_id": client.runtime_id,
-                "runtime_key": client.runtime_key,
                 "url": client.url,
                 "runtime_id_match": target_runtime_id
                     .map(|target| target == client.runtime_id)
@@ -6572,18 +7303,87 @@ fn runtime_summaries(runtimes: &HashMap<String, RuntimeClient>) -> Vec<Value> {
     runtimes.values().map(runtime_summary).collect()
 }
 
+/// The host portion of a URL, without scheme, userinfo, port, or path — the
+/// human-meaningful "which site" label (R6). Deliberately lightweight (no url
+/// crate): strip the scheme, cut at the first `/`, drop any `user@` and `:port`.
+/// Returns None for an empty or path-only string.
+fn host_from_url(url: &str) -> Option<String> {
+    let without_scheme = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url);
+    let authority = without_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    // Trim a :port (but keep an IPv6 bracket form intact enough for a label).
+    let host = host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
+}
+
+/// Whether a runtime matches an intent phrase (U6, R7). The agent routes by
+/// what it can see in the unified view — a url fragment, a page title, or a host
+/// — instead of hand-copying a runtime_id. Matched case-insensitively against
+/// the url, the tab title, and the derived host.
+fn runtime_matches_intent(client: &RuntimeClient, needle: &str) -> bool {
+    let needle = needle.to_lowercase();
+    if let Some(url) = client.url.as_deref() {
+        if url.to_lowercase().contains(&needle) {
+            return true;
+        }
+        if let Some(host) = host_from_url(url) {
+            if host.to_lowercase().contains(&needle) {
+                return true;
+            }
+        }
+    }
+    if let Some(title) = client
+        .tab
+        .as_ref()
+        .and_then(|tab| tab.get("title"))
+        .and_then(Value::as_str)
+    {
+        if title.to_lowercase().contains(&needle) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The agent-facing serialization of a live runtime (U5): one identity
+/// (`runtime_id`), human-meaningful labels (`url`, `title`, `host`), and an
+/// explicit `is_live`. The vestigial id spaces (`runtime_key` / `chrome-tab:`)
+/// and the raw chrome `tab` object are NOT exposed to the agent — one identity,
+/// no dead fields. `claimed_at_ms` is omitted entirely rather than serialized as
+/// a constant null (R10).
 fn runtime_summary(client: &RuntimeClient) -> Value {
-    json!({
+    let title = client
+        .tab
+        .as_ref()
+        .and_then(|tab| tab.get("title"))
+        .and_then(Value::as_str)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string);
+    let host = client.url.as_deref().and_then(host_from_url);
+    let mut row = json!({
         "runtime_id": client.runtime_id,
-        "runtime_key": client.runtime_key,
-        "authorization_id": client.authorization_id,
+        "url": client.url,
+        "title": title,
+        "host": host,
+        "is_live": client.is_live(now_ms()),
         "extension_version": client.extension_version,
         "connected_at_ms": client.connected_at_ms,
         "last_seen_ms": client.last_seen_ms,
-        "tab": client.tab,
-        "replay": client.replay,
-        "url": client.url
-    })
+    });
+    // U8 (R6-for-real): the MACHINE/BROWSER label, distinct from the site `host`.
+    // Two browsers on the same page share a host but differ by device. OMITTED
+    // (not null) when the extension does not report it — R10, no dead fields.
+    if let Some(device) = client.device.as_deref() {
+        row["device"] = json!(device);
+    }
+    row
 }
 
 async fn extension_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -6658,6 +7458,13 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 let url = item.get("url").and_then(Value::as_str).map(str::to_string);
+                // U8: the machine/browser this runtime lives on (e.g. "mac · 7c19").
+                // Older extensions omit it; then the field is simply absent.
+                let device = item
+                    .get("device")
+                    .and_then(Value::as_str)
+                    .filter(|d| !d.is_empty())
+                    .map(str::to_string);
                 let tab = item.get("tab").cloned();
                 let replay = item.get("replay").cloned();
                 connection_runtime_ids
@@ -6690,6 +7497,7 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
                             runtime_key,
                             authorization_id,
                             extension_version,
+                            device,
                             url,
                             tab,
                             replay,
@@ -6833,6 +7641,26 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
                     }
                 }
             }
+            Some("runtime_removed") => {
+                // A single tab closed while the browser (and this WS) stays
+                // alive. Reap exactly that runtime now, rather than waiting for
+                // the whole-connection teardown that never comes — the drag-504
+                // gap. Also drop it from this connection's id set so the
+                // eventual connection teardown does not double-log it.
+                if let Some(runtime_id) = item.get("runtime_id").and_then(Value::as_str) {
+                    connection_runtime_ids.lock().await.remove(runtime_id);
+                    remove_single_runtime(&state, runtime_id, "tab_closed").await;
+                }
+            }
+            Some("runtime_probe_result") => {
+                // The extension's verdict on a pre-dispatch liveness probe (U3):
+                // it ran chrome.tabs.get and reports whether the tab still
+                // exists. Resolve the matching in-flight probe.
+                if let Some(probe_id) = item.get("probe_id").and_then(Value::as_str) {
+                    let alive = item.get("alive").and_then(Value::as_bool).unwrap_or(false);
+                    resolve_runtime_probe(&state, probe_id, alive).await;
+                }
+            }
             Some("agent_event") => {
                 ingest_agent_event(&state, &item).await;
             }
@@ -6903,6 +7731,177 @@ async fn remove_runtimes_for_connection(
             }),
         );
     }
+}
+
+/// Evict every runtime whose heartbeat has aged past `RUNTIME_LIVENESS_TTL_MS`,
+/// reassign the active runtime if it was one of them, and record the eviction in
+/// the persistent lifecycle log (reason `liveness_sweep`). Returns how many were
+/// evicted. Idempotent: a run with nothing stale removes nothing and does not
+/// panic on an empty registry. This is the depth layer behind the read-path
+/// liveness filter — the read path never *advertises* a dead runtime, and the
+/// sweep makes sure a dead runtime does not linger in memory indefinitely.
+/// Resolve an in-flight liveness probe with the extension's verdict. Called from
+/// the `runtime_probe_result` message arm (and from tests). A probe_id with no
+/// waiter is a late/duplicate reply and is ignored.
+async fn resolve_runtime_probe(state: &AppState, probe_id: &str, alive: bool) {
+    if let Some(sender) = state.pending_probes.lock().await.remove(probe_id) {
+        let _ = sender.send(alive);
+    }
+}
+
+/// Probe a runtime for ground-truth liveness before dispatching into it: send a
+/// `runtime_probe` the extension answers with a `chrome.tabs.get`, and await the
+/// `runtime_probe_result`. A send failure, a timeout, or a negative verdict all
+/// mean dead. This is the hard guarantee — the extension confirms the tab still
+/// exists, not merely that a socket is open.
+async fn probe_runtime(state: &AppState, client: &RuntimeClient) -> bool {
+    let probe_id = Uuid::new_v4().to_string();
+    let (tx, rx) = oneshot::channel::<bool>();
+    state
+        .pending_probes
+        .lock()
+        .await
+        .insert(probe_id.clone(), tx);
+
+    let message = json!({
+        "type": "runtime_probe",
+        "probe_id": probe_id,
+        "runtime_id": client.runtime_id,
+    });
+    if client.tx.send(Message::Text(message.to_string())).is_err() {
+        state.pending_probes.lock().await.remove(&probe_id);
+        return false;
+    }
+
+    match tokio::time::timeout(Duration::from_millis(RUNTIME_PROBE_TIMEOUT_MS), rx).await {
+        Ok(Ok(alive)) => alive,
+        // Timeout or dropped sender: no confirmation the tab exists → dead.
+        _ => {
+            state.pending_probes.lock().await.remove(&probe_id);
+            false
+        }
+    }
+}
+
+/// The freshness-gated dispatch guarantee (KTD2, R2c). A fresh runtime is
+/// trusted and dispatches directly. A stale one is probed: on a positive probe
+/// it is dispatchable; on a negative/timeout it is evicted (U1) and the caller
+/// gets a `tab_closed` error (U4) instead of a real call vanishing into a closed
+/// tab and a 30s dispatch timeout.
+async fn ensure_dispatchable(
+    state: &AppState,
+    client: &RuntimeClient,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if !client.needs_dispatch_probe(now_ms()) {
+        return Ok(());
+    }
+    if probe_runtime(state, client).await {
+        return Ok(());
+    }
+    remove_single_runtime(state, &client.runtime_id, "tab_closed").await;
+    Err((
+        StatusCode::NOT_FOUND,
+        route_error(
+            "tab_closed",
+            "The target tab did not respond to a liveness probe before dispatch; it has been evicted.",
+            json!({ "runtime_id": client.runtime_id }),
+        ),
+    ))
+}
+
+/// Spawn the background task that periodically evicts stale runtimes. Runs on a
+/// cadence tighter than the TTL so a dead runtime is reaped within roughly one
+/// TTL window. Started at real bridge startup only — test app builders skip it,
+/// keeping their registries under explicit control.
+fn spawn_liveness_sweep(state: AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+            sweep_stale_runtimes(&state).await;
+        }
+    });
+}
+
+/// Reap exactly one runtime from the registry by id — the tab-close path. Unlike
+/// `remove_runtimes_for_connection` (which drops every runtime on a closed WS
+/// connection), this removes a single tab's runtime while the browser and its
+/// connection stay alive: the exact drag-504 gap where one tab closed but the
+/// socket did not. Reassigns the active runtime if it was the reaped one, and
+/// records the eviction in the lifecycle log. Returns whether a runtime was
+/// present to reap (unknown/already-removed id → false, no-op, no panic).
+async fn remove_single_runtime(state: &AppState, runtime_id: &str, reason: &str) -> bool {
+    let active_before = state.active_runtime_id.lock().await.clone();
+    let mut runtimes = state.runtimes.lock().await;
+    let Some(removed_client) = runtimes.remove(runtime_id) else {
+        return false;
+    };
+    let removed_active = active_before.as_deref() == Some(runtime_id);
+    let remaining = runtimes.len();
+    let next_active = runtimes.keys().next().cloned();
+    drop(runtimes);
+    if removed_active {
+        *state.active_runtime_id.lock().await = next_active;
+    }
+    append_lifecycle_log(
+        state.storage_root.as_deref(),
+        json!({
+            "ts_ms": now_ms(),
+            "event": "disconnect",
+            "reason": reason,
+            "removed_active": removed_active,
+            "remaining_runtimes": remaining,
+            "runtimes": [{ "runtime_id": runtime_id, "tab_url": removed_client.url }],
+        }),
+    );
+    true
+}
+
+async fn sweep_stale_runtimes(state: &AppState) -> usize {
+    let now = now_ms();
+    let active_before = state.active_runtime_id.lock().await.clone();
+    let mut runtimes = state.runtimes.lock().await;
+    let stale_ids: Vec<String> = runtimes
+        .iter()
+        .filter(|(_, client)| !client.is_live(now))
+        .map(|(id, _)| id.clone())
+        .collect();
+    if stale_ids.is_empty() {
+        return 0;
+    }
+    let mut removed_active = false;
+    let mut removed: Vec<Value> = Vec::new();
+    for runtime_id in &stale_ids {
+        let tab_url = runtimes.get(runtime_id).and_then(|c| c.url.clone());
+        let last_seen_ms = runtimes.get(runtime_id).map(|c| c.last_seen_ms);
+        runtimes.remove(runtime_id);
+        removed.push(json!({
+            "runtime_id": runtime_id,
+            "tab_url": tab_url,
+            "last_seen_ms": last_seen_ms,
+        }));
+        if active_before.as_deref() == Some(runtime_id.as_str()) {
+            removed_active = true;
+        }
+    }
+    let remaining = runtimes.len();
+    let next_active = runtimes.keys().next().cloned();
+    drop(runtimes);
+    if removed_active {
+        *state.active_runtime_id.lock().await = next_active;
+    }
+    append_lifecycle_log(
+        state.storage_root.as_deref(),
+        json!({
+            "ts_ms": now,
+            "event": "disconnect",
+            "reason": "liveness_sweep",
+            "removed_active": removed_active,
+            "remaining_runtimes": remaining,
+            "runtimes": removed,
+        }),
+    );
+    removed.len()
 }
 
 async fn list_tools(bridge: String) -> Result<()> {

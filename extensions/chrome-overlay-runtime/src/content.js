@@ -2478,6 +2478,106 @@
     return primitiveSuccess("dom.observe.visible", payload);
   };
 
+  // Enumerate matches and read their ATTRIBUTES, without the viewport filter that
+  // dom.observe.visible applies.
+  //
+  // `visible` in this file is a RENDERING predicate, not an EXISTENCE one.
+  // visibilityGeometryFor starts with intersectRects(rect, viewportRect()), and
+  // isElementVisible is Boolean(visible_rect). So every element scrolled off screen
+  // is "invisible" — present in the DOM, addressable, inert to that filter.
+  //
+  // Enumerating a scrollable collection through a viewport-scoped instrument
+  // therefore under-reports by however much is scrolled away, and the under-report
+  // is indistinguishable from "those elements do not exist." Trello's checklist is
+  // the case that forced this: nine rows in the DOM, dom.observe.visible returns 1,
+  // whichever one happens to straddle the viewport edge. The sibling snapshot
+  // projection sees all nine, because a snapshot runs querySelectorAll and reads
+  // attributes with no filter at all.
+  //
+  // So this is dom.observe.visible minus one `.filter(isElementVisible)`, plus the
+  // ability to name which attributes you want. It reports `visible` per match rather
+  // than silently deciding for you: the caller learns what is on screen AND what
+  // exists, which are different questions that the old primitive answered as one.
+  //
+  // Attributes, not text, because accessible names often live only on an attribute:
+  // Trello's row name is the aria-label of a 1x1 <input> whose textContent is "".
+  //
+  // Read-only and portable: no debugger, no privileged capability. a11y.query reads
+  // the same names, but it is capability_class "privileged", absent from this
+  // dispatch entirely, and it resolves ONE node where this must ENUMERATE.
+  const domObserveAttributes = (args = {}) => {
+    const selector = typeof args.selector === "string" && args.selector.trim() ? args.selector.trim() : "*";
+    const requested = Array.isArray(args.attributes) ? args.attributes.filter((name) => typeof name === "string" && name.trim()) : [];
+    if (requested.length === 0) {
+      return primitiveError("dom.observe.attributes", "invalid_arguments",
+        "Name at least one attribute to read, for example [\"aria-label\", \"aria-checked\"]. Use the pseudo-attribute \"text\" for normalized textContent.",
+        { selector });
+    }
+    const textContains = normalizeText(args.text_contains || args.textContains).toLowerCase();
+    const maxPayloadBytes = Math.max(1000, Math.min(Number(args.max_payload_bytes ?? args.maxPayloadBytes ?? 16000), 256000));
+    const root = frameRootFor(args);
+    if (!root) {
+      return primitiveError("dom.observe.attributes", lastLocatorFrameError.code,
+        lastLocatorFrameError.message || `Frame '${lastLocatorFrameError.frame}' could not be targeted.`,
+        { frame: lastLocatorFrameError.frame });
+    }
+    let candidates;
+    try {
+      candidates = Array.from(root.querySelectorAll(selector));
+    } catch (_error) {
+      return primitiveError("dom.observe.attributes", "invalid_selector", "The selector could not be queried.", { selector });
+    }
+    const maxMatches = Math.max(1, Math.min(Number(args.max_matches ?? args.maxMatches ?? 50), 200));
+    // Match text against textContent OR aria-label, the same haystack the rest of the
+    // locator vocabulary uses — otherwise a filter here could never see a clipped
+    // node's only text, which is the whole point of this primitive.
+    const matches = candidates
+      .filter((element) => {
+        if (!textContains) return true;
+        return normalizeText(element.textContent || element.getAttribute("aria-label")).toLowerCase().includes(textContains);
+      })
+      .slice(0, maxMatches)
+      .map((element) => {
+        const attributes = {};
+        for (const name of requested) {
+          attributes[name] = name === "text"
+            ? normalizeText(element.textContent)
+            : element.getAttribute(name);
+        }
+        return {
+          tag_name: element.tagName.toLowerCase(),
+          attributes,
+          visible: isElementVisible(element)
+        };
+      });
+    const payload = { matches, match_count: matches.length, visible_count: matches.filter((match) => match.visible).length };
+    const approximateBytes = new Blob([JSON.stringify(payload)]).size;
+    if (approximateBytes > maxPayloadBytes) {
+      return primitiveSuccess("dom.observe.attributes", {
+        ok: false,
+        error: {
+          code: "payload_too_large",
+          message: "The attribute query matched too much page content. Narrow the selector, the text query, or the attribute list.",
+          recoverable: true,
+          evidence: {
+            selector,
+            attributes: requested,
+            text_contains: textContains || null,
+            match_count: matches.length,
+            approximate_bytes: approximateBytes,
+            max_payload_bytes: maxPayloadBytes,
+            narrowing_hints: [
+              "Use a narrower selector.",
+              "Request fewer attributes.",
+              "Use max_matches with a small value only when the first few matches are known to be useful."
+            ]
+          }
+        }
+      });
+    }
+    return primitiveSuccess("dom.observe.attributes", payload);
+  };
+
   const deriveSectionHeading = (section, headingSelector, maxHeadingLength) => {
     const selectors = headingSelector
       ? [headingSelector]
@@ -2940,6 +3040,41 @@
     return primitiveSuccess("locator.text_content", {
       locator,
       text: normalizeText(element.textContent || element.getAttribute("aria-label"))
+    });
+  };
+
+  // Read a form control's LIVE value property. Nothing else could:
+  // locator.text_content returns textContent||aria-label, and an <input> has
+  // neither; every text_contains filter reads getAttribute("value"), the
+  // ATTRIBUTE, which React and friends never write — they set the property.
+  //
+  // The gap is not cosmetic. "Has this component finished initialising?" has
+  // exactly one DOM-level answer: its input holds the framework's default
+  // value. Without this read, a workflow can only wait for the element to be
+  // VISIBLE, then type into a node whose controlled-value handler is not yet
+  // attached — the write lands and is discarded on the next render, silently.
+  // (Trello's add-checklist popover, 2026-07-10.)
+  //
+  // `settable` reports whether this element even has a value to read, so a
+  // gate can distinguish "not ready" from "wrong element" instead of treating
+  // an empty string as both.
+  const locatorValue = (args = {}) => {
+    const locator = args.locator;
+    const element = resolveSingleVisibleLocator(locator);
+    if (!element) {
+      return primitiveError("locator.value", "target_not_found", "No visible element matched the locator.", { locator });
+    }
+    const settable = typeof element.value === "string";
+    const value = settable
+      ? element.value
+      : element.isContentEditable
+        ? normalizeText(element.textContent)
+        : null;
+    return primitiveSuccess("locator.value", {
+      locator,
+      value,
+      settable,
+      tag_name: element.tagName.toLowerCase()
     });
   };
 
@@ -4068,6 +4203,8 @@
       output = await locatorElementInfo(message.arguments || {});
     } else if (message.name === "locator.text_content") {
       output = locatorTextContent(message.arguments || {});
+    } else if (message.name === "locator.value") {
+      output = locatorValue(message.arguments || {});
     } else if (message.name === "dom.focus") {
       output = domFocus(message.arguments || {});
     } else if (message.name === "locator.wait_for") {
@@ -4133,6 +4270,8 @@
       output = pageInfo();
     } else if (message.name === "dom.observe.visible") {
       output = domObserveVisible(message.arguments || {});
+    } else if (message.name === "dom.observe.attributes") {
+      output = domObserveAttributes(message.arguments || {});
     } else if (message.name === "dom.list_sections") {
       output = domListSections(message.arguments || {});
     } else if (message.name === "dom.snapshot_text") {

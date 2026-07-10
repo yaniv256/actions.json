@@ -10,6 +10,7 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { ensureBinary } = require('../lib/install');
 const { ensureStorageRoot } = require('../lib/storage');
+const { install } = require('../lib/register');
 
 // The primitive dictionary (browser-control tool catalog) ships with this
 // package — it's a fixed runtime file, not user config. When the caller runs a
@@ -40,6 +41,13 @@ function withDefaults(args) {
 }
 
 async function main() {
+  // `install` is a wrapper-side subcommand (register the MCP server with the
+  // local coding agents); it does not touch the bridge binary or launch it.
+  if (process.argv[2] === 'install') {
+    process.exit(install());
+    return;
+  }
+
   let bin;
   try {
     bin = await ensureBinary();
