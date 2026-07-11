@@ -36,6 +36,16 @@ async function fetchRuntimes() {
   return res.json();
 }
 
+async function callBridgeTool(name, args = {}, route = {}) {
+  const res = await fetch(`http://127.0.0.1:${BRIDGE_PORT}/mcp/tools/call`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name, arguments: args, ...route }),
+  });
+  if (!res.ok) throw new Error(`${name} HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  return res.json();
+}
+
 // Poll /runtimes until `pred(json)` holds or we time out; returns the last json.
 async function waitForRuntimes(pred, timeoutMs = 8000) {
   const deadline = Date.now() + timeoutMs;
@@ -62,10 +72,12 @@ async function main() {
   bridge.stdout.on('data', (d) => process.stdout.write(`[bridge] ${d}`));
   bridge.stderr.on('data', (d) => process.stderr.write(`[bridge] ${d}`));
 
-  // Fixture server: two distinct pages so their runtimes carry different hosts.
+  // Fixture server: two visually distinct pages so runtime routing and
+  // screenshot surface identity can be checked through the real bridge seam.
   const srv = http.createServer((q, r) => {
     r.setHeader('content-type', 'text/html');
-    r.end(`<!doctype html><title>Fixture ${q.url}</title><h1>liveness fixture ${q.url}</h1>`);
+    const color = q.url === '/board-a' ? '#dc2626' : '#16a34a';
+    r.end(`<!doctype html><title>Fixture ${q.url}</title><style>body{margin:0;background:${color};color:white;font:48px sans-serif}</style><h1>liveness fixture ${q.url}</h1>`);
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${srv.address().port}`;
@@ -117,6 +129,78 @@ async function main() {
     const hostsOk = hosts.length === 2 && hosts.every((h) => h === '127.0.0.1'); // same host, distinct urls
     console.log('U5 shape ok:', shapeOk, 'hosts:', JSON.stringify(hosts));
 
+    // The MCP discovery tool is bridge-owned: it must return every live runtime
+    // without dispatching the list operation to one extension tab.
+    const claimed = await callBridgeTool('browser.claimed_tabs.list');
+    console.log('bridge claimed-tabs:', JSON.stringify(claimed));
+    const claimedOutput = claimed.output?.value ?? claimed.output;
+    const claimedOk = claimedOutput?.scope === 'bridge'
+      && claimedOutput?.complete === true
+      && claimedOutput?.inventory_source === 'live_runtime_registry'
+      && claimedOutput?.count === 2
+      && claimedOutput.tabs.every((row) => typeof row.runtime_id === 'string' && row.bridge_url === undefined);
+    if (!claimedOk) throw new Error(`bridge-global claimed-tabs contract failed: ${JSON.stringify(claimed)}`);
+
+    // Screenshot capture is background-routed and therefore bypasses the
+    // ordinary content-script action path. Prove its measurement envelope and
+    // exact runtime routing through the real extension↔bridge seam.
+    const rowA = rows.find((r) => r.url?.includes('/board-a'));
+    const rowB = rows.find((r) => r.url?.includes('/board-b'));
+    const shotArgs = {
+      format: 'jpeg',
+      quality: 60,
+      delay_ms: 25,
+      max_width: 800,
+      policy_exception_report: {
+        kind: 'generic',
+        intended_tool: 'browser.screenshot',
+        actions_json_path: 'none: fixture has no site-specific screenshot action',
+        reason: 'Live contract test for the generic background screenshot primitive.',
+      },
+    };
+    const shotA = await callBridgeTool('browser.screenshot', {
+      ...shotArgs,
+    }, { target_runtime_id: rowA?.runtime_id });
+    const shotB = await callBridgeTool('browser.screenshot', {
+      ...shotArgs,
+    }, { target_runtime_id: rowB?.runtime_id });
+    const valueA = shotA.output?.value ?? shotA.output;
+    const valueB = shotB.output?.value ?? shotB.output;
+    const screenshotOk = [valueA, valueB].every((value) =>
+      value?.surface_identity === 'verified_active_tab'
+      && value?.freshness === 'unverified'
+      && value?.delay_ms_applied === 25
+      && (value?.ignored_arguments?.includes('max_width')
+        || (value?.encoded?.resized === true && value?.encoded?.width <= 800))
+      && value?.data_url?.startsWith('data:image/jpeg;base64,'))
+      && valueA.data_url !== valueB.data_url;
+    console.log('background screenshot contract:', JSON.stringify({
+      screenshotOk,
+      a: { url: valueA?.url, identity: valueA?.surface_identity, freshness: valueA?.freshness, ignored: valueA?.ignored_arguments },
+      b: { url: valueB?.url, identity: valueB?.surface_identity, freshness: valueB?.freshness, ignored: valueB?.ignored_arguments },
+    }));
+    if (!screenshotOk) throw new Error(`background screenshot contract failed: ${JSON.stringify({ shotA, shotB })}`);
+
+    // Site capability discovery must derive its catalog scope from the same
+    // exact runtime target used for dispatch. No redundant URL argument is
+    // supplied here; this is the live regression for split-brain targeting.
+    const siteA = await callBridgeTool('actions.site', { mode: 'list' }, {
+      target_runtime_id: rowA?.runtime_id,
+    });
+    const siteB = await callBridgeTool('actions.site', { mode: 'list' }, {
+      target_runtime_id: rowB?.runtime_id,
+    });
+    const siteValueA = siteA.output?.value ?? siteA.output;
+    const siteValueB = siteB.output?.value ?? siteB.output;
+    const siteScopeOk = siteValueA?.target_url_contains === urlA
+      && siteValueB?.target_url_contains === urlB;
+    console.log('runtime-derived site catalog scopes:', JSON.stringify({
+      siteScopeOk,
+      a: siteValueA?.target_url_contains,
+      b: siteValueB?.target_url_contains,
+    }));
+    if (!siteScopeOk) throw new Error(`runtime-derived site catalog scope failed: ${JSON.stringify({ siteA, siteB })}`);
+
     // (2) THE drag-504 guarantee: close tab A; the bridge must reap its runtime.
     const survivorId = rows.find((r) => r.url?.includes('/board-b'))?.runtime_id;
     console.log('closing tab A; expecting survivor runtime:', survivorId);
@@ -150,7 +234,7 @@ async function main() {
     const reapLogged = reapReason === 'tab_closed' || reapReason === 'receive_loop_ended';
     console.log('reap logged with reason:', reapReason, '→', reapLogged);
 
-    pass = shapeOk && hostsOk && reaped && reapLogged;
+    pass = shapeOk && hostsOk && screenshotOk && siteScopeOk && reaped && reapLogged;
     console.log(pass ? 'LIVE LIVENESS SMOKE PASS ✓' : 'LIVE LIVENESS SMOKE FAIL ✗');
   } finally {
     await ctx.close();

@@ -1,7 +1,7 @@
 ---
 name: write-actions-json
 description: Use when an agent is exploring a website, automating a browser workflow, converting browser discoveries into reusable actions.json actions, validating a site action map through MCP/runtime tools, or preparing public/shared website operating memory.
-version: 0.1.11
+version: 0.1.15
 ---
 
 # Write actions.json
@@ -640,7 +640,17 @@ using those coordinates. If navigation fails, inspect `runtime.session.log` by
 boundary before changing prompts, adding primitives, or falling back to
 JavaScript navigation.
 
-A clickable coordinate is not proof of activation. Some controls only respond
+A locator may call a coordinate clickable only after it proves both geometry
+and hit-test ownership. Require `visibility.receives_events: true`: at the
+returned `clickable_center`, `document.elementFromPoint` must be the resolved
+target or its descendant/declared activation surface. `fully_visible` is a
+geometric fact and is not a substitute for receives-events truth. When a sticky
+header or floating control owns the point, the locator should return
+`state: "requires_scroll"`, `receives_events: false`, `occluded_by`, and a
+concrete `scroll_operation`; with auto-scroll enabled it should perform that
+operation and remeasure before returning a coordinate.
+
+Even a hit-test-certified coordinate is not proof of semantic activation. Some controls only respond
 after the page has entered a hover, focus, expanded, or otherwise armed state.
 When a locator resolves with `fully_visible: true` and `clickable: true` but the
 postcondition does not change, do not keep trying nearby coordinates. Identify
@@ -817,6 +827,44 @@ Use workflow actions for common patterns:
 - open a composer, insert text, press Enter, then verify with a read action;
 - repeat a read action over a bounded list of candidates.
 
+### Geometry Is Not Identity
+
+Viewport geometry is ephemeral presentation state. Never use a bounding box,
+row lane, vertical tolerance, or candidate index as a foreign key that joins an
+identity-bearing element to a separately discovered clickable element. A
+scroll, nested-scroll adjustment, rerender, expansion, or virtualization pass
+changes that coordinate frame and can turn an exact request into a neighboring
+mutation.
+
+The mutation boundary must still carry canonical identity:
+
+- Prefer one locator that matches the identity-bearing source and resolves the
+  actionable control in the same operation. When identity lives on a visually
+  hidden input but the visible control is an associated label, use
+  `locator.retarget` with an exact source identity, a declared `closest`
+  ancestor, and a visible descendant `selector`.
+- Consume the returned `clickable_center` immediately. If any step scrolls or
+  can rerender after geometry is sampled, discard the geometry and re-resolve
+  the exact target before clicking.
+- Require `visibility.receives_events = true` at that same identity-bound
+  point. A rectangle can be completely inside every clipping boundary while a
+  sticky sibling owns its center. Treat `occluded_by` plus a recoverable
+  `scroll_operation` as navigation state, not as target absence.
+- Never run a broad auto-scrolling locator after sampling an exact target and
+  then align the two results by `bounding_box.top`, overlap, nearest distance,
+  or array position.
+- Require `candidate_count = 1` for exact destructive or state-changing
+  actions. Ambiguity is a readiness failure, not permission to pick the first
+  candidate.
+- Verify preservation as well as change when a wrong sibling mutation would be
+  harmful: prove the requested item changed and every relevant sibling retained
+  its prior state.
+
+Test exact-item actions across a scroll-state matrix: first visible candidate,
+middle candidate with earlier rows offscreen, last candidate, and a rerender
+after a prior mutation. A single first-candidate success does not validate
+identity integrity.
+
 ### Workflows Are State Machines, Not Optimistic Macros
 
 Do not write a mutating workflow as one long hopeful script that assumes every
@@ -863,6 +911,20 @@ Design mutating workflows as explicit state machines:
 7. **Final verification**: for user-visible mutations, verify the logical state
    changed through a state projection or equivalent read. A clicked button,
    successful workflow result, or closed modal is not enough.
+
+For toggles and other reversible mutations, express the workflow as a
+**desired-state machine**, not a command:
+
+1. Resolve exactly one canonical identity independent of its current state.
+2. Read the current state through a non-visibility-bound semantic read.
+3. If it is already desired, return success without clicking (idempotence).
+4. Otherwise click the identity-bound, receives-events-certified point.
+5. Read the exact state again. If it remains in the source state, re-resolve
+   identity and actionability before one bounded retry; never reuse stale
+   coordinates and never retry a toggle without first proving it did not land.
+6. Hard-fail unless the final read proves exactly one target in the desired
+   state. A wait-only `after_each` cannot recover from a no-op because it does
+   not change the failed predicate.
 
 Editor and rich-text actions need stricter identity than ordinary buttons:
 
@@ -1195,6 +1257,17 @@ precondition; if the Calendar wrapper, popover, editor, or modal is absent, the
 read should return `scope not found`, `complete:false`, or an explicit
 `wrong_state` result, not silently widen its scope.
 
+URL route scope is part of the state anchor, not documentation. If a projection
+only means something on a specific route shape, declare `scope.url_matches` and
+verify the runtime and MCP list/call surfaces enforce it. A board projection
+scoped to `/b/*` must not be listed or executable on a `/c/*` card route; an
+empty array from the wrong route is a lie, not a valid empty state. Every
+route-scoped projection needs at least one negative-route test that proves the
+projection is unavailable or returns an explicit `wrong_state` result outside
+that route. This prevents the failure where a blind agent treats "valid
+projection with zero records" as durable truth when it is really standing in
+the wrong application state.
+
 This is the replacement for screenshot-driven operation. Screenshots are useful
 evidence during authoring, but they are token-heavy and visually ambiguous.
 The finished map should let the hosted agent orient itself with compact JSON:
@@ -1215,8 +1288,9 @@ options rows, conversations, table pages, or modal fields.
 A robust projection does not only say what is visible right now; it
 distinguishes three layers:
 
-1. **Clickable now**: controls/items whose visible rect is large enough for a
-   user-like pointer click.
+1. **Clickable now**: controls/items whose visible rect is large enough and
+   whose action point is owned by the intended element or its activation
+   surface (`receives_events: true`).
 2. **Scroll-reachable now**: rendered controls/items outside the current clipped
    region, with the scroll container, axis, and delta needed to bring them fully
    into view.
@@ -1229,6 +1303,35 @@ When a locator fails, do not collapse these into `target_not_found`. First ask
 whether the element is absent, rendered-but-clipped, partially visible, or
 blocked behind a load frontier. Good actions expose that geometry to the agent
 so it can make one measured scroll, then verify visibility before clicking.
+
+#### Projection-to-action closure
+
+A projection is not operationally complete merely because it lists the right
+objects. Every projected object that invites a follow-up action must carry an
+**owner-qualified identity** that the follow-up action consumes atomically. The
+projection and mutation API form one contract:
+
+- declare the projection's authority and scope (`page`, `browser_instance`,
+  `bridge`, account, workspace, board, or another explicit owner);
+- include the stable object identity plus every owner identity needed to route
+  back to the exact surface that produced it;
+- make the action accept that same handle, not a weaker local fragment of it;
+- reject incomplete or ambiguous handles instead of defaulting to whichever
+  tab, frame, list, workspace, or runtime happens to be active; and
+- verify with two-owner fixtures whose local IDs deliberately collide.
+
+For example, a bridge-global tab projection cannot return a bare Chrome
+`tab_id` and then offer `activate(tab_id)`: Chrome tab IDs are browser-session
+local. It must return an owning `runtime_id` with the local `tab_id`, and the
+activation action must bind both. The same rule applies to rows in two tables,
+cards in two boards, issues in two workspaces, and controls in nested frames.
+
+Do not repair a scope mismatch with prose alone. A description that says
+"remember to target the right runtime" is weaker than a schema that requires
+the owner-qualified handle. Do not merge rows from several authorities unless
+the projection can preserve each row's owner and every follow-up action can
+route by it. If the platform cannot provide that closure yet, label the result
+partial and do not advertise the mutation as a safe follow-up.
 
 Author state coverage alongside navigation:
 
@@ -1251,6 +1354,10 @@ Author state coverage alongside navigation:
    rows.
 6. Prefer several focused projections over one giant raw text dump. The goal is
    low-token situational awareness at every step of navigation.
+7. For every projected row, enumerate the actions an agent can naturally take
+   next and prove each action consumes the row's full owner-qualified identity.
+   Add a collision test whenever local IDs are only unique inside a browser,
+   frame, account, workspace, board, list, or other owner boundary.
 
 Use the standard stack:
 
@@ -1728,13 +1835,23 @@ depend on screenshots. Prefer DOM reads for text, links, cards, tables, and nav
 state. In hosted Realtime sessions, screenshots may need compact capture
 constraints so the tool result does not overwhelm the data channel.
 
+A screenshot is an **asymmetric measurement**. If it shows a new visual change,
+that is strong positive evidence. If it shows no change, it is not clearance:
+an occluded/dormant canvas, activation race, or suspended compositor can return
+old pixels. Treat `captured_at` as transport time, never pixel-paint time. Require
+`surface_identity` before attributing pixels to a tab, inspect `freshness`, and
+when freshness is `unverified` use an independent site projection/model read to
+decide semantic state. Never use a screenshot alone as a mutation postcondition
+for Docs, Sheets, Slides, or another canvas application.
+
 When a screenshot causes a hang or disconnect:
 
 - pull `runtime.session.log`;
 - check whether `browser.screenshot` completed and whether the failure happened
   while returning the result to the model;
-- retry with compact arguments such as JPEG format, bounded width/height,
-  quality, size budget, and timeout;
+- retry with JPEG quality and transport timeout controls that the returned
+  result proves were applied; inspect `ignored_arguments` rather than assuming
+  every accepted size control changed the background capture;
 - add or update a DOM read action when the user only needs text or structure.
 
 ### The Overlay Occludes The Page It Operates
@@ -1775,15 +1892,21 @@ center now returns the target element.
 
 The occluder is not always the overlay. Sites have their own sticky headers,
 toolbars, and floating bars that cover controls when an inner container is
-scrolled — and `locator.element_info` reports geometry only, so a covered
-control still reads `fully_visible: true` with an empty `clipped_by`. Trello's
+scrolled. A conforming `locator.element_info` keeps `fully_visible` as the
+geometric fact but reports `receives_events: false`, `clickable: false`, and
+the topmost `occluded_by` element, then attempts a measured scroll that moves
+the complete target clear. Treat a runtime that returns `clickable: true` while
+`elementFromPoint(clickable_center)` belongs to another element as a runtime
+instrumentation defect, not as a site-map quirk. Trello's
 card modal is the canonical example: with the modal's inner `main` scrolled
 down, the sticky title header sits over the Description "Edit" button, and
 `pointer.click` at its center lands on the header. When a click on a
-"fully visible" element does nothing and the overlay is already hidden, check
-`elementFromPoint` for a *site* element on top, then encode a scroll-to-known-
-position step (for example `viewport.scroll` with a large negative `delta_y`
-scoped to the correct inner scroller) before the find/click sequence. Beware
+"fully visible" element does nothing and the overlay is already hidden, inspect
+`receives_events` and `occluded_by`; if the runtime cannot provide them, check
+`elementFromPoint` during authoring and repair the shared actionability layer
+before adding a site-specific scroll workaround. A site action may still need
+a semantic scroll-to-known-position step when the site virtualizes or changes
+state only at a boundary. Beware
 nested scrollers when scoping that scroll: a combined selector list resolves in
 document order, so `"[role='dialog'] main, [role='dialog']"` scopes to the
 outer dialog, not `main` — scope to the actual scrolled container only.
@@ -2069,6 +2192,70 @@ was a `locator.text_content` over the whole `[role='dialog']` with
 decorative. It was cited *here* as the positive example. Anchors and postconditions
 are necessary and not sufficient; also run the checks in the sibling rule *A Step
 That Cannot Fail Is Not A Check*.
+
+### Creation Is A Delta, Not A Presence Check
+
+Never certify a `*.create`, `*.add`, `*.post`, or duplicate-capable mutation by
+checking only that the requested text exists afterward. If the site's entities
+are non-unique, the desired text may have existed before the call; a retry can
+then create a duplicate while both the workflow and postcondition report success.
+Measured on Trello (2026-07-11): two same-title checklists and two same-text
+checklist items were accepted, while `$contains(state, input.text)` passed after
+both calls.
+
+For every creation of a non-unique entity, prove **new identity or exact delta**:
+
+1. Read the target container before mutation and capture the matching entity IDs
+   or exact-match count.
+2. Execute the mutation once.
+3. Read the same container again through an independent projection.
+4. Require either one newly surfaced stable ID or `after_exact_count =
+   before_exact_count + 1`, scoped to the intended parent/container.
+5. Return the new ID/count evidence. On timeout or ambiguous evidence, **read
+   before retrying**; never replay a non-idempotent create merely because the
+   first call did not return.
+
+If the site exposes no stable ID and the projection cannot count exact scoped
+matches, the action is not yet strongly verifiable. State that precise boundary
+in the description; use a unique caller-generated key where appropriate; do not
+replace it with a blanket "unreliable" warning and do not pretend text presence
+proves creation. A postcondition such as `$exists(rows[name=input.name])` or
+`$contains(pageText,input.text)` is acceptable for a **read/open** action, never
+as the sole proof of a non-unique create/add effect.
+
+### A Capability Change Is An Eight-Surface Transaction
+
+Treat an actions.json capability as one versioned contract across eight surfaces:
+
+1. workflow mechanics;
+2. projection and postcondition;
+3. model-facing action description;
+4. site/authoring skill guidance;
+5. adversarial regression tests;
+6. the deployed catalog and live runtime evidence;
+7. investigation/current-status artifacts; and
+8. task-board cards, blockers, and follow-up queues.
+
+A fix is incomplete until all eight agree. When behavior changes, search the action
+and every sibling for dated limitations, `UNSUPPORTED`/`UNRELIABLE` claims,
+retry guidance, and copied failure prose. Narrow or remove only what the evidence
+disproves, preserve real residual boundaries, add a test for the old misleading
+contract, sync storage, and re-read the live `actions.site list`. A description
+whose nouns or verbs are absent from the workflow (for example, a create action
+claiming it "toggles an item") is a release-blocking semantic mismatch, not
+harmless documentation debt.
+
+Investigation files that preserve intermediate theories must start with a
+machine-readable current-status block. Mark disproved conclusions `SUPERSEDED`
+and link the experiment or commit that replaced them; do not leave several
+headings named “root cause” equally authoritative. Before creating a follow-up
+card from an investigation or search result, join the evidence to time: inspect
+later commits, current descriptions, current tests, and live catalog/runtime
+state. The card must cite a current failing test/log or state explicitly that it
+is a historical audit. When the capability becomes healthy, close or rewrite
+the linked cards in the same change. A backlog that still asserts the old
+failure means the capability transaction is incomplete even when production
+code is correct.
 
 ### Verify URLs By Href, Never By Visible Text
 

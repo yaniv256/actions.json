@@ -33,6 +33,29 @@ test("workflow evaluator rejects partial embedded expressions", async () => {
   );
 });
 
+test("workflow text.type reaches the primitive executor with direct-call arguments intact", async () => {
+  const directCall = {
+    name: "text.type",
+    arguments: { text: "Same path", trusted: true, select_back_chars: 4 },
+  };
+  const calls = [];
+  const result = await executeWorkflowAction({
+    actionName: "diagnostic.same_text_path",
+    workflow: {
+      version: 1,
+      expression_language: "jsonata",
+      steps: [{ id: "type", primitive: directCall.name, args: directCall.arguments }],
+    },
+    executePrimitive: async (call) => {
+      calls.push(call);
+      return { ok: true, output: { typed: true, fidelity: "trusted" } };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [directCall]);
+});
+
 test("workflow evaluator rejects dynamic, random, and clock JSONata functions", async () => {
   for (const expression of ["{% $eval('input.title') %}", "{% $random() %}", "{% $now() %}", "{% $millis() %}"]) {
     await assert.rejects(

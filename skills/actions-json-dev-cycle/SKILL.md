@@ -110,6 +110,31 @@ mcp__actions-json__start_extension_session
 Identity is **verified by manifest name**, never by id prefix. `ok:true` plus that name is your
 proof the extension you meant is the extension that loaded.
 
+#### Identity and capability attestation (mandatory)
+
+Browser automation values returned by the environment are **capabilities, not constants**. An
+unpacked extension ID is path/profile-derived unless the manifest deliberately pins a key; a CDP
+endpoint names one exact browser process/profile; a tab ID is local to that process. Never copy any
+of these values into source as a fallback. Thread the value returned by the operation that created
+it into the operation that consumes it.
+
+Every browser state transition must attest the state needed by the next step:
+
+1. `Target.createTarget` success proves only that Chrome allocated a target, not that the URL
+   committed. Read the committed context and reject `chrome-error://` or redirects.
+2. Before privileged extension code, verify `chrome.runtime.id`, manifest name/version, and the
+   required API surface in that exact context.
+3. Replace fixed sleeps with bounded semantic polling. Retry only while evidence says the expected
+   state can still become ready; stop immediately on a terminal wrong identity/error page.
+4. Treat endpoint + profile + extension ID + target page as one capability tuple. If they did not
+   come from the same launched session, re-attest that they coexist before use.
+5. Return typed precondition failures with expected/actual identity and committed URL. Never collapse
+   them into a generic downstream exception such as `authorize failed`.
+
+The required failure-path tests are: wrong/absent extension ID, wrong manifest identity, target
+commits to a Chrome error page, target site absent, delayed-but-eventually-ready extension context,
+and failed-target cleanup. A happy-path test alone does not make a launcher primitive portable.
+
 **Gotchas, each of which has cost a session:**
 
 - **Pass a Windows path.** Chrome runs on Windows; a WSL `/tmp/...` path fails with
@@ -130,6 +155,9 @@ proof the extension you meant is the extension that loaded.
   silently — no exception, nothing on `chrome://extensions`. Before loading a hand-edited copy,
   `acorn`-parse every entry point with `sourceType:"module"` (`scripts/tests/package-extension-completeness.test.mjs`
   does this). Otherwise "no console output" reads as "it hung before my first checkpoint."
+- **Never use a historical unpacked extension ID.** `start_extension_session`/`load_extension`
+  return the actual ID. Pass that exact value to `claim_tab`; the claim contract requires it and
+  attests the popup context before touching `chrome.tabs`.
 
 ### Phase 3: Package the extension and VERIFY the fix is in the zip
 

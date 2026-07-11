@@ -115,7 +115,10 @@ async function connectAuthedChromeEnv(opts) {
   const bridgeUrl = opts.bridgeUrl || DEFAULT_BRIDGE_URL;
   const { claimTab } = await import('../../../tools/deploy/deploy.mjs');
   const wsUrl = opts.endpoint.replace(/^http/, 'ws');
-  const extId = opts.extensionId || OVERLAY_EXTENSION_ID;
+  const extId = opts.extensionId || process.env.EVAL_EXTENSION_ID;
+  if (!extId) {
+    throw new Error('EVAL_EXTENSION_ID is required when connecting to an existing CDP endpoint; use the id returned by deployment');
+  }
 
   const ws = new WebSocket(wsUrl);
   let seq = 0; const pend = new Map(); const sessions = new Map();
@@ -245,12 +248,6 @@ async function launchCookieEnv(opts) {
   return wireEnv({ ctx, bridgeUrl, cleanup, opts, isCdp: false });
 }
 
-// The extension id (its popup page is chrome-extension://<id>/popup.html). Opening that
-// page as a tab WAKES the MV3 service worker AND holds it alive via the open message port —
-// the proven fix for "SW dormant by claim time" (over connectOverCDP the SW unloads and
-// self.__claimTest disappears). We keep that tab open through the claim.
-const OVERLAY_EXTENSION_ID = process.env.EVAL_EXTENSION_ID || 'dbbgeieflhabcibjmgbohhfmollnhbcp';
-
 // Shared: open/find a Doc, resolve its tab in the SW, claim it, return the driver helpers.
 async function wireEnv({ ctx, bridgeUrl, cleanup, opts, isCdp }) {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -275,7 +272,7 @@ async function wireEnv({ ctx, bridgeUrl, cleanup, opts, isCdp }) {
     // the native claim_tab helper drives raw CDP over the same relay and works — it opens the
     // extension popup page (waking+holding the SW) and fires authorize-tab from that context.
     // The extension id is the ACTUAL deployed id (path-derived, varies) — never hardcoded.
-    const extId = opts.extensionId || OVERLAY_EXTENSION_ID;
+    const extId = opts.extensionId || process.env.EVAL_EXTENSION_ID;
     // sw/tabId are populated differently per path and must live in the OUTER scope so the
     // return below can reference them regardless of branch. The CDP path has no Playwright
     // service-worker handle (connectOverCDP doesn't surface MV3 SW targets through the relay),
@@ -283,6 +280,7 @@ async function wireEnv({ ctx, bridgeUrl, cleanup, opts, isCdp }) {
     let sw = null;
     let tabId = null;
     if (isCdp && opts.endpoint) {
+      if (!extId) throw new Error('EVAL_EXTENSION_ID is required for CDP claim');
       const { claimTab } = await import('../../../tools/deploy/deploy.mjs');
       const wsUrl = opts.endpoint.replace(/^http/, 'ws');
       const claim = await claimTab(wsUrl, extId, 'docs.google.com/document/d/', { bridgeUrl });

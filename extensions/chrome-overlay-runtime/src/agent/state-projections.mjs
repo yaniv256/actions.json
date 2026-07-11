@@ -90,9 +90,28 @@ function loadStateProjectionMapsFromBundle(bundle, pageUrl) {
   return maps;
 }
 
+function wildcardPatternMatches(pattern, value) {
+  if (typeof pattern !== "string" || !pattern.trim()) return true;
+  const escaped = pattern
+    .replace(/[|\\{}()[\]^$+?.]/g, "\\$&")
+    .replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`, "i").test(String(value || ""));
+}
+
+function projectionMatchesPage(projection, pageUrl) {
+  const scope = projection?.scope;
+  if (!scope || typeof scope !== "object" || Array.isArray(scope)) return true;
+  if (typeof scope.url_matches === "string" && !wildcardPatternMatches(scope.url_matches, pageUrl)) {
+    return false;
+  }
+  return true;
+}
+
 function findStateProjection(bundle, pageUrl, projectionName) {
   for (const { map } of loadStateProjectionMapsFromBundle(bundle, pageUrl)) {
-    const projection = map.state_projections.find((candidate) => candidate?.name === projectionName);
+    const projection = map.state_projections.find((candidate) => (
+      candidate?.name === projectionName && projectionMatchesPage(candidate, pageUrl)
+    ));
     if (projection) return projection;
   }
   return null;
@@ -103,6 +122,7 @@ export function listStateProjectionsFromBundle(bundle, pageUrl) {
   for (const { map } of loadStateProjectionMapsFromBundle(bundle, pageUrl)) {
     for (const projection of map.state_projections) {
       if (validateStateProjection(projection).ok !== true) continue;
+      if (!projectionMatchesPage(projection, pageUrl)) continue;
       projections.push({
         name: projection.name,
         description: typeof projection.description === "string" ? projection.description : null,

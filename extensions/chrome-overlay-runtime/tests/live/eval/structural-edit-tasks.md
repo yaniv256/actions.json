@@ -3,7 +3,7 @@
 Yaniv (2026-07-08): the spell-fix tasks are too shallow — a glorified spell-checker. The real eval is
 NORMAL EDITING OPERATIONS that exercise structure and movement, where agents actually struggle:
 copy/paste, moving paragraphs, deleting, adding titles/headings, splitting a paragraph into two, merging,
-reformatting. Each is a discrete, screenshot-scoreable task.
+reformatting. Each is a discrete, projection-scoreable task.
 
 ## The base doc (clean, checkable — numbered so moves/splits are verifiable)
 A short doc with clearly-labelled paragraphs so structural changes are unambiguous to score:
@@ -14,7 +14,7 @@ A short doc with clearly-labelled paragraphs so structural changes are unambiguo
   P3: Birds are the main attraction for most visitors. Wading birds stalk the shallows at dawn.
   P4: Wetlands are disappearing worldwide. Drainage and development are the biggest threats.
 
-## Task battery (run one at a time, screenshot-score each: PASS / PARTIAL / FAIL)
+## Task battery (run one at a time, projection-score each: PASS / PARTIAL / FAIL)
 1. ADD HEADING: Add a Heading-1 titled "Introduction" directly above P1.
 2. SPLIT PARAGRAPH: Split P2 into two paragraphs — break it after "grasses." so the cordgrass sentence
    becomes its own paragraph.

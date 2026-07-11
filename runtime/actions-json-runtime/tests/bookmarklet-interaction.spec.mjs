@@ -1062,6 +1062,42 @@ test("locator.element_info center feeds pointer.click to change fixture state", 
   expect(await page.evaluate(() => document.body.dataset.clickY)).toBe("204");
 });
 
+test("bookmarklet locator retargets hidden semantic identity to a visible control", async ({ page }) => {
+  await installFakeBookmarkletSocket(page);
+  await page.route("https://example.test/locator-retarget", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><body>
+        <div data-testid="row">
+          <input type="checkbox" aria-label="Exact semantic item" style="position:absolute;width:1px;height:1px;clip:rect(0,0,0,0)">
+          <label data-testid="toggle" style="display:block;width:30px;height:30px">Toggle</label>
+        </div>
+      </body>`,
+    });
+  });
+  await page.goto("https://example.test/locator-retarget");
+  await page.addScriptTag({ content: bookmarkletSource });
+  await page.evaluate(() => window.__actionsJsonFakeSockets[0].emit("open"));
+
+  await callBookmarkletAction(page, "bookmarklet-retarget-call", "locator.element_info", {
+    locator: {
+      selector: "input[type='checkbox']",
+      text_equals: "Exact semantic item",
+      retarget: {
+        closest: "[data-testid='row']",
+        selector: "label[data-testid='toggle']",
+      },
+    },
+  });
+
+  expect(await readActionOutput(page, "bookmarklet-retarget-call")).toMatchObject({
+    ok: true,
+    primitive: "locator.element_info",
+    adapter: "embed",
+    value: { tag_name: "label", text: "Toggle", clickable: true },
+  });
+});
+
 test("bookmarklet implements advertised point and input primitives", async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 600 });
   await installFakeBookmarkletSocket(page);

@@ -1,0 +1,42 @@
+{
+  "title": "LinkedIn Outreach Radar",
+  "summary": "Current outreach is warm but uneven: several meeting paths are established, a larger group still needs a specific close, and a few conversations have unresolved follow-up items.",
+  "metrics": [
+    {
+      "label": "Meeting paths",
+      "value": 2
+    },
+    {
+      "label": "Need closure",
+      "value": 5
+    },
+    {
+      "label": "Open items",
+      "value": 3
+    }
+  ],
+  "lists": {
+    "meeting_path": [
+      {
+        "name": "Example Contact A",
+        "note": "Meeting timing is already being discussed."
+      },
+      {
+        "name": "Example Contact B",
+        "note": "Conversation has moved from interest to scheduling."
+      }
+    ],
+    "needs_closure": [
+      {
+        "name": "Example Contact C",
+        "note": "Interested, but no specific meeting path yet."
+      }
+    ],
+    "open_items": [
+      {
+        "name": "Example Contact D",
+        "note": "Needs a concrete follow-up question answered."
+      }
+    ]
+  }
+}

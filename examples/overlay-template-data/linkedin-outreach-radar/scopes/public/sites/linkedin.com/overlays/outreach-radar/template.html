@@ -1,0 +1,175 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LinkedIn Outreach Radar Template</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #172033;
+        background: #f5f7fb;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at 10% 0%, rgba(62, 92, 255, 0.22), transparent 30%),
+          linear-gradient(135deg, #f7f9ff 0%, #f1fbf6 100%);
+      }
+
+      main {
+        width: min(1040px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 34px 0 42px;
+      }
+
+      header {
+        display: grid;
+        gap: 8px;
+        margin-bottom: 24px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 32px;
+        line-height: 1.1;
+        letter-spacing: 0;
+      }
+
+      .summary {
+        margin: 0;
+        max-width: 760px;
+        color: #4d5a73;
+        font-size: 16px;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+        margin: 24px 0;
+      }
+
+      .metric,
+      .card {
+        background: rgba(255, 255, 255, 0.9);
+        border: 1px solid rgba(23, 32, 51, 0.1);
+        border-radius: 8px;
+        box-shadow: 0 18px 40px rgba(31, 43, 72, 0.1);
+      }
+
+      .metric {
+        padding: 16px;
+      }
+
+      .metric span {
+        display: block;
+        color: #657089;
+        font-size: 12px;
+        font-weight: 800;
+        text-transform: uppercase;
+      }
+
+      .metric strong {
+        display: block;
+        margin-top: 6px;
+        font-size: 28px;
+      }
+
+      .columns {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 14px;
+      }
+
+      .card {
+        padding: 16px;
+      }
+
+      .card h2 {
+        margin: 0 0 12px;
+        font-size: 17px;
+      }
+
+      ul {
+        display: grid;
+        gap: 10px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      li {
+        padding: 10px 12px;
+        border-radius: 7px;
+        background: #f8fafc;
+        border: 1px solid rgba(23, 32, 51, 0.08);
+      }
+
+      .name {
+        display: block;
+        font-weight: 800;
+      }
+
+      .note {
+        display: block;
+        margin-top: 4px;
+        color: #5b667d;
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1 data-field="title">Outreach Radar</h1>
+        <p class="summary" data-field="summary"></p>
+      </header>
+      <section class="metrics" data-metrics></section>
+      <section class="columns">
+        <article class="card">
+          <h2>Meeting Path Established</h2>
+          <ul data-list="meeting_path"></ul>
+        </article>
+        <article class="card">
+          <h2>Needs Closure</h2>
+          <ul data-list="needs_closure"></ul>
+        </article>
+        <article class="card">
+          <h2>Open Items</h2>
+          <ul data-list="open_items"></ul>
+        </article>
+      </section>
+    </main>
+    <script>
+      const data = JSON.parse(document.querySelector("[data-actions-json-overlay-data]").textContent);
+      document.querySelector('[data-field="title"]').textContent = data.title || "Outreach Radar";
+      document.querySelector('[data-field="summary"]').textContent = data.summary || "";
+
+      const metricRoot = document.querySelector("[data-metrics]");
+      for (const metric of data.metrics || []) {
+        const node = document.createElement("article");
+        node.className = "metric";
+        node.innerHTML = `<span></span><strong></strong>`;
+        node.querySelector("span").textContent = metric.label;
+        node.querySelector("strong").textContent = metric.value;
+        metricRoot.appendChild(node);
+      }
+
+      for (const [key, items] of Object.entries(data.lists || {})) {
+        const list = document.querySelector(`[data-list="${key}"]`);
+        if (!list) continue;
+        for (const item of items) {
+          const node = document.createElement("li");
+          node.innerHTML = `<span class="name"></span><span class="note"></span>`;
+          node.querySelector(".name").textContent = item.name;
+          node.querySelector(".note").textContent = item.note || "";
+          list.appendChild(node);
+        }
+      }
+    </script>
+  </body>
+</html>

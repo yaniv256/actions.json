@@ -82,21 +82,61 @@ impl CdpWs {
 
 /// The popup-context script that finds the target tab, stores the bridge URL, and sends the
 /// `authorize-tab` message. Returns a JSON string. Built to mirror claim_tab.mjs's expression.
-fn build_claim_expression(target_url_contains: &str, bridge_url: &str) -> String {
+fn build_claim_expression(ext_id: &str, target_url_contains: &str, bridge_url: &str) -> String {
+    let expected_extension_id = serde_json::to_string(ext_id).unwrap();
     let needle = serde_json::to_string(target_url_contains).unwrap();
     let bridge = serde_json::to_string(bridge_url).unwrap();
     format!(
         "(async()=>{{ try {{ \
+           const expectedExtensionId = {expected_extension_id}; \
+           const actualExtensionId = globalThis.chrome?.runtime?.id || null; \
+           const actualExtensionName = globalThis.chrome?.runtime?.getManifest?.()?.name || null; \
+           const tabsQueryType = typeof globalThis.chrome?.tabs?.query; \
+           if (actualExtensionId !== expectedExtensionId || actualExtensionName !== 'actions.json Overlay Runtime' || tabsQueryType !== 'function') return JSON.stringify({{ \
+             ok:false, code:'extension_context_invalid', error:'Expected actions.json extension context is not loaded', \
+             expectedExtensionId, actualExtensionId, actualExtensionName, tabsQueryType, committedUrl:globalThis.location?.href || null \
+           }}); \
            const tabs = await chrome.tabs.query({{}}); \
            const needle = {needle}; \
            const target = tabs.find(t => (t.url||'').includes(needle)); \
-           if (!target) return JSON.stringify({{ ok:false, error:'no tab matching '+needle }}); \
+           if (!target) return JSON.stringify({{ ok:false, code:'target_not_found', error:'no tab matching '+needle, needle }}); \
            const bridgeUrl = {bridge}; \
            await chrome.storage.local.set({{ bridgeUrl }}); \
            const response = await chrome.runtime.sendMessage({{ type:'actions-json:authorize-tab', tabId: target.id, bridgeUrl }}); \
            return JSON.stringify({{ ok: !!(response && response.ok), tabId: target.id, bridgeUrl, response }}); \
-         }} catch (e) {{ return JSON.stringify({{ ok:false, error: String(e && e.message || e) }}); }} }})()"
+         }} catch (e) {{ return JSON.stringify({{ ok:false, code:'authorize_exception', error: String(e && e.message || e) }}); }} }})()"
     )
+}
+
+fn failure_stage(result: &serde_json::Value) -> &'static str {
+    match result["code"].as_str() {
+        Some("extension_context_invalid") => "extension_context",
+        Some("target_not_found") => "target_lookup",
+        _ => "authorize",
+    }
+}
+
+fn should_retry_extension_context(result: &serde_json::Value) -> bool {
+    if result["code"].as_str() != Some("extension_context_invalid") {
+        return false;
+    }
+    if result["committedUrl"].as_str() == Some("chrome-error://chromewebdata/") {
+        return false;
+    }
+    if let (Some(actual), Some(expected)) = (
+        result["actualExtensionId"].as_str(),
+        result["expectedExtensionId"].as_str(),
+    ) {
+        if actual != expected {
+            return false;
+        }
+    }
+    if let Some(name) = result["actualExtensionName"].as_str() {
+        if name != "actions.json Overlay Runtime" {
+            return false;
+        }
+    }
+    true
 }
 
 /// Drive the headless claim. `cdp_ws_url` is the relay/endpoint WS; `ext_id` the extension id;
@@ -134,38 +174,63 @@ pub async fn claim_tab(
     })?;
     let sid = sid.to_string();
     cdp.send("Runtime.enable", serde_json::json!({}), Some(&sid)).await?;
-    tokio::time::sleep(Duration::from_millis(600)).await; // let popup.js load
 
-    // 3) From the popup context, find target tab, store bridgeUrl, send authorize-tab.
-    let expr = build_claim_expression(target_url_contains, bridge_url);
-    let evaled = cdp
-        .send(
-            "Runtime.evaluate",
-            serde_json::json!({ "expression": expr, "returnByValue": true, "awaitPromise": true }),
-            Some(&sid),
-        )
-        .await?;
-    if let Some(exc) = evaled["result"]["exceptionDetails"].as_object() {
-        return Err(LauncherError::Cdp {
-            stage: "eval",
-            message: format!("popup eval threw: {exc:?}"),
-        });
+    // 3) From the popup context, attest identity/readiness, then find and authorize the tab.
+    // A successful Target.createTarget is not a navigation postcondition: absent extension ids
+    // commit chrome-error://. Poll only while the expected context can still become ready.
+    let expr = build_claim_expression(ext_id, target_url_contains, bridge_url);
+    let mut final_result = None;
+    for attempt in 0..30 {
+        let evaled = cdp
+            .send(
+                "Runtime.evaluate",
+                serde_json::json!({ "expression": expr, "returnByValue": true, "awaitPromise": true }),
+                Some(&sid),
+            )
+            .await?;
+        if let Some(exc) = evaled["result"]["exceptionDetails"].as_object() {
+            return Err(LauncherError::Cdp {
+                stage: "eval",
+                message: format!("popup eval threw: {exc:?}"),
+            });
+        }
+        let raw = evaled["result"]["result"]["value"].as_str().ok_or_else(|| {
+            LauncherError::Cdp {
+                stage: "eval_value",
+                message: "no string value from popup eval".into(),
+            }
+        })?;
+        let result: serde_json::Value =
+            serde_json::from_str(raw).map_err(|e| LauncherError::Cdp {
+                stage: "eval_parse",
+                message: e.to_string(),
+            })?;
+        if result["ok"].as_bool() == Some(true)
+            || !should_retry_extension_context(&result)
+            || attempt == 29
+        {
+            final_result = Some(result);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
     }
-    let raw = evaled["result"]["result"]["value"].as_str().ok_or_else(|| LauncherError::Cdp {
-        stage: "eval_value",
-        message: "no string value from popup eval".into(),
-    })?;
-    let result: serde_json::Value = serde_json::from_str(raw).map_err(|e| LauncherError::Cdp {
-        stage: "eval_parse",
-        message: e.to_string(),
-    })?;
-    // Leave the popup tab OPEN (closing it lets the SW sleep and drops the bridge).
+    let result = final_result.expect("bounded claim loop always records a final result");
     if result["ok"].as_bool() != Some(true) {
+        // An invalid/error popup cannot hold a useful runtime alive; reap it so failed claims
+        // do not accumulate blocked chrome-error tabs.
+        let _ = cdp
+            .send(
+                "Target.closeTarget",
+                serde_json::json!({ "targetId": popup_target_id }),
+                None,
+            )
+            .await;
         return Err(LauncherError::Cdp {
-            stage: "authorize",
-            message: result["error"].to_string(),
+            stage: failure_stage(&result),
+            message: result.to_string(),
         });
     }
+    // Leave a successful popup tab OPEN (closing it lets the SW sleep and drops the bridge).
     let response = &result["response"];
     Ok(ClaimResult {
         tab_id: result["tabId"].as_i64().unwrap_or(-1),
@@ -180,7 +245,11 @@ mod tests {
 
     #[test]
     fn claim_expression_embeds_needle_and_bridge() {
-        let e = build_claim_expression("docs.google.com/document/d/", "ws://127.0.0.1:17346/extension");
+        let e = build_claim_expression(
+            "abcdefghijklmnopabcdefghijklmnop",
+            "docs.google.com/document/d/",
+            "ws://127.0.0.1:17346/extension",
+        );
         assert!(e.contains("docs.google.com/document/d/"));
         assert!(e.contains("ws://127.0.0.1:17346/extension"));
         assert!(e.contains("actions-json:authorize-tab"));
@@ -190,7 +259,49 @@ mod tests {
     #[test]
     fn claim_expression_escapes_injection() {
         // A needle with a quote must be JSON-escaped, not break the expression.
-        let e = build_claim_expression("a\"b", "ws://x");
+        let e = build_claim_expression("abcdefghijklmnopabcdefghijklmnop", "a\"b", "ws://x");
         assert!(e.contains("a\\\"b"));
+    }
+
+    #[test]
+    fn claim_expression_attests_extension_context_before_querying_tabs() {
+        let extension_id = "abcdefghijklmnopabcdefghijklmnop";
+        let e = build_claim_expression(extension_id, "trello.com", "ws://x");
+        let attestation = e.find("extension_context_invalid").expect("context error code");
+        let query = e.find("chrome.tabs.query").expect("tabs query");
+
+        assert!(e.contains(extension_id));
+        assert!(e.contains("actions.json Overlay Runtime"));
+        assert!(e.contains("chrome?.runtime?.id"));
+        assert!(e.contains("typeof globalThis.chrome?.tabs?.query"));
+        assert!(attestation < query, "attestation must precede privileged API use");
+    }
+
+    #[test]
+    fn claim_failure_preserves_precondition_stage() {
+        assert_eq!(
+            failure_stage(&serde_json::json!({ "code": "extension_context_invalid" })),
+            "extension_context"
+        );
+        assert_eq!(
+            failure_stage(&serde_json::json!({ "code": "target_not_found" })),
+            "target_lookup"
+        );
+        assert_eq!(failure_stage(&serde_json::json!({})), "authorize");
+    }
+
+    #[test]
+    fn extension_context_retry_requires_a_still_loading_extension_page() {
+        assert!(should_retry_extension_context(&serde_json::json!({
+            "code": "extension_context_invalid",
+            "committedUrl": "chrome-extension://abcdefghijklmnopabcdefghijklmnop/popup.html"
+        })));
+        assert!(!should_retry_extension_context(&serde_json::json!({
+            "code": "extension_context_invalid",
+            "committedUrl": "chrome-error://chromewebdata/"
+        })));
+        assert!(!should_retry_extension_context(&serde_json::json!({
+            "code": "target_not_found"
+        })));
     }
 }

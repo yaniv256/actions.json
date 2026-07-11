@@ -86,7 +86,7 @@
       "name": "browser.claimed_tabs.list",
       "version": 1,
       "stage": 1,
-      "summary": "List browser tabs already claimed by the actions.json extension.",
+      "summary": "List connected tabs; the result explicitly labels whether its inventory is bridge-global or extension-local.",
       "capability_class": "privileged",
       "portable": false,
       "capabilities": [
@@ -1791,7 +1791,7 @@
       "name": "locator.element_info",
       "version": 1,
       "stage": 1,
-      "summary": "Resolve a locator to visible element geometry and a recommended clickable center. When multiple visible elements match, return all candidates and mark the result ambiguous instead of making an arbitrary choice.",
+      "summary": "Resolve a locator to visible element geometry and a recommended clickable center. A locator may match semantic identity on one element and retarget through {closest, selector} to its visible control. When multiple visible elements match, return all candidates and mark the result ambiguous instead of making an arbitrary choice.",
       "capability_class": "portable",
       "portable": true,
       "capabilities": [

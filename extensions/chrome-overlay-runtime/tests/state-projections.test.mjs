@@ -122,6 +122,9 @@ function trelloFixtureDocument() {
 const trelloProjection = {
   name: "trello.board",
   description: "Logical board state.",
+  scope: {
+    url_matches: "https://trello.com/b/*",
+  },
   snapshot: {
     version: 1,
     source: "dom",
@@ -238,6 +241,22 @@ test("state projections are listed from matching actions.json maps", () => {
       summaries: ["agent_context"],
     },
   ]);
+});
+
+test("state projections are not listed outside their URL scope", () => {
+  assert.deepEqual(listStateProjectionsFromBundle(bundle, "https://trello.com/c/card-id/demo-card"), []);
+});
+
+test("state projection execution rejects a projection outside its URL scope", async () => {
+  const result = await executeStateProjection({
+    bundle,
+    pageUrl: "https://trello.com/c/card-id/demo-card",
+    document: trelloFixtureDocument(),
+    projectionName: "trello.board",
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "state_projection_not_found");
 });
 
 test("state projection extracts DOM records, runs JSONata, and validates state", async () => {

@@ -16,7 +16,7 @@
         "reason": null,
         "capability_class": "privileged",
         "portable": false,
-        "summary": "Capture a true rendered screenshot where the host has browser-level authority.",
+        "summary": "Capture visible pixels from a verified active tab; freshness remains unverified and semantic state requires an independent projection.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -54,7 +54,7 @@
         "reason": null,
         "capability_class": "privileged",
         "portable": false,
-        "summary": "List browser tabs already claimed by the actions.json extension.",
+        "summary": "List connected tabs. MCP returns the bridge-global runtime inventory; hosted execution returns the current extension instance and labels that scope.",
         "input_schema": {
           "type": "object",
           "properties": {},
@@ -2705,7 +2705,7 @@
     },
     {
       "name": "browser.claimed_tabs.list",
-      "description": "List tabs already claimed by the actions.json Chrome extension, including their tab ids, URLs, titles, runtime keys, authorization ids, and active state. Use this before switching context among user-authorized tabs.",
+      "description": "List connected actions.json tabs. On MCP this is a bridge-global inventory across browsers and machines, addressed by runtime_id; raw tab_id values are browser-local and may collide. Hosted extension execution returns only the current extension instance and labels scope=extension_instance. Use runtime_id with browser.active_tab.set when routing MCP calls.",
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -2807,7 +2807,7 @@
     },
     {
       "name": "browser.screenshot",
-      "description": "Capture the currently visible browser tab as an image so the agent can inspect the page state after authorization.",
+      "description": "Capture visible pixels from the verified active target tab. A successful result is positive visual evidence, not proof that unchanged pixels are fresh; use an independent site state projection for semantic verification.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2829,7 +2829,7 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 30000,
-            "description": "Wait this many milliseconds in the browser before capturing, useful for pages that are still painting after navigation."
+            "description": "Wait this many milliseconds after verified target-tab activation before capturing. This is a paint-settle aid, not a freshness guarantee."
           },
           "capture_timeout_ms": {
             "type": "integer",
@@ -2871,7 +2871,8 @@
         "source": {
           "files": [
             "src/content.js",
-            "src/background.js"
+            "src/background.js",
+            "src/agent/background-screenshot-capture.mjs"
           ],
           "symbols": [
             "actionsJsonOverlay.screenshot",
@@ -2904,14 +2905,37 @@
               "type": "string"
             },
             "captured_at": {
-              "type": "string"
+              "type": "string",
+              "description": "When capture transport completed; this is not the pixel paint timestamp."
+            },
+            "surface_identity": {
+              "type": "string",
+              "enum": [
+                "verified_active_tab"
+              ]
+            },
+            "freshness": {
+              "type": "string",
+              "enum": [
+                "unverified"
+              ]
+            },
+            "delay_ms_applied": {
+              "type": "integer"
+            },
+            "ignored_arguments": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             }
           },
           "required": [
             "ok",
             "data_url",
             "mime_type",
-            "viewport"
+            "surface_identity",
+            "freshness"
           ]
         }
       }

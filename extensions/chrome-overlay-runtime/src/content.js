@@ -1124,6 +1124,7 @@
       "z-index:2147483647",
       "resize:both",
       "overflow:hidden",
+      "box-sizing:border-box",
       "background:white",
       "border:1px solid rgba(20,24,31,0.22)",
       "border-radius:10px",
@@ -1833,7 +1834,11 @@
         device_pixel_ratio: window.devicePixelRatio
       },
       url: location.href,
-      captured_at: new Date().toISOString()
+      captured_at: new Date().toISOString(),
+      surface_identity: response.surface_identity,
+      freshness: response.freshness,
+      delay_ms_applied: delayMs,
+      ignored_arguments: []
     };
   };
 
@@ -2030,8 +2035,112 @@
     return ancestors;
   };
 
+  const pointerHitFor = (element, visibleRect) => {
+    if (!(element instanceof Element) || !visibleRect) {
+      return { receives_events: false, point: null, hit_element: null, occluded_by: null };
+    }
+    const point = {
+      x: visibleRect.left + rectWidth(visibleRect) / 2,
+      y: visibleRect.top + rectHeight(visibleRect) / 2
+    };
+    const hitElement = document.elementFromPoint(point.x, point.y);
+    const receivesEvents = hitElement === element || element.contains(hitElement);
+    const hitRect = hitElement instanceof Element
+      ? rectFromClientRect(hitElement.getBoundingClientRect())
+      : null;
+    return {
+      receives_events: receivesEvents,
+      point,
+      hit_element: hitElement,
+      occluded_by: receivesEvents || !(hitElement instanceof Element) ? null : {
+        target_label: elementLabel(hitElement),
+        tag_name: hitElement.tagName.toLowerCase(),
+        rect: hitRect
+      }
+    };
+  };
+
+  const occlusionScrollOperationFor = (geometry) => {
+    const occluderRect = geometry?.occluded_by?.rect;
+    const point = geometry?.action_point;
+    const rect = geometry?.bounding_box;
+    if (!occluderRect || !point || !rect) return null;
+    const padding = 8;
+
+    const operationFor = (target, targetElement, targetLabel, bounds, currentX, currentY, maxX, maxY) => {
+      const candidates = [
+        { delta_x: rect.right - (occluderRect.left - padding), delta_y: 0 },
+        { delta_x: rect.left - (occluderRect.right + padding), delta_y: 0 },
+        { delta_x: 0, delta_y: rect.bottom - (occluderRect.top - padding) },
+        { delta_x: 0, delta_y: rect.top - (occluderRect.bottom + padding) }
+      ].filter(({ delta_x: deltaX, delta_y: deltaY }) => {
+        if (deltaX === 0 && deltaY === 0) return false;
+        const nextX = currentX + deltaX;
+        const nextY = currentY + deltaY;
+        if (deltaX !== 0 && (maxX <= 0 || nextX < 0 || nextX > maxX)) return false;
+        if (deltaY !== 0 && (maxY <= 0 || nextY < 0 || nextY > maxY)) return false;
+        const shifted = {
+          left: rect.left - deltaX,
+          right: rect.right - deltaX,
+          top: rect.top - deltaY,
+          bottom: rect.bottom - deltaY
+        };
+        if (deltaX !== 0) {
+          return shifted.left >= bounds.left + padding
+            && shifted.right <= bounds.right - padding;
+        }
+        return shifted.top >= bounds.top + padding
+          && shifted.bottom <= bounds.bottom - padding;
+      }).sort((left, right) => (
+        Math.abs(left.delta_x) + Math.abs(left.delta_y)
+        - Math.abs(right.delta_x) - Math.abs(right.delta_y)
+      ));
+      const candidate = candidates[0];
+      if (!candidate) return null;
+      return {
+        target,
+        ...(targetElement ? { target_element: targetElement } : {}),
+        ...(targetLabel ? { target_label: targetLabel } : {}),
+        ...candidate,
+        current_scroll_x: currentX,
+        current_scroll_y: currentY,
+        max_scroll_x: maxX,
+        max_scroll_y: maxY,
+        reason: "occluded"
+      };
+    };
+
+    for (const ancestor of geometry.clipping_ancestors || []) {
+      const operation = operationFor(
+        "element",
+        ancestor.element,
+        ancestor.label,
+        ancestor.rect,
+        ancestor.scroll_left,
+        ancestor.scroll_top,
+        ancestor.max_scroll_left,
+        ancestor.max_scroll_top
+      );
+      if (operation) return operation;
+    }
+    return operationFor(
+      "window",
+      null,
+      null,
+      viewportRect(),
+      window.scrollX,
+      window.scrollY,
+      Math.max(0, document.documentElement.scrollWidth - window.innerWidth),
+      Math.max(0, document.documentElement.scrollHeight - window.innerHeight)
+    );
+  };
+
   const scrollOperationFor = (element, geometry) => {
     if (!geometry?.rendered) return null;
+    if (!geometry.receives_events) {
+      const occlusionOperation = occlusionScrollOperationFor(geometry);
+      if (occlusionOperation) return occlusionOperation;
+    }
     const rect = geometry.bounding_box;
     const padding = 8;
     for (const ancestor of geometry.clipping_ancestors || []) {
@@ -2087,6 +2196,7 @@
         rendered: false,
         visible: false,
         clickable: false,
+        receives_events: false,
         fully_visible: false,
         bounding_box: rect,
         visible_rect: null,
@@ -2113,26 +2223,38 @@
     const visibleArea = visibleRect ? rectArea(visibleRect) : 0;
     const visibleRatio = area > 0 ? visibleArea / area : 0;
     const fullyVisible = visibleRatio >= 0.98;
-    const clickable = Boolean(visibleRect && rectWidth(visibleRect) >= 8 && rectHeight(visibleRect) >= 8);
+    const hasClickableArea = Boolean(visibleRect && rectWidth(visibleRect) >= 8 && rectHeight(visibleRect) >= 8);
+    const pointerHit = hasClickableArea
+      ? pointerHitFor(element, visibleRect)
+      : { receives_events: false, point: null, hit_element: null, occluded_by: null };
+    const clickable = hasClickableArea && pointerHit.receives_events;
     const geometry = {
-      state: fullyVisible ? "visible" : "requires_scroll",
+      state: fullyVisible && clickable ? "visible" : "requires_scroll",
       rendered: true,
       visible: Boolean(visibleRect),
       clickable,
+      receives_events: pointerHit.receives_events,
       fully_visible: fullyVisible,
       bounding_box: rect,
       visible_rect: visibleRect,
       visible_ratio: visibleRatio,
       clipped_by: clippedBy,
-      clipping_ancestors: clippingAncestors
+      clipping_ancestors: clippingAncestors,
+      action_point: pointerHit.point,
+      occluding_element: pointerHit.hit_element,
+      occluded_by: pointerHit.occluded_by
     };
-    geometry.scroll_operation = fullyVisible ? null : scrollOperationFor(element, geometry);
+    geometry.scroll_operation = fullyVisible && clickable ? null : scrollOperationFor(element, geometry);
     return geometry;
   };
 
   const publicVisibility = (geometry) => {
     if (!geometry) return null;
-    const { clipping_ancestors: _ancestors, ...publicGeometry } = geometry;
+    const {
+      clipping_ancestors: _ancestors,
+      occluding_element: _occludingElement,
+      ...publicGeometry
+    } = geometry;
     if (publicGeometry.scroll_operation?.target_element) {
       const { target_element: _targetElement, ...publicOperation } = publicGeometry.scroll_operation;
       publicGeometry.scroll_operation = publicOperation;
@@ -2926,8 +3048,7 @@
       );
     }
     const text = normalizeText(locator.text || locator.text_contains || locator.text_equals);
-    if (!text) return candidates;
-    return candidates.filter((element) => {
+    const identityCandidates = !text ? candidates : candidates.filter((element) => {
       const haystack = normalizeText(
         [
           element.textContent,
@@ -2938,6 +3059,18 @@
       );
       return locator.text_equals ? haystack === text : haystack.includes(text);
     });
+    const retarget = locator.retarget;
+    if (!retarget || typeof retarget !== "object") return identityCandidates;
+    if (typeof retarget.selector !== "string" || !retarget.selector.trim()) return [];
+    const targets = identityCandidates.flatMap((identity) => {
+      const scope = typeof retarget.closest === "string" && retarget.closest.trim()
+        ? identity.closest(retarget.closest.trim())
+        : identity;
+      return scope
+        ? queryRelative(scope, retarget.selector.trim(), { visible_only: false })
+        : [];
+    });
+    return Array.from(new Set(targets));
   };
 
   const resolveSingleVisibleLocator = (locator) => resolveLocatorCandidates(locator).find(isElementVisible) || null;
@@ -2964,6 +3097,23 @@
     scroll_x: window.scrollX,
     scroll_y: window.scrollY
   });
+
+  const clickTargetDiagnostic = (element) => {
+    if (!(element instanceof Element)) return null;
+    return {
+      tag_name: element.tagName.toLowerCase(),
+      id: element.id || null,
+      class_name: typeof element.className === "string" ? element.className : null,
+      role: element.getAttribute("role"),
+      data_testid: element.getAttribute("data-testid"),
+      type: element.getAttribute("type"),
+      text: normalizeText(element.textContent).slice(0, 240),
+      disabled: Boolean(element.disabled),
+      aria_disabled: element.getAttribute("aria-disabled"),
+      bounding_box: rectDiagnostic(element),
+      viewport: viewportDiagnostic()
+    };
+  };
 
   const locatorElementInfo = async (args = {}) => {
     const locator = args.locator;
@@ -3399,7 +3549,13 @@
     }
     moveVisiblePointer(x, y);
     dispatchPointerClick(target, { x, y, button: args.button || "left", modifiers });
-    return primitiveSuccess("pointer.click", { clicked: true, x, y, modifiers });
+    return primitiveSuccess("pointer.click", {
+      clicked: true,
+      x,
+      y,
+      modifiers,
+      target: clickTargetDiagnostic(target)
+    });
   };
 
   const pointerMove = (args = {}) => {

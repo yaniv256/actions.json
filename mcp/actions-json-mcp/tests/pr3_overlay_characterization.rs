@@ -397,7 +397,10 @@ async fn url_routing_failure_reports_candidate_rejection_trace() {
     // live runtimes so the agent can pick a real one.
     assert_eq!(payload["error"]["code"].as_str(), Some("runtime_not_found"));
     assert!(payload["error"]["next_step"].is_string());
-    assert_eq!(payload["error"]["evidence"]["intent"].as_str(), Some("https://beta.example/"));
+    assert_eq!(
+        payload["error"]["evidence"]["intent"].as_str(),
+        Some("https://beta.example/")
+    );
     let runtimes = payload["error"]["evidence"]["runtimes"].as_array().unwrap();
     assert_eq!(runtimes.len(), 1);
     assert_eq!(runtimes[0]["runtime_id"].as_str(), Some("runtime-a"));
@@ -2373,6 +2376,7 @@ fn trello_state_projection_map() -> Value {
             {
                 "name": "trello.board",
                 "description": "Logical Trello board state: lists, cards, labels.",
+                "scope": { "url_matches": "https://trello.com/b/*" },
                 "snapshot": {
                     "version": 1,
                     "source": "dom",
@@ -2442,6 +2446,30 @@ async fn actions_site_list_includes_state_projections() {
 }
 
 #[tokio::test]
+async fn actions_site_list_filters_state_projections_by_url_scope() {
+    let storage_root = tempfile::tempdir().unwrap();
+    write_storage_map(
+        storage_root.path(),
+        "scopes/private/sites/trello.com/board/actions.json",
+        &trello_state_projection_map(),
+    );
+    let app = state_projection_app(storage_root.path()).await;
+
+    let (status, payload) = call_tool(
+        app,
+        json!({
+            "name": "actions.site",
+            "arguments": { "mode": "list", "target_url_contains": "https://trello.com/c/card-id/demo-card" }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let projections = payload["output"]["state_projections"].as_array().unwrap();
+    assert_eq!(projections.len(), 0);
+}
+
+#[tokio::test]
 async fn actions_site_state_read_unknown_projection_fails_without_dispatch() {
     let storage_root = tempfile::tempdir().unwrap();
     write_storage_map(
@@ -2472,6 +2500,36 @@ async fn actions_site_state_read_unknown_projection_fails_without_dispatch() {
     assert_eq!(
         payload["error"]["evidence"]["known_projections"][0].as_str(),
         Some("trello.board")
+    );
+}
+
+#[tokio::test]
+async fn actions_site_state_read_rejects_projection_outside_url_scope() {
+    let storage_root = tempfile::tempdir().unwrap();
+    write_storage_map(
+        storage_root.path(),
+        "scopes/private/sites/trello.com/board/actions.json",
+        &trello_state_projection_map(),
+    );
+    let app = state_projection_app(storage_root.path()).await;
+
+    let (status, payload) = call_tool(
+        app,
+        json!({
+            "name": "actions.site",
+            "arguments": {
+                "mode": "state_read",
+                "projection_name": "trello.board",
+                "target_url_contains": "https://trello.com/c/card-id/demo-card"
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        payload["error"]["code"].as_str(),
+        Some("state_projection_not_found")
     );
 }
 
@@ -2592,10 +2650,7 @@ async fn actions_site_state_read_round_trips_through_runtime() {
         Some("scopes/private/sites/trello.com/board/actions.json")
     );
     assert_eq!(item["projection"]["name"].as_str(), Some("trello.board"));
-    assert_eq!(
-        item["projection"]["snapshot"]["version"].as_u64(),
-        Some(1)
-    );
+    assert_eq!(item["projection"]["snapshot"]["version"].as_u64(), Some(1));
 
     socket
         .send(Message::Text(
@@ -2625,7 +2680,10 @@ async fn actions_site_state_read_round_trips_through_runtime() {
             .len(),
         0
     );
-    assert_eq!(payload["output"]["state_hash"].as_str(), Some("sha256:test"));
+    assert_eq!(
+        payload["output"]["state_hash"].as_str(),
+        Some("sha256:test")
+    );
 
     server.abort();
 }
@@ -2892,7 +2950,9 @@ async fn actions_site_workflow_call_rejects_ambiguous_maps() {
         payload["error"]["code"].as_str(),
         Some("site_action_ambiguous")
     );
-    let map_paths = payload["error"]["evidence"]["map_paths"].as_array().unwrap();
+    let map_paths = payload["error"]["evidence"]["map_paths"]
+        .as_array()
+        .unwrap();
     assert_eq!(map_paths.len(), 2);
 }
 

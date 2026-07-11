@@ -99,8 +99,12 @@ async function main() {
     console.log('[C]', JSON.stringify(c));
 
     const aOk = a.settled && Array.isArray(a.value);              // degraded, didn't hang
-    const bOk = b.settled && b.value && b.value.ok === true;      // real handler resolved while wedged
-    const cOk = c.settled && c.value && c.value.ok === true;      // normal path still works
+    const bOk = b.settled && b.value && b.value.ok === true
+      && b.value.scope === 'extension_instance'
+      && b.value.complete_within_scope === true;                  // real handler resolved and labeled its boundary
+    const cOk = c.settled && c.value && c.value.ok === true
+      && c.value.scope === 'extension_instance'
+      && c.value.inventory_source === 'extension_session_store'; // normal path preserves the same scope contract
     pass = aOk && bOk && cOk;
     console.log('freshStore degraded:', aOk, '| listClaimedTabs(wedged) resolved:', bOk, '| restored:', cOk);
     console.log(pass ? 'SESSION-STORE 504 LIVE SMOKE PASS ✓' : 'SESSION-STORE 504 LIVE SMOKE FAIL ✗');

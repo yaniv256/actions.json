@@ -54,6 +54,7 @@ rm -f "$out_dir/$artifact_name" "$out_dir/SHA256SUMS.txt"
     src/options.html \
     src/options.js \
     src/agent/agent-event-map.mjs \
+    src/agent/background-screenshot-capture.mjs \
     src/agent/cloud-store.mjs \
     src/agent/credential-store.mjs \
     src/agent/fake-realtime-transport.mjs \

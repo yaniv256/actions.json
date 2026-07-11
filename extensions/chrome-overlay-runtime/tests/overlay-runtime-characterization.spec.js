@@ -5544,10 +5544,85 @@ test("actions.json menu overlay restores after content script reload", async ({ 
   await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("top", "77px");
   await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("width", "42px");
   await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("height", "42px");
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("min-width", "42px");
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("min-height", "42px");
 
   await page.locator("#__actions_json_menu_overlay_host").evaluate((host) => {
     host.shadowRoot.querySelector("[data-minimize]").click();
   });
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("left", "118px");
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("top", "77px");
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("width", "300px");
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("height", "260px");
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("min-width", "220px");
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("min-height", "42px");
+  await expect(
+    page.locator("#__actions_json_menu_overlay_host").evaluate((host) =>
+      host.shadowRoot.querySelector(".title").textContent
+    )
+  ).resolves.toBe("actions.json agent");
+});
+
+test("actions.json menu overlay collapse action leaves a tiny expandable affordance", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "overlay.menu.collapse", input_schema: { type: "object" } },
+      { name: "overlay.menu.expand", input_schema: { type: "object" } },
+    ],
+  });
+  await connectRuntime(page);
+
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener({ type: "actions-json:open-menu-overlay" }, {}, resolve)
+    );
+  });
+  await page.locator("#__actions_json_menu_overlay_host").evaluate((host) => {
+    host.style.left = "118px";
+    host.style.top = "77px";
+    host.style.right = "auto";
+    host.style.bottom = "auto";
+    host.style.width = "300px";
+    host.style.height = "260px";
+  });
+
+  await callRuntimeAction(page, "collapse-menu", "overlay.menu.collapse");
+  const collapsedOutput = await actionOutput(page, "collapse-menu");
+  expect(collapsedOutput.output).toMatchObject({
+    ok: true,
+    collapsed: true,
+    geometry: { left: 118, top: 77, width: 42, height: 42 },
+  });
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("width", "42px");
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("height", "42px");
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("min-width", "42px");
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("min-height", "42px");
+  await expect(
+    page.locator("#__actions_json_menu_overlay_host").evaluate((host) => {
+      const button = host.shadowRoot.querySelector("[data-minimize]");
+      return {
+        title: button.title,
+        visibleText: button.textContent,
+        rect: button.getBoundingClientRect().toJSON(),
+      };
+    })
+  ).resolves.toMatchObject({
+    title: "Expand",
+    visibleText: "☰",
+    rect: { width: 30, height: 30 },
+  });
+
+  await callRuntimeAction(page, "expand-menu", "overlay.menu.expand");
+  const expandedOutput = await actionOutput(page, "expand-menu");
+  expect(expandedOutput.output).toMatchObject({
+    ok: true,
+    collapsed: false,
+    geometry: { left: 118, top: 77, width: 300, height: 260 },
+  });
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("width", "300px");
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("height", "260px");
+  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("min-width", "220px");
   await expect(
     page.locator("#__actions_json_menu_overlay_host").evaluate((host) =>
       host.shadowRoot.querySelector(".title").textContent
@@ -5636,7 +5711,19 @@ test("locator.element_info center feeds pointer.click through the extension acti
     ok: true,
     primitive: "pointer.click",
     adapter: "extension",
-    value: { clicked: true, x: 320, y: 204 },
+    value: {
+      clicked: true,
+      x: 320,
+      y: 204,
+      target: {
+        tag_name: "button",
+        data_testid: "target-action",
+        text: "Launch sequence",
+        disabled: false,
+        bounding_box: { x: 240, y: 180, width: 160, height: 48 },
+        viewport: { width: 1280, height: 720 },
+      },
+    },
   });
   await expect(page.evaluate(() => document.body.dataset.clicked)).resolves.toBe("yes");
   await expect(page.evaluate(() => document.body.dataset.clickX)).resolves.toBe("320");
@@ -5893,6 +5980,129 @@ test("locator.element_info scrolls clipped scroll-container targets into a click
   expect(output.value.initial_visibility.scroll_operation.delta_y).toBeGreaterThan(0);
   expect(output.value.clickable_center.y).toBeGreaterThanOrEqual(scrollBox.y);
   expect(output.value.clickable_center.y).toBeLessThanOrEqual(scrollBox.y + scrollBox.height);
+});
+
+test("locator.element_info scrolls a geometrically visible target clear of a sticky occluder", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [{ name: "locator.element_info", input_schema: { type: "object" } }],
+  });
+
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.setContent(`
+    <section
+      data-testid="modal-scroll"
+      style="position:absolute;left:100px;top:100px;width:260px;height:140px;overflow:auto;border:1px solid black"
+    >
+      <div
+        data-testid="sticky-header"
+        style="position:sticky;top:0;z-index:2;height:44px;background:white"
+      >Sticky controls</div>
+      <div style="height:56px"></div>
+      <label
+        data-testid="clickable-checkbox"
+        style="display:block;width:32px;height:32px;background:lightgreen"
+      >Toggle</label>
+      <div style="height:180px"></div>
+    </section>
+  `);
+  await page.locator("[data-testid='modal-scroll']").evaluate((element) => {
+    element.scrollTop = 100;
+  });
+
+  await connectRuntime(page);
+  await callRuntimeAction(page, "locator-sticky-occluder-call", "locator.element_info", {
+    locator: { selector: "[data-testid='clickable-checkbox']" },
+  });
+
+  const output = await readExtensionActionOutput(page, "locator-sticky-occluder-call");
+  expect(output, JSON.stringify(output, null, 2)).toHaveProperty("value.clickable_center");
+  const result = await page.evaluate(({ x, y }) => {
+    const target = document.querySelector("[data-testid='clickable-checkbox']");
+    const hit = document.elementFromPoint(x, y);
+    return {
+      scrollTop: document.querySelector("[data-testid='modal-scroll']").scrollTop,
+      hitTestPassed: hit === target || target.contains(hit),
+      hitTestId: hit?.getAttribute("data-testid") || null,
+    };
+  }, output.value.clickable_center);
+
+  expect(output).toMatchObject({
+    ok: true,
+    primitive: "locator.element_info",
+    adapter: "extension",
+    value: {
+      clickable: true,
+      initial_visibility: expect.objectContaining({
+        state: "requires_scroll",
+        fully_visible: true,
+        receives_events: false,
+        occluded_by: expect.objectContaining({
+          target_label: expect.stringContaining("sticky-header"),
+        }),
+        scroll_operation: expect.objectContaining({
+          target: "element",
+          delta_y: expect.any(Number),
+        }),
+      }),
+      visibility: expect.objectContaining({
+        state: "visible",
+        fully_visible: true,
+        receives_events: true,
+      }),
+      scroll_operations_performed: [expect.objectContaining({ target: "element" })],
+    },
+  });
+  expect(output.value.initial_visibility.scroll_operation.delta_y).toBeLessThan(0);
+  expect(result.scrollTop).toBeLessThan(100);
+  expect(result.hitTestPassed).toBe(true);
+  expect(result.hitTestId).toBe("clickable-checkbox");
+});
+
+test("locator.element_info retargets hidden semantic identity to its visible control", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [{ name: "locator.element_info", input_schema: { type: "object" } }],
+  });
+
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.setContent(`
+    <section data-testid="checklist" style="height:90px;overflow:auto">
+      <div style="height:160px"></div>
+      <div data-testid="check-item-container">
+        <input
+          type="checkbox"
+          aria-label="Phase 8: implement and verify immediate fix"
+          style="position:absolute;width:1px;height:1px;clip:rect(0,0,0,0)"
+        >
+        <label data-testid="clickable-checkbox" style="display:block;width:32px;height:32px">Toggle</label>
+      </div>
+    </section>
+  `);
+
+  await connectRuntime(page);
+  await callRuntimeAction(page, "locator-retarget-call", "locator.element_info", {
+    locator: {
+      selector: "input[type='checkbox']",
+      text_equals: "Phase 8: implement and verify immediate fix",
+      retarget: {
+        closest: "[data-testid='check-item-container']",
+        selector: "label[data-testid='clickable-checkbox']",
+      },
+    },
+  });
+
+  const output = await readExtensionActionOutput(page, "locator-retarget-call");
+  expect(output).toMatchObject({
+    ok: true,
+    primitive: "locator.element_info",
+    adapter: "extension",
+    value: {
+      tag_name: "label",
+      text: "Toggle",
+      clickable: true,
+      visibility: expect.objectContaining({ fully_visible: true }),
+    },
+  });
+  await expect(page.locator("[data-testid='checklist']")).not.toHaveJSProperty("scrollTop", 0);
 });
 
 async function readExtensionActionOutput(page, callId) {

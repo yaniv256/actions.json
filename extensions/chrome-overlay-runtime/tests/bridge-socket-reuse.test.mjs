@@ -65,17 +65,49 @@ test("attachRuntimeToOpenBridge only reuses a socket that is OPEN for the same b
 });
 
 test("attachRuntimeToOpenBridge registers the runtime on the existing socket (no teardown)", () => {
-  const body = bodyOf("const attachRuntimeToOpenBridge = async (", 1400);
+  const body = bodyOf("const attachRuntimeToOpenBridge = async (", 2200);
   assert.ok(/sendBridgeItem\(/.test(body), "must register the tab on the open socket");
-  assert.ok(/rememberRuntimeRoute\(/.test(body), "must record the local route");
+  assert.ok(/rememberRuntimeRegistration\(/.test(body), "must record the local route and ready item");
   assert.ok(
     !/closeBridgeSocket\(/.test(body),
     "must NOT close/rebuild the shared socket in the reuse path",
   );
 });
 
+test("background bridge stores ready items for shared-socket heartbeat fanout", () => {
+  assert.match(source, /const bridgeRuntimeReadyItems = new Map\(\)/);
+  const body = bodyOf("const rememberRuntimeRegistration = (readyItem, tabId) =>", 500);
+  assert.ok(/rememberRuntimeRoute\(readyItem, tabId\)/.test(body), "registration must preserve routing behavior");
+  assert.ok(
+    /bridgeRuntimeReadyItems\.set\(readyItem\.runtime_id, readyItem\)/.test(body),
+    "registration must retain the ready item so background can answer heartbeat for every runtime",
+  );
+});
+
+test("background bridge answers runtime_status for every registered runtime before single-tab routing", () => {
+  const fanoutBody = bodyOf("const sendRuntimeStatusForRegisteredRuntimes = () =>", 500);
+  assert.ok(
+    /for \(const readyItem of bridgeRuntimeReadyItems\.values\(\)\)/.test(fanoutBody),
+    "heartbeat fanout must iterate every registered runtime on the shared socket",
+  );
+  assert.ok(
+    /sendBridgeItem\(runtimeStatusFromReadyItem\(readyItem\)\)/.test(fanoutBody),
+    "heartbeat fanout must send one runtime_status per ready item",
+  );
+
+  const messageBody = bodyOf('ws.addEventListener("message", (event) =>', 6000);
+  const statusIdx = messageBody.indexOf('item?.type === "runtime_status"');
+  const routeIdx = messageBody.indexOf("routeBridgeItemToTab(item)");
+  assert.ok(statusIdx >= 0, "background WebSocket handler must explicitly handle runtime_status");
+  assert.ok(routeIdx >= 0, "test must observe the single-tab routing fallback");
+  assert.ok(
+    statusIdx < routeIdx,
+    "runtime_status must fan out in the background before it can fall through to single-tab routing",
+  );
+});
+
 test("openClaimedTab establishes the content bridge connection via connectClaimedTab", () => {
-  const body = bodyOf("const openClaimedTab = async (message = {}) =>", 2600);
+  const body = bodyOf("const openClaimedTab = async (message = {}) =>", 3600);
   assert.ok(
     /connectClaimedTab\(/.test(body),
     "open_tab must call connectClaimedTab (sends actions-json:connect) so the content script plugs into the transport — runtime-ready alone does not",

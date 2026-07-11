@@ -9,6 +9,7 @@
     "test:a11y": "npm run build:a11y-bundle && node --test extensions/chrome-overlay-runtime/tests/a11y-*.test.mjs",
     "test:a11y-live": "xvfb-run -a node extensions/chrome-overlay-runtime/tests/live/a11y-live-smoke.mjs",
     "test:locator-value-live": "xvfb-run -a node extensions/chrome-overlay-runtime/tests/live/locator-value-smoke.mjs",
+    "test:locator-actionability-live": "xvfb-run -a node extensions/chrome-overlay-runtime/tests/live/locator-actionability-smoke.mjs",
     "test:dom-observe-attributes-live": "xvfb-run -a node extensions/chrome-overlay-runtime/tests/live/dom-observe-attributes-smoke.mjs",
     "test:trusted-text-live": "xvfb-run -a node extensions/chrome-overlay-runtime/tests/live/trusted-text-type-smoke.mjs",
     "test:send-serialization-live": "xvfb-run -a node extensions/chrome-overlay-runtime/tests/live/send-serialization-smoke.mjs",

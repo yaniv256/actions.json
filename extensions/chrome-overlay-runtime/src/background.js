@@ -39,6 +39,10 @@ import {
   normalizeSiteActionCallArgs,
 } from "./agent/site-action-args.mjs";
 import {
+  captureTabSurface,
+  createChromeScreenshotBrowser,
+} from "./agent/background-screenshot-capture.mjs";
+import {
   createCloudStore,
 } from "./agent/cloud-store.mjs";
 import {
@@ -156,6 +160,7 @@ let bridgeState = null;
 let bridgeReconnectTimer = null;
 let bridgeReconnectAttempts = 0;
 const bridgeRuntimeRoutes = new Map();
+const bridgeRuntimeReadyItems = new Map();
 
 // Honest routing-failure next-steps, mirroring the bridge's route_error_next_step
 // (mcp/actions-json-mcp/src/lib.rs). Both surfaces speak one error vocabulary so
@@ -439,13 +444,25 @@ const rememberRuntimeRoute = (readyItem, tabId) => {
   }
 };
 
+const rememberRuntimeRegistration = (readyItem, tabId) => {
+  rememberRuntimeRoute(readyItem, tabId);
+  if (readyItem?.runtime_id) {
+    bridgeRuntimeReadyItems.set(readyItem.runtime_id, readyItem);
+  }
+};
+
 // Inverse of rememberRuntimeRoute: drop every route entry pointing at a tab
 // when that tab is closed/reaped, so bridgeRuntimeRoutes doesn't accumulate
 // stale runtime_id/runtime_key -> tabId mappings for tabs that no longer exist.
 const forgetRuntimeRoutesForTab = (tabId) => {
   if (!Number.isInteger(tabId)) return;
   for (const [key, mappedTabId] of bridgeRuntimeRoutes) {
-    if (mappedTabId === tabId) bridgeRuntimeRoutes.delete(key);
+    if (mappedTabId === tabId) {
+      bridgeRuntimeRoutes.delete(key);
+      if (key.startsWith("runtime_id:")) {
+        bridgeRuntimeReadyItems.delete(key.slice("runtime_id:".length));
+      }
+    }
   }
 };
 
@@ -482,6 +499,27 @@ const resolveBridgeItemTabId = (item) => {
     tabId = bridgeState.tabId;
   }
   return Number.isInteger(tabId) ? tabId : null;
+};
+
+const runtimeStatusFromReadyItem = (readyItem) => ({
+  type: "runtime_status",
+  runtime_id: readyItem.runtime_id,
+  runtime_key: readyItem.runtime_key,
+  authorization_id: readyItem.authorization_id,
+  extension_version: readyItem.extension_version,
+  url: readyItem.url,
+  connected: true,
+  actions: readyItem.manifest?.tools?.map((tool) => tool.name).filter(Boolean) || [],
+});
+
+const sendRuntimeStatusForRegisteredRuntimes = () => {
+  let sent = 0;
+  for (const readyItem of bridgeRuntimeReadyItems.values()) {
+    if (sendBridgeItem(runtimeStatusFromReadyItem(readyItem))) {
+      sent += 1;
+    }
+  }
+  return sent;
 };
 
 const routeBridgeItemToTab = async (item) => {
@@ -701,7 +739,7 @@ const replayClaimedTabsToBridge = async ({ bridgeUrl, bridgeSessionId, reason = 
         if (!sendBridgeItem(decorated)) {
           throw new Error("Bridge WebSocket closed during claimed-tab replay.");
         }
-        rememberRuntimeRoute(decorated, tabId);
+        rememberRuntimeRegistration(decorated, tabId);
         activeRuntimeTabIds.add(tabId);
         registeredCount += 1;
         claim.url = tab.url || claim.url || null;
@@ -859,13 +897,13 @@ const connectBackgroundBridge = async (state, options = {}) => {
       }
       if ((!replayResult || replayResult.summary.registered_count === 0) && bridgeState.readyItem) {
         sendBridgeItem(bridgeState.readyItem);
-        rememberRuntimeRoute(bridgeState.readyItem, bridgeState.tabId);
+        rememberRuntimeRegistration(bridgeState.readyItem, bridgeState.tabId);
       }
       for (const item of bridgeState.relayedReadyItems || []) {
         sendBridgeItem(item);
         // Relayed runtimes need a local route too, same as the single readyItem
         // above — otherwise they register with the bridge but stay unroutable.
-        rememberRuntimeRoute(item, tabIdFromRuntimeKey(item?.runtime_key));
+        rememberRuntimeRegistration(item, tabIdFromRuntimeKey(item?.runtime_key));
       }
       const pendingOutputFlush = bridgeOutputDeliveryQueue.flush(sendBridgeItem);
       appendBackgroundDiagnosticEvent({
@@ -923,6 +961,10 @@ const connectBackgroundBridge = async (state, options = {}) => {
           }
           sendBridgeItem({ type: "runtime_probe_result", probe_id: probeId, alive });
         })();
+        return;
+      }
+      if (item?.type === "runtime_status") {
+        sendRuntimeStatusForRegisteredRuntimes();
         return;
       }
       if (item?.type === "credential_hydration") {
@@ -1069,13 +1111,13 @@ const attachRuntimeToOpenBridge = async ({ bridgeUrl, tabId, readyItem, relayedR
     attempt: 1,
   });
   if (!sendBridgeItem(decorated)) return false;
-  rememberRuntimeRoute(decorated, tabId);
+  rememberRuntimeRegistration(decorated, tabId);
   if (bridgeState.activeRuntimeTabIds instanceof Set && Number.isInteger(tabId)) {
     bridgeState.activeRuntimeTabIds.add(tabId);
   }
   for (const item of relayedReadyItems || []) {
     if (sendBridgeItem(item)) {
-      rememberRuntimeRoute(item, tabIdFromRuntimeKey(item?.runtime_key));
+      rememberRuntimeRegistration(item, tabIdFromRuntimeKey(item?.runtime_key));
     }
   }
   appendBackgroundDiagnosticEvent({
@@ -1239,6 +1281,10 @@ const listClaimedTabs = async () => {
 
   return {
     ok: true,
+    scope: "extension_instance",
+    complete_within_scope: true,
+    inventory_source: "extension_session_store",
+    note: "This hosted result covers only this browser extension instance. Use the MCP bridge inventory for all connected runtimes across browsers and machines.",
     active_tab_id: activeTabId,
     count: tabs.length,
     tabs,
@@ -1504,7 +1550,7 @@ const openClaimedTab = async (message = {}) => {
       attempt: 1,
     });
     registered = sendBridgeItem(decorated);
-    rememberRuntimeRoute(decorated, tabId);
+    rememberRuntimeRegistration(decorated, tabId);
     // CRUCIAL: requestRuntimeReadyForClaimedTab only sends `runtime-ready`, which
     // builds a readyItem token but does NOT make the content script establish its
     // live bridge connection (content `connect()` runs only on `actions-json:connect`).
@@ -2413,104 +2459,51 @@ const evaluateWithDebugger = async (message, sender) => {
 };
 
 const captureVisibleTab = (message, sender, sendResponse) => {
-  const tabId = sender.tab?.id;
-  const windowId = sender.tab?.windowId;
-  const capture = () => {
-    chrome.tabs.captureVisibleTab(
-      windowId,
-      {
-        format: message.format === "jpeg" ? "jpeg" : "png",
-        quality: Number.isInteger(message.quality) ? message.quality : undefined,
-      },
-      (dataUrl) => {
-        if (chrome.runtime.lastError) {
-          sendResponse({ ok: false, error: chrome.runtime.lastError.message });
-          return;
-        }
-        sendResponse({ ok: true, dataUrl });
-      }
-    );
-  };
-
-  const activateTab = () => {
-    chrome.tabs.update(tabId, { active: true }, () => {
-      if (chrome.runtime.lastError) {
-        sendResponse({ ok: false, error: chrome.runtime.lastError.message });
-        return;
-      }
-      capture();
-    });
-  };
-
-  if (tabId) {
-    if (windowId && chrome.windows?.update) {
-      chrome.windows.update(windowId, { focused: true }, () => {
-        if (chrome.runtime.lastError) {
-          sendResponse({ ok: false, error: chrome.runtime.lastError.message });
-          return;
-        }
-        activateTab();
-      });
-      return true;
+  void captureTabDirect(sender.tab, {
+    format: message.format,
+    quality: message.quality,
+    delayMs: message.delayMs,
+  }).then((result) => {
+    if (!result.ok) {
+      sendResponse({ ok: false, error: result.error?.message, code: result.error?.code });
+      return;
     }
-    activateTab();
-  } else {
-    capture();
-  }
-
+    sendResponse({
+      ok: true,
+      dataUrl: result.dataUrl,
+      surface_identity: result.surface_identity,
+      freshness: result.freshness,
+      delay_ms_applied: result.delay_ms_applied,
+    });
+  });
   return true;
 };
 
-// Capture a tab's visible pixels WITHOUT involving its content script.
-// chrome.tabs.captureVisibleTab runs entirely in the background service worker,
-// so this succeeds even when the page's main thread / content-script message
-// channel is jammed (blocking modal, busy JS). This is the reliable-screenshot
-// path used by executePrimitiveInTab so an investigator can always see the page.
-const captureTabDirect = (tab, { format = "png", quality } = {}) =>
-  new Promise((resolve) => {
-    const doCapture = () => {
-      chrome.tabs.captureVisibleTab(
-        tab.windowId,
-        {
-          format: format === "jpeg" ? "jpeg" : "png",
-          quality: Number.isInteger(quality) ? quality : undefined,
-        },
-        (dataUrl) => {
-          if (chrome.runtime.lastError) {
-            resolve({ ok: false, error: chrome.runtime.lastError.message });
-            return;
-          }
-          resolve({ ok: true, dataUrl });
-        }
-      );
-    };
-    // captureVisibleTab only captures the ACTIVE tab of its window, so focus
-    // the window and activate the tab first. These calls are background→browser
-    // (chrome.tabs / chrome.windows) and do not depend on the page thread.
-    if (tab.windowId && chrome.windows?.update) {
-      chrome.windows.update(tab.windowId, { focused: true }, () => {
-        chrome.tabs.update(tab.id, { active: true }, () => {
-          // Ignore lastError here — capture will surface a real failure.
-          doCapture();
-        });
-      });
-    } else {
-      chrome.tabs.update(tab.id, { active: true }, () => doCapture());
-    }
-  });
+const chromeScreenshotBrowser = createChromeScreenshotBrowser(chrome);
+
+// This background-only path survives a jammed page thread. It verifies the
+// captured active-tab identity, but captureVisibleTab cannot prove pixel
+// freshness; callers must use an independent state projection for clearance.
+const captureTabDirect = (tab, options = {}) =>
+  captureTabSurface(chromeScreenshotBrowser, tab, options);
 
 const executeScreenshotDirect = async (tab, call = {}) => {
   const args = call?.arguments && typeof call.arguments === "object" ? call.arguments : {};
   const format = args.format === "jpeg" ? "jpeg" : "png";
-  const result = await captureTabDirect(tab, { format, quality: args.quality });
+  const result = await captureTabDirect(tab, {
+    format,
+    quality: args.quality,
+    delayMs: args.delay_ms,
+  });
   if (!result.ok) {
     return {
       ok: false,
       call_id: call.call_id,
       output: null,
       error: {
-        code: "screenshot_capture_failed",
-        message: result.error || "captureVisibleTab failed",
+        code: result.error?.code || "screenshot_capture_failed",
+        message: result.error?.message || "captureVisibleTab failed",
+        ...(result.error || {}),
       },
     };
   }
@@ -2527,7 +2520,12 @@ const executeScreenshotDirect = async (tab, call = {}) => {
         mime_type: format === "jpeg" ? "image/jpeg" : "image/png",
         url: tab.url || null,
         captured_at: new Date().toISOString(),
-        note: "Captured directly in the background (content-script bypass); no page-side resize applied.",
+        surface_identity: result.surface_identity,
+        freshness: result.freshness,
+        delay_ms_applied: result.delay_ms_applied,
+        ignored_arguments: ["max_kb", "max_kilobytes", "max_width", "max_height"]
+          .filter((name) => args[name] !== undefined),
+        note: "Active-tab identity was verified before background capture. Pixel freshness is unverified; use an independent site projection for semantic state. Background capture does not apply resize arguments.",
       },
     },
     error: null,

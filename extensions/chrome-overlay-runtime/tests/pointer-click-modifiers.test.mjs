@@ -51,8 +51,12 @@ for (const [runtime, source] of [
       "pointerClick must pass the normalized modifiers to dispatchPointerClick",
     );
     assert.ok(
-      /primitiveSuccess\("pointer\.click", \{ clicked: true, x, y, modifiers \}\)/.test(source),
-      "the success payload must echo the applied modifiers",
+      source.includes('clicked: true') &&
+        source.includes('x,') &&
+        source.includes('y,') &&
+        source.includes('modifiers') &&
+        source.includes('target: clickTargetDiagnostic(target)'),
+      "the success payload must echo modifiers and include target diagnostics",
     );
   });
 }

@@ -27,6 +27,7 @@ if (!cdpWsUrl || !extId || !targetUrlContains) {
 
 const ws = new WebSocket(cdpWsUrl);
 let id = 0;
+let popupTargetId = null;
 const pend = new Map();
 const attached = new Map(); // targetId -> sessionId (flatten auto-attach)
 ws.on('message', (x) => {
@@ -41,8 +42,15 @@ const send = (method, params = {}, sessionId) => new Promise((r) => {
 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const fail = (o) => { out({ ok: false, ...o }); try { ws.close(); } catch {} process.exit(1); };
-setTimeout(() => fail({ stage: 'timeout' }), 30000);
+const fail = async (o) => {
+  if (popupTargetId) {
+    try { await send('Target.closeTarget', { targetId: popupTargetId }); } catch {}
+  }
+  out({ ok: false, ...o });
+  try { ws.close(); } catch {}
+  process.exit(1);
+};
+setTimeout(() => { void fail({ stage: 'timeout' }); }, 30000);
 
 ws.on('error', (e) => fail({ stage: 'ws', error: String(e && e.message || e) }));
 ws.on('open', async () => {
@@ -51,7 +59,7 @@ ws.on('open', async () => {
     // whose page context has chrome.runtime; keeping it open holds the SW alive.
     const popupUrl = `chrome-extension://${extId}/popup.html`;
     const created = await send('Target.createTarget', { url: popupUrl });
-    const popupTargetId = created.result?.targetId;
+    popupTargetId = created.result?.targetId;
     if (!popupTargetId) return fail({ stage: 'open-popup', error: created.error || 'no targetId' });
 
     // Attach to the popup page to eval in its context.
@@ -66,33 +74,58 @@ ws.on('open', async () => {
       return r.result?.result?.value;
     };
 
-    // POLL for the popup's extension APIs to be ready — over the relay, popup.js + the
-    // chrome.tabs API can take a while to inject; a fixed 600ms sleep raced it and
-    // `chrome.tabs.query` threw "cannot read undefined". Wait until chrome.tabs exists.
-    let ready = false;
+    // Poll for the exact extension identity and API surface. Target.createTarget also
+    // succeeds for an absent extension id, but commits chrome-error://chromewebdata/;
+    // API presence alone is not identity proof.
+    let context = null;
     for (let i = 0; i < 30; i++) {
-      const has = await evalPopup(`(typeof chrome !== 'undefined' && !!(chrome.tabs && chrome.runtime && chrome.storage))`);
-      if (has === true) { ready = true; break; }
+      context = await evalPopup(`(()=>{
+        const actualExtensionId = globalThis.chrome?.runtime?.id || null;
+        const actualExtensionName = globalThis.chrome?.runtime?.getManifest?.()?.name || null;
+        const tabsQueryType = typeof globalThis.chrome?.tabs?.query;
+        return {
+          ok: actualExtensionId === ${JSON.stringify(extId)}
+            && actualExtensionName === 'actions.json Overlay Runtime'
+            && tabsQueryType === 'function',
+          code: 'extension_context_invalid',
+          expectedExtensionId: ${JSON.stringify(extId)}, actualExtensionId,
+          actualExtensionName, tabsQueryType,
+          committedUrl: globalThis.location?.href || null,
+        };
+      })()`);
+      if (context?.ok === true) break;
+      if (context?.committedUrl === 'chrome-error://chromewebdata/') break;
       await sleep(400);
     }
-    if (!ready) return fail({ stage: 'popup-not-ready', error: 'chrome.tabs/runtime/storage never became available in the popup page' });
+    if (context?.ok !== true) return fail({
+      stage: 'extension-context',
+      code: 'extension_context_invalid',
+      error: 'Expected actions.json extension context is not loaded',
+      context,
+    });
 
     // From the popup context: find the target tab, store bridgeUrl, send authorize-tab.
     const raw = await evalPopup(`(async()=>{
       try {
+        const actualExtensionId = chrome.runtime.id;
+        const actualExtensionName = chrome.runtime.getManifest().name;
+        if (actualExtensionId !== ${JSON.stringify(extId)} || actualExtensionName !== 'actions.json Overlay Runtime') {
+          return JSON.stringify({ ok:false, code:'extension_context_invalid', actualExtensionId, actualExtensionName });
+        }
         const tabs = await chrome.tabs.query({});
         const needle = ${JSON.stringify(targetUrlContains)};
         const target = tabs.find(t => (t.url||'').includes(needle));
-        if (!target) return JSON.stringify({ ok:false, error:'no tab matching '+needle, tabs: tabs.map(t=>({id:t.id,u:(t.url||'').slice(0,50)})) });
+        if (!target) return JSON.stringify({ ok:false, code:'target_not_found', error:'no tab matching '+needle, tabs: tabs.map(t=>({id:t.id,u:(t.url||'').slice(0,50)})) });
         const bridgeUrl = ${JSON.stringify(BRIDGE)};
         await chrome.storage.local.set({ bridgeUrl });
         const response = await chrome.runtime.sendMessage({ type:'actions-json:authorize-tab', tabId: target.id, bridgeUrl });
         return JSON.stringify({ ok: !!(response && response.ok), tabId: target.id, bridgeUrl, response });
-      } catch (e) { return JSON.stringify({ ok:false, error: String(e && e.message || e) }); }
+      } catch (e) { return JSON.stringify({ ok:false, code:'authorize_exception', error: String(e && e.message || e) }); }
     })()`);
     if (raw && raw.__err) return fail({ stage: 'eval', error: raw.__err });
     const result = JSON.parse(raw);
-    // Leave the popup tab OPEN — closing it lets the SW sleep and can drop the bridge.
+    if (!result.ok) return fail({ stage: result.code || 'authorize', ...result });
+    // Leave a successful popup tab OPEN — closing it lets the SW sleep and can drop the bridge.
     out(result);
     try { ws.close(); } catch {}
     process.exit(result.ok ? 0 : 1);

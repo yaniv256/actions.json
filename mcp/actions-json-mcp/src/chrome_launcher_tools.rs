@@ -55,16 +55,17 @@ pub fn tool_manifests() -> Vec<Value> {
         }),
         json!({
             "name": "claim_tab",
-            "description": "Drive the extension's headless authorize path so a runtime registers on the bridge — take control of a tab with no popup click.",
+            "description": "Drive the extension's headless authorize path so a runtime registers on the bridge — take control of a tab with no popup click. Pass the exact extension id returned by start_extension_session/load_extension; unpacked ids are installation-specific.",
             "input_schema": {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
                     "cdp_ws_url": { "type": "string", "description": "CDP WebSocket URL of the Chrome to drive." },
+                    "extension_id": { "type": "string", "pattern": "^[a-p]{32}$", "description": "Exact installed extension id returned by start_extension_session or load_extension." },
                     "target_url_contains": { "type": "string", "description": "Substring of the tab URL to claim." },
                     "bridge_url": { "type": "string", "description": "Bridge WS the extension should connect to." }
                 },
-                "required": ["cdp_ws_url", "target_url_contains", "bridge_url"]
+                "required": ["cdp_ws_url", "extension_id", "target_url_contains", "bridge_url"]
             }
         }),
     ]
@@ -127,9 +128,10 @@ pub async fn dispatch(name: &str, args: &Value, helper_win: Option<&str>) -> Val
         }
         "claim_tab" => {
             let cdp = args.get("cdp_ws_url").and_then(Value::as_str).unwrap_or("");
+            let extension_id = args.get("extension_id").and_then(Value::as_str).unwrap_or("");
             let target = args.get("target_url_contains").and_then(Value::as_str).unwrap_or("");
             let bridge = args.get("bridge_url").and_then(Value::as_str).unwrap_or("");
-            match b.claim_tab(cdp, target, bridge).await {
+            match b.claim_tab(cdp, extension_id, target, bridge).await {
                 Ok(c) => json!({ "ok": true, "tabId": c.tab_id, "runtimeKey": c.runtime_key, "authorizationId": c.authorization_id }),
                 Err(e) => json!({ "ok": false, "error": e.to_string() }),
             }
@@ -159,6 +161,21 @@ mod tests {
         assert!(is_chrome_launcher_tool("chrome_endpoint"));
         assert!(is_chrome_launcher_tool("claim_tab"));
         assert!(!is_chrome_launcher_tool("storage.list"));
+    }
+
+    #[test]
+    fn claim_tab_requires_deployed_extension_id() {
+        let claim = tool_manifests()
+            .into_iter()
+            .find(|manifest| manifest["name"] == "claim_tab")
+            .expect("claim_tab manifest");
+        let required = claim["input_schema"]["required"].as_array().expect("required fields");
+
+        assert!(required.iter().any(|field| field == "extension_id"));
+        assert_eq!(
+            claim["input_schema"]["properties"]["extension_id"]["type"],
+            "string"
+        );
     }
 
     #[tokio::test]

@@ -104,6 +104,7 @@ pub trait LaunchBackend: Send + Sync {
     fn claim_tab<'a>(
         &'a self,
         cdp_ws_url: &'a str,
+        extension_id: &'a str,
         target_url_contains: &'a str,
         bridge_url: &'a str,
     ) -> BackendFuture<'a, ClaimResult>;
@@ -151,6 +152,7 @@ macro_rules! unsupported_backend {
             fn claim_tab<'a>(
                 &'a self,
                 _cdp_ws_url: &'a str,
+                _extension_id: &'a str,
                 _target_url_contains: &'a str,
                 _bridge_url: &'a str,
             ) -> BackendFuture<'a, ClaimResult> {
@@ -199,6 +201,7 @@ mod tests {
         fn claim_tab<'a>(
             &'a self,
             _c: &'a str,
+            _e: &'a str,
             _t: &'a str,
             _b: &'a str,
         ) -> BackendFuture<'a, ClaimResult> {

@@ -16,7 +16,7 @@
         "reason": null,
         "capability_class": "privileged",
         "portable": false,
-        "summary": "Capture a true rendered screenshot where the host has browser-level authority.",
+        "summary": "Capture visible pixels from a verified active tab; freshness remains unverified and semantic state requires an independent projection.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -54,7 +54,7 @@
         "reason": null,
         "capability_class": "privileged",
         "portable": false,
-        "summary": "List browser tabs already claimed by the actions.json extension.",
+        "summary": "List connected tabs. MCP returns the bridge-global runtime inventory; hosted execution returns the current extension instance and labels that scope.",
         "input_schema": {
           "type": "object",
           "properties": {},
@@ -522,7 +522,7 @@
             },
             "trusted": {
               "type": "boolean",
-              "description": "When true, dispatch a TRUSTED key event via the browser debugger (reaches canvas editors like Google Slides/Docs/Sheets, where synthetic keys are ignored — e.g. Control+A to select all). Defaults to false (synthetic, portable). Run both and compare to confirm whether trusted is actually required."
+              "description": "When true, dispatch a TRUSTED key event via the browser debugger (reaches canvas editors like Google Slides/Docs/Sheets, where synthetic keys are ignored \u2014 e.g. Control+A to select all). Defaults to false (synthetic, portable). Run both and compare to confirm whether trusted is actually required."
             },
             "repeat": {
               "type": "integer",
@@ -857,6 +857,55 @@
         }
       },
       {
+        "name": "dom.observe.attributes",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Enumerate elements matching a selector and read named ATTRIBUTES from each, WITHOUT the viewport filter. dom.observe.visible only reports what currently INTERSECTS THE VIEWPORT, so enumerating a scrollable list through it silently under-reports -- and the under-report is indistinguishable from 'the elements do not exist'. Use this to count or read a whole collection regardless of scroll position. Each match reports `visible` so the caller can still tell what is on screen. Reads attributes because accessible names often live only on one (an aria-label on a 1x1 input whose textContent is \"\"). Pass \"text\" as a pseudo-attribute for normalized textContent.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "selector",
+            "attributes"
+          ],
+          "properties": {
+            "selector": {
+              "type": "string",
+              "description": "CSS selector for the rows to enumerate."
+            },
+            "attributes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "description": "Attribute names to read from each match. The pseudo-attribute \"text\" yields normalized textContent."
+            },
+            "text_contains": {
+              "type": "string",
+              "description": "Optional filter on textContent OR aria-label."
+            },
+            "max_matches": {
+              "type": "integer",
+              "description": "Cap on returned matches (default 50, max 200)."
+            },
+            "max_payload_bytes": {
+              "type": "integer",
+              "description": "Response size budget (default 16000)."
+            },
+            "frame": {
+              "type": [
+                "string",
+                "array"
+              ],
+              "description": "Optional same-origin iframe selector(s), outer->inner."
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
         "name": "dom.snapshot_text",
         "support": "supported",
         "reason": null,
@@ -938,6 +987,26 @@
         "capability_class": "portable",
         "portable": true,
         "summary": "Resolve a locator and return its visible text content.",
+        "input_schema": {
+          "type": "object",
+          "required": [
+            "locator"
+          ],
+          "properties": {
+            "locator": {
+              "type": "object"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "locator.value",
+        "support": "supported",
+        "reason": null,
+        "capability_class": "portable",
+        "portable": true,
+        "summary": "Resolve a locator and return a form control's LIVE value property (not the value attribute). Returns settable=false for elements that have no value.",
         "input_schema": {
           "type": "object",
           "required": [
@@ -1763,7 +1832,7 @@
             },
             "trusted": {
               "type": "boolean",
-              "description": "When true, types via CDP Input.insertText (trusted) — REPLACES the active selection and reaches canvas editors (Docs/Slides/Sheets). Default false = synthetic insert at the focused editable."
+              "description": "When true, types via CDP Input.insertText (trusted) \u2014 REPLACES the active selection and reaches canvas editors (Docs/Slides/Sheets). Default false = synthetic insert at the focused editable."
             },
             "mode": {
               "type": "string",
@@ -1771,7 +1840,7 @@
             },
             "select_back_chars": {
               "type": "number",
-              "description": "Trusted path only: before typing, extend the selection backward this many characters (Shift+Left) so the type overtypes exactly that span — one atomic CDP call. Use the character length of the phrase to replace."
+              "description": "Trusted path only: before typing, extend the selection backward this many characters (Shift+Left) so the type overtypes exactly that span \u2014 one atomic CDP call. Use the character length of the phrase to replace."
             }
           }
         }
@@ -2636,7 +2705,7 @@
     },
     {
       "name": "browser.claimed_tabs.list",
-      "description": "List tabs already claimed by the actions.json Chrome extension, including their tab ids, URLs, titles, runtime keys, authorization ids, and active state. Use this before switching context among user-authorized tabs.",
+      "description": "List connected actions.json tabs. On MCP this is a bridge-global inventory across browsers and machines, addressed by runtime_id; raw tab_id values are browser-local and may collide. Hosted extension execution returns only the current extension instance and labels scope=extension_instance. Use runtime_id with browser.active_tab.set when routing MCP calls.",
       "input_schema": {
         "type": "object",
         "properties": {},
@@ -2738,7 +2807,7 @@
     },
     {
       "name": "browser.screenshot",
-      "description": "Capture the currently visible browser tab as an image so the agent can inspect the page state after authorization.",
+      "description": "Capture visible pixels from the verified active target tab. A successful result is positive visual evidence, not proof that unchanged pixels are fresh; use an independent site state projection for semantic verification.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2760,7 +2829,7 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 30000,
-            "description": "Wait this many milliseconds in the browser before capturing, useful for pages that are still painting after navigation."
+            "description": "Wait this many milliseconds after verified target-tab activation before capturing. This is a paint-settle aid, not a freshness guarantee."
           },
           "capture_timeout_ms": {
             "type": "integer",
@@ -2802,7 +2871,8 @@
         "source": {
           "files": [
             "src/content.js",
-            "src/background.js"
+            "src/background.js",
+            "src/agent/background-screenshot-capture.mjs"
           ],
           "symbols": [
             "actionsJsonOverlay.screenshot",
@@ -2835,14 +2905,37 @@
               "type": "string"
             },
             "captured_at": {
-              "type": "string"
+              "type": "string",
+              "description": "When capture transport completed; this is not the pixel paint timestamp."
+            },
+            "surface_identity": {
+              "type": "string",
+              "enum": [
+                "verified_active_tab"
+              ]
+            },
+            "freshness": {
+              "type": "string",
+              "enum": [
+                "unverified"
+              ]
+            },
+            "delay_ms_applied": {
+              "type": "integer"
+            },
+            "ignored_arguments": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             }
           },
           "required": [
             "ok",
             "data_url",
             "mime_type",
-            "viewport"
+            "surface_identity",
+            "freshness"
           ]
         }
       }
@@ -3597,7 +3690,7 @@
     },
     {
       "name": "keyboard.press",
-      "description": "Dispatch a keyboard key or modifier chord to the focused page element. Use this for Enter/Escape/Tab flows after focusing a visible target Pass trusted:true for a real (debugger-dispatched) key that reaches canvas editors like Google Slides (e.g. Control+A); default false is the synthetic, portable path — run both and compare to see if trusted is needed.",
+      "description": "Dispatch a keyboard key or modifier chord to the focused page element. Use this for Enter/Escape/Tab flows after focusing a visible target Pass trusted:true for a real (debugger-dispatched) key that reaches canvas editors like Google Slides (e.g. Control+A); default false is the synthetic, portable path \u2014 run both and compare to see if trusted is needed.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -3623,7 +3716,7 @@
           },
           "trusted": {
             "type": "boolean",
-            "description": "When true, dispatch a TRUSTED key event via the browser debugger (reaches canvas editors like Google Slides/Docs/Sheets, where synthetic keys are ignored — e.g. Control+A to select all). Defaults to false (synthetic, portable). Run both and compare to confirm whether trusted is actually required."
+            "description": "When true, dispatch a TRUSTED key event via the browser debugger (reaches canvas editors like Google Slides/Docs/Sheets, where synthetic keys are ignored \u2014 e.g. Control+A to select all). Defaults to false (synthetic, portable). Run both and compare to confirm whether trusted is actually required."
           }
         },
         "required": [
@@ -3648,7 +3741,7 @@
     },
     {
       "name": "keyboard.press_gated",
-      "description": "ACCESSIBILITY-GATED key-repeat: press a key/chord repeatedly, gating each repeat on what the accessibility layer reports after the previous press. RELIABLE where an open-loop burst coalesces (e.g. Ctrl+ArrowRight word-jumps on Google Docs). Surface-agnostic — also drives menu/listbox/field navigation. stop=count presses N times; stop=until presses until the a11y return matches the single `expect` regex; stop=path advances through the ordered `expect` regex list one press per step and HALTS LOUD on a mismatch (steps_done/expected/actual returned) so the caller re-reads instead of drifting. polarity=match advances on a regex match, no_match advances on a non-match. Always trusted (CDP).",
+      "description": "ACCESSIBILITY-GATED key-repeat: press a key/chord repeatedly, gating each repeat on what the accessibility layer reports after the previous press. RELIABLE where an open-loop burst coalesces (e.g. Ctrl+ArrowRight word-jumps on Google Docs). Surface-agnostic \u2014 also drives menu/listbox/field navigation. stop=count presses N times; stop=until presses until the a11y return matches the single `expect` regex; stop=path advances through the ordered `expect` regex list one press per step and HALTS LOUD on a mismatch (steps_done/expected/actual returned) so the caller re-reads instead of drifting. polarity=match advances on a regex match, no_match advances on a non-match. Always trusted (CDP).",
       "input_schema": {
         "type": "object",
         "required": [
@@ -4048,7 +4141,7 @@
     },
     {
       "name": "clipboard.paste",
-      "description": "Paste into a DOM element (clipboard -> page). With text: paste that plain text. With html: paste that exact text/html flavor (use for tables/rich runs — e.g. an HTML <table> that Google Sheets expands into a real multi-column range). Without text: paste the current system clipboard. Dispatches a synthetic paste event at the target (default: focused element); this is the way to write into iframe-hosted editors like Google Docs where text.insert cannot reach.",
+      "description": "Paste into a DOM element (clipboard -> page). With text: paste that plain text. With html: paste that exact text/html flavor (use for tables/rich runs \u2014 e.g. an HTML <table> that Google Sheets expands into a real multi-column range). Without text: paste the current system clipboard. Dispatches a synthetic paste event at the target (default: focused element); this is the way to write into iframe-hosted editors like Google Docs where text.insert cannot reach.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -4112,7 +4205,7 @@
     },
     {
       "name": "marker.query",
-      "description": "Resolve a registered projection marker to its LIVE on-screen location (computed now by running the marker's recipe; coordinates are never cached — re-query after scrolling). Markers are minted by running a state projection that declares them.",
+      "description": "Resolve a registered projection marker to its LIVE on-screen location (computed now by running the marker's recipe; coordinates are never cached \u2014 re-query after scrolling). Markers are minted by running a state projection that declares them.",
       "input_schema": {
         "type": "object",
         "required": [
@@ -4160,7 +4253,7 @@
     },
     {
       "name": "text.type",
-      "description": "Type a string at the focused element as keystrokes. Synthetic by default; with trusted:true it uses CDP Input.insertText, which overtypes the active selection and works in canvas editors — the overtype step after a keyboard selection (clipboard.paste does not route to a keyboard-made selection).",
+      "description": "Type a string at the focused element as keystrokes. Synthetic by default; with trusted:true it uses CDP Input.insertText, which overtypes the active selection and works in canvas editors \u2014 the overtype step after a keyboard selection (clipboard.paste does not route to a keyboard-made selection).",
       "input_schema": {
         "type": "object",
         "required": [
@@ -4173,7 +4266,7 @@
           },
           "trusted": {
             "type": "boolean",
-            "description": "When true, types via CDP Input.insertText (trusted) — REPLACES the active selection and reaches canvas editors (Docs/Slides/Sheets). Default false = synthetic insert at the focused editable."
+            "description": "When true, types via CDP Input.insertText (trusted) \u2014 REPLACES the active selection and reaches canvas editors (Docs/Slides/Sheets). Default false = synthetic insert at the focused editable."
           },
           "mode": {
             "type": "string",
@@ -4181,14 +4274,14 @@
           },
           "select_back_chars": {
             "type": "number",
-            "description": "Trusted path only: before typing, extend the selection backward this many characters (Shift+Left) so the type overtypes exactly that span — one atomic CDP call. Use the character length of the phrase to replace."
+            "description": "Trusted path only: before typing, extend the selection backward this many characters (Shift+Left) so the type overtypes exactly that span \u2014 one atomic CDP call. Use the character length of the phrase to replace."
           }
         }
       }
     },
     {
       "name": "a11y.tree",
-      "description": "Accessibility-tree outline of the page (role/name/value/state, live regions annotated) from the CDP Accessibility domain. The blind agent's map — consult before screenshot-squinting.",
+      "description": "Accessibility-tree outline of the page (role/name/value/state, live regions annotated) from the CDP Accessibility domain. The blind agent's map \u2014 consult before screenshot-squinting.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -4212,7 +4305,7 @@
     },
     {
       "name": "a11y.query",
-      "description": "Resolve an element by accessibility identity (role and/or accessible name) to its node and clickable center — the identity-based locator that replaces CSS/geometry targeting.",
+      "description": "Resolve an element by accessibility identity (role and/or accessible name) to its node and clickable center \u2014 the identity-based locator that replaces CSS/geometry targeting.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -4332,7 +4425,7 @@
     },
     {
       "name": "a11y.watch",
-      "description": "Start listening to a tab's live regions: inject the accessibility observer into all frames (idempotent — works on already-open tabs) and enable the site's screen-reader mode so it narrates itself. Call once before expecting a11y announcements.",
+      "description": "Start listening to a tab's live regions: inject the accessibility observer into all frames (idempotent \u2014 works on already-open tabs) and enable the site's screen-reader mode so it narrates itself. Call once before expecting a11y announcements.",
       "input_schema": {
         "type": "object",
         "properties": {

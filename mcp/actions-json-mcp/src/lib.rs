@@ -1624,6 +1624,105 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn site_action_target_url_derives_from_exact_runtime_id() {
+        let state = two_runtime_state();
+        let request = ToolCallRequest {
+            name: "actions.site".to_string(),
+            arguments: json!({ "mode": "list" }),
+            target_runtime_id: Some("rt-trello".to_string()),
+            target_url_contains: None,
+            timeout_ms: default_timeout_ms(),
+        };
+
+        let target = site_action_target_url_contains(&state, &request)
+            .await
+            .expect("the exact runtime should resolve");
+
+        assert_eq!(target.as_deref(), Some("https://trello.com/b/abc"));
+    }
+
+    #[tokio::test]
+    async fn site_action_target_url_derives_from_active_runtime() {
+        let state = two_runtime_state();
+        *state.active_runtime_id.lock().await = Some("rt-lab".to_string());
+        let request = ToolCallRequest {
+            name: "actions.site".to_string(),
+            arguments: json!({ "mode": "list" }),
+            target_runtime_id: None,
+            target_url_contains: None,
+            timeout_ms: default_timeout_ms(),
+        };
+
+        let target = site_action_target_url_contains(&state, &request)
+            .await
+            .expect("the active runtime should resolve");
+
+        assert_eq!(target.as_deref(), Some("https://lab651.com/"));
+    }
+
+    #[tokio::test]
+    async fn site_action_explicit_url_scope_precedes_runtime_derivation() {
+        let state = two_runtime_state();
+        let request = ToolCallRequest {
+            name: "actions.site".to_string(),
+            arguments: json!({ "mode": "list" }),
+            target_runtime_id: Some("rt-trello".to_string()),
+            target_url_contains: Some("trello.com/card-scope".to_string()),
+            timeout_ms: default_timeout_ms(),
+        };
+
+        let target = site_action_target_url_contains(&state, &request)
+            .await
+            .expect("the explicit URL scope should be preserved");
+
+        assert_eq!(target.as_deref(), Some("trello.com/card-scope"));
+    }
+
+    #[tokio::test]
+    async fn site_action_target_url_allows_global_listing_without_runtimes() {
+        let state = two_runtime_state();
+        state.runtimes.lock().await.clear();
+        let request = ToolCallRequest {
+            name: "actions.site".to_string(),
+            arguments: json!({ "mode": "list" }),
+            target_runtime_id: None,
+            target_url_contains: None,
+            timeout_ms: default_timeout_ms(),
+        };
+
+        let target = site_action_target_url_contains(&state, &request)
+            .await
+            .expect("offline global discovery should remain available");
+
+        assert_eq!(target, None);
+    }
+
+    #[tokio::test]
+    async fn site_action_target_url_rejects_selected_runtime_without_url() {
+        let state = two_runtime_state();
+        state
+            .runtimes
+            .lock()
+            .await
+            .get_mut("rt-trello")
+            .expect("fixture runtime")
+            .url = None;
+        let request = ToolCallRequest {
+            name: "actions.site".to_string(),
+            arguments: json!({ "mode": "list" }),
+            target_runtime_id: Some("rt-trello".to_string()),
+            target_url_contains: None,
+            timeout_ms: default_timeout_ms(),
+        };
+
+        let (_, payload) = site_action_target_url_contains(&state, &request)
+            .await
+            .expect_err("a selected runtime without a URL must not widen scope");
+
+        assert_eq!(payload["error"]["code"], "runtime_url_missing");
+    }
+
     fn empty_state() -> AppState {
         state_from_catalog(
             ActionCatalog {
@@ -2468,6 +2567,73 @@ mod tests {
         for row in rows {
             assert!(row.get("runtime_key").is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn bridge_claimed_tabs_view_is_global_across_extension_instances() {
+        let state = empty_state();
+        {
+            let mut runtimes = state.runtimes.lock().await;
+            let mut mac = seed_client_on_device(
+                "rt-mac",
+                "https://trello.com/b/x",
+                "mac · 7c19",
+            );
+            mac.tab = Some(json!({
+                "tab_id": 7,
+                "window_id": 11,
+                "title": "Board X",
+                "active": true
+            }));
+            let mut win = seed_client_on_device(
+                "rt-win",
+                "https://docs.google.com/document/d/y",
+                "win · a3f2",
+            );
+            // Raw Chrome tab ids may collide across browser sessions. The global
+            // view must retain both rows and make runtime_id the address.
+            win.tab = Some(json!({
+                "tab_id": 7,
+                "window_id": 22,
+                "title": "Doc Y",
+                "active": true
+            }));
+            runtimes.insert(mac.runtime_id.clone(), mac);
+            runtimes.insert(win.runtime_id.clone(), win);
+        }
+        *state.active_runtime_id.lock().await = Some("rt-mac".into());
+
+        // Even a runtime-targeted MCP call must be answered by the bridge;
+        // dispatching it would collapse the inventory back to one browser.
+        let request = ToolCallRequest {
+            name: "browser.claimed_tabs.list".into(),
+            arguments: json!({}),
+            target_runtime_id: Some("rt-mac".into()),
+            target_url_contains: None,
+            timeout_ms: default_timeout_ms(),
+        };
+        let response = tools_call_inner(State(state), Json(request))
+            .await
+            .expect("bridge-owned inventory succeeds")
+            .0;
+        let view = response.output.expect("inventory output");
+        assert_eq!(view["scope"], "bridge");
+        assert_eq!(view["complete"], true);
+        assert_eq!(view["count"], 2);
+
+        let rows = view["tabs"].as_array().unwrap();
+        assert_eq!(rows.iter().filter(|row| row["tab_id"] == 7).count(), 2);
+        assert!(rows.iter().any(|row| {
+            row["runtime_id"] == "rt-mac"
+                && row["device"] == "mac · 7c19"
+                && row["active"] == true
+        }));
+        assert!(rows.iter().any(|row| {
+            row["runtime_id"] == "rt-win"
+                && row["device"] == "win · a3f2"
+                && row["active"] == false
+        }));
+        assert!(rows.iter().all(|row| row.get("bridge_url").is_none()));
     }
 
     // ---- U3: probe-at-dispatch — freshness-gated hard guarantee ----
@@ -3469,6 +3635,98 @@ fn browser_active_tab_set_tool_manifest() -> Value {
             }
         }
     })
+}
+
+/// Return the bridge-wide tab inventory directly from the live runtime
+/// registry. This deliberately does not dispatch to an extension instance:
+/// extension-local storage cannot prove which tabs are connected to other
+/// browsers or machines, and raw Chrome tab ids can collide across them.
+async fn bridge_claimed_tabs_list(state: &AppState) -> Value {
+    let runtimes = state.runtimes.lock().await;
+    let active_runtime_id = state.active_runtime_id.lock().await.clone();
+    let now = now_ms();
+    let mut tabs = runtimes
+        .values()
+        .filter(|client| client.is_live(now))
+        .map(|client| {
+            let tab = client.tab.as_ref();
+            let tab_id = tab
+                .and_then(|value| value.get("tab_id").or_else(|| value.get("id")))
+                .and_then(Value::as_i64);
+            let window_id = tab
+                .and_then(|value| value.get("window_id").or_else(|| value.get("windowId")))
+                .and_then(Value::as_i64);
+            let title = tab
+                .and_then(|value| value.get("title"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty());
+            let url = client.url.as_deref().or_else(|| {
+                tab.and_then(|value| value.get("url"))
+                    .and_then(Value::as_str)
+            });
+            let browser_active = tab
+                .and_then(|value| value.get("active"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let mut row = json!({
+                "runtime_id": client.runtime_id,
+                "tab_id": tab_id,
+                "window_id": window_id,
+                "url": url,
+                "title": title,
+                "host": url.and_then(host_from_url),
+                "active": active_runtime_id.as_deref() == Some(client.runtime_id.as_str()),
+                "browser_active": browser_active,
+                "claimed": client.authorization_id.is_some(),
+                "extension_version": client.extension_version,
+            });
+            if let Some(authorization_id) = client.authorization_id.as_deref() {
+                row["authorization_id"] = json!(authorization_id);
+            }
+            if let Some(device) = client.device.as_deref() {
+                row["device"] = json!(device);
+            }
+            row
+        })
+        .collect::<Vec<_>>();
+    tabs.sort_by(|left, right| {
+        left["runtime_id"]
+            .as_str()
+            .cmp(&right["runtime_id"].as_str())
+    });
+    json!({
+        "ok": true,
+        "scope": "bridge",
+        "complete": true,
+        "inventory_source": "live_runtime_registry",
+        "active_runtime_id": active_runtime_id,
+        "count": tabs.len(),
+        "tabs": tabs,
+    })
+}
+
+async fn browser_claimed_tabs_list_call(
+    state: AppState,
+    request: ToolCallRequest,
+) -> Result<Json<ToolCallResponse>, (StatusCode, Json<Value>)> {
+    let arguments = request.arguments.as_object().cloned().unwrap_or_default();
+    if let Some(unexpected) = arguments.keys().next() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "invalid_input",
+                "browser.claimed_tabs.list accepts no arguments.",
+                json!({ "unexpected_argument": unexpected }),
+            ),
+        ));
+    }
+    Ok(Json(ToolCallResponse {
+        announcements: None,
+        ok: true,
+        call_id: Uuid::new_v4().to_string(),
+        output: Some(bridge_claimed_tabs_list(&state).await),
+        error: None,
+    }))
 }
 
 async fn browser_active_tab_set_call(
@@ -4873,6 +5131,9 @@ async fn tools_call_inner(
     if request.name == "bridge.payloads.configure" {
         return bridge_payloads_configure_call(state, request).await;
     }
+    if request.name == "browser.claimed_tabs.list" {
+        return browser_claimed_tabs_list_call(state, request).await;
+    }
     if request.name == "browser.active_tab.set" {
         return browser_active_tab_set_call(state, request).await;
     }
@@ -5198,7 +5459,7 @@ async fn site_actions_call(
                 ),
             )
         })?;
-    let target_url_contains = site_action_target_url_contains(&request);
+    let target_url_contains = site_action_target_url_contains(&state, &request).await?;
 
     if mode == "list" {
         let (site_manifest, site_action_names) = {
@@ -5562,7 +5823,7 @@ async fn storage_read_file_call(
             ),
         ));
     };
-    let target_url_contains = site_action_target_url_contains(&request);
+    let target_url_contains = site_action_target_url_contains(&state, &request).await?;
     let result = read_declared_storage_file(
         storage_root,
         target_url_contains.as_deref(),
@@ -5592,13 +5853,43 @@ async fn storage_read_file_call(
     }))
 }
 
-fn site_action_target_url_contains(request: &ToolCallRequest) -> Option<String> {
-    request.target_url_contains.clone().or_else(|| {
+async fn site_action_target_url_contains(
+    state: &AppState,
+    request: &ToolCallRequest,
+) -> Result<Option<String>, (StatusCode, Json<Value>)> {
+    let explicit = request.target_url_contains.clone().or_else(|| {
         request
             .arguments
             .get("target_url_contains")
             .and_then(Value::as_str)
             .map(str::to_string)
+    });
+    if explicit.is_some() {
+        return Ok(explicit);
+    }
+
+    if state.runtimes.lock().await.is_empty() {
+        return Ok(None);
+    }
+
+    let target = ResolvedToolCall {
+        name: request.name.clone(),
+        arguments: request.arguments.clone(),
+        target_runtime_id: request.target_runtime_id.clone(),
+        target_url_contains: None,
+        timeout_ms: request.timeout_ms,
+        static_output: None,
+    };
+    let runtime = select_runtime(state, &target).await?;
+    runtime.url.map(Some).ok_or_else(|| {
+        (
+            StatusCode::CONFLICT,
+            structured_error(
+                "runtime_url_missing",
+                "The selected runtime has no current URL for site catalog filtering.",
+                json!({ "runtime_id": runtime.runtime_id }),
+            ),
+        )
     })
 }
 
@@ -5879,6 +6170,9 @@ async fn site_storage_state_projections_for_target(
             if projection.get("name").and_then(Value::as_str).is_none() {
                 continue;
             }
+            if !projection_matches_target_url(projection, target_url_contains) {
+                continue;
+            }
             projections.push((relative_path.clone(), projection.clone()));
         }
     }
@@ -5991,6 +6285,49 @@ fn storage_map_matches_target(map_path: &Path, target_url_contains: Option<&str>
         return true;
     };
     target.contains(host.as_str()) || host.contains(target)
+}
+
+fn wildcard_matches(pattern: &str, value: &str) -> bool {
+    if pattern.trim().is_empty() {
+        return true;
+    }
+    let mut remainder = value;
+    let anchored_start = !pattern.starts_with('*');
+    let anchored_end = !pattern.ends_with('*');
+    let parts: Vec<&str> = pattern.split('*').filter(|part| !part.is_empty()).collect();
+    if parts.is_empty() {
+        return true;
+    }
+    for (index, part) in parts.iter().enumerate() {
+        let Some(position) = remainder.find(part) else {
+            return false;
+        };
+        if index == 0 && anchored_start && position != 0 {
+            return false;
+        }
+        remainder = &remainder[position + part.len()..];
+    }
+    if anchored_end {
+        return remainder.is_empty();
+    }
+    true
+}
+
+fn projection_matches_target_url(projection: &Value, target_url_contains: Option<&str>) -> bool {
+    let Some(target) = target_url_contains else {
+        return true;
+    };
+    if !(target.starts_with("http://") || target.starts_with("https://")) {
+        return true;
+    }
+    let Some(pattern) = projection
+        .get("scope")
+        .and_then(|scope| scope.get("url_matches"))
+        .and_then(Value::as_str)
+    else {
+        return true;
+    };
+    wildcard_matches(pattern, target)
 }
 
 fn storage_map_site_host(map_path: &Path) -> Option<String> {

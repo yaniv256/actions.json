@@ -23,18 +23,12 @@ const SCHTASKS_PATH: &str = "/mnt/c/Windows/System32/schtasks.exe";
 const TASKLIST_PATH: &str = "/mnt/c/Windows/System32/tasklist.exe";
 const CHROME_PATH: &str = r"C:\Program Files\Google\Chrome\Application\chrome.exe";
 const DEFAULT_USER_DATA: &str = r"C:\temp\chrome-debug";
-/// The extension's manifest id (actions.json Overlay Runtime) — its popup page is the
-/// load-bearing context for a headless claim. (chrome_launcher.py OVERLAY_EXTENSION_ID.)
-const OVERLAY_EXTENSION_ID: &str = "dbbgeieflhabcibjmgbohhfmollnhbcp";
-
 /// The WSL -> Windows backend. Holds the Chrome profile dir it operates on and the Windows path
 /// to the pipe helper binary (`chrome-launcher-helper.exe`).
 pub struct WslWindowsBackend {
     user_data_dir: String,
     /// Windows path to chrome-launcher-helper.exe (used by load_extension/start_extension_session).
     helper_win: Option<String>,
-    /// Extension id whose popup.html is opened for the headless claim.
-    extension_id: String,
 }
 
 impl Default for WslWindowsBackend {
@@ -42,7 +36,6 @@ impl Default for WslWindowsBackend {
         Self {
             user_data_dir: DEFAULT_USER_DATA.to_string(),
             helper_win: None,
-            extension_id: OVERLAY_EXTENSION_ID.to_string(),
         }
     }
 }
@@ -53,14 +46,7 @@ impl WslWindowsBackend {
         Self {
             user_data_dir: user_data_dir.into(),
             helper_win: None,
-            extension_id: OVERLAY_EXTENSION_ID.to_string(),
         }
-    }
-
-    /// Override the extension id used for the headless claim popup.
-    pub fn with_extension_id(mut self, extension_id: impl Into<String>) -> Self {
-        self.extension_id = extension_id.into();
-        self
     }
 
     /// Set the Windows path to chrome-launcher-helper.exe (required for the session tools).
@@ -241,11 +227,12 @@ impl LaunchBackend for WslWindowsBackend {
     fn claim_tab<'a>(
         &'a self,
         cdp_ws_url: &'a str,
+        extension_id: &'a str,
         target_url_contains: &'a str,
         bridge_url: &'a str,
     ) -> BackendFuture<'a, ClaimResult> {
         Box::pin(async move {
-            crate::claim::claim_tab(cdp_ws_url, &self.extension_id, target_url_contains, bridge_url)
+            crate::claim::claim_tab(cdp_ws_url, extension_id, target_url_contains, bridge_url)
                 .await
         })
     }
