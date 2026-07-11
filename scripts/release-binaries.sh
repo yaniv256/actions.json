@@ -111,7 +111,17 @@ build_linux() {
   package "linux-x64" "$target_dir/release/actions-json-mcp"
 }
 
-win_ps() { "$PWSH" -NoProfile -Command "$1" 2>&1 | grep -ivE 'UNC paths|CMD.EXE|wsl.localhost|started with the above|Defaulting to Windows'; }
+win_ps() {
+  local output status
+  if output="$("$PWSH" -NoProfile -Command "$1; if (\$null -ne \$LASTEXITCODE) { exit \$LASTEXITCODE }" 2>&1)"; then
+    status=0
+  else
+    status=$?
+  fi
+  printf '%s\n' "$output" |
+    grep -ivE 'UNC paths|CMD.EXE|wsl.localhost|started with the above|Defaulting to Windows' || true
+  return "$status"
+}
 
 build_windows() {
   log "win-x64 (Windows host)"

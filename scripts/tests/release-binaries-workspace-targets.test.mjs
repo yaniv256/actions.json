@@ -40,3 +40,11 @@ test("release verification cannot inherit same-version artifacts from a prior ru
     /"\$dist"\/chrome-launcher-helper-"\$version"-\*\.tar\.gz/,
   );
 });
+
+test("quiet successful Windows commands are not converted into failures by log filtering", () => {
+  assert.match(script, /local output status/);
+  assert.match(script, /status=\$\?/);
+  assert.match(script, /grep -ivE [^\n]+ \|\| true/);
+  assert.match(script, /return "\$status"/);
+  assert.match(script, /exit \\\$LASTEXITCODE/);
+});
