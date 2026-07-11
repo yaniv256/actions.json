@@ -1,6 +1,6 @@
 # Expenditure Tracking (spec 037)
 
-The extension tracks every hosted gpt-realtime-2 response's cost: a live meter in the
+The extension tracks every hosted gpt-realtime-2.1 response's cost: a live meter in the
 page overlay, per-response JSONL records persisted to your own S3 bucket, session
 summaries, and an optional tracking-error readout comparing our estimates against what
 OpenAI actually charged.

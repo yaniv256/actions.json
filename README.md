@@ -157,7 +157,7 @@ coding agent needed — but you supply your own key and storage.)
 
 The extension-hosted agent can:
 
-- speak and listen through `gpt-realtime-2`;
+- speak and listen through `gpt-realtime-2.1`;
 - use screenshots after tab authorization;
 - use uploaded storage to discover and run current-site actions;
 - use direct primitives such as `browser.screenshot`, `locator.element_info`,

@@ -61,6 +61,7 @@ rm -f "$out_dir/$artifact_name" "$out_dir/SHA256SUMS.txt"
     src/agent/hosted-tool-executor.mjs \
     src/agent/local-actions-catalog.mjs \
     src/agent/realtime-cost.mjs \
+    src/agent/realtime-model.mjs \
     src/agent/realtime-session-manager.mjs \
     src/agent/realtime-tool-catalog.mjs \
     src/agent/runtime-session-client.mjs \

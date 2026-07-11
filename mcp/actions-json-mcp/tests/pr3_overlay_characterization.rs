@@ -330,11 +330,18 @@ async fn pr3_ambiguous_url_routing_fails_without_dispatch() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
 
+    // U6: an intent phrase matching >1 live runtime is an honest, candidate-
+    // naming ambiguity error (was: an opaque "matched multiple" string). Still
+    // CONFLICT, still no dispatch — the improvement is the error envelope.
+    assert_eq!(payload["error"]["code"].as_str(), Some("ambiguous_intent"));
+    assert!(payload["error"]["next_step"].is_string());
     assert_eq!(
-        payload["error"].as_str(),
-        Some("target_url_contains matched multiple runtimes")
+        payload["error"]["evidence"]["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
     );
-    assert_eq!(payload["matches"].as_array().unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -384,37 +391,16 @@ async fn url_routing_failure_reports_candidate_rejection_trace() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let payload: Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(
-        payload["error"].as_str(),
-        Some("no runtime URL matched target_url_contains")
-    );
-    assert_eq!(
-        payload["routing_trace"]["requested"]["target_url_contains"].as_str(),
-        Some("https://beta.example/")
-    );
-    assert_eq!(
-        payload["routing_trace"]["candidates"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(
-        payload["routing_trace"]["candidates"][0]["runtime_id"].as_str(),
-        Some("runtime-a")
-    );
-    assert_eq!(
-        payload["routing_trace"]["candidates"][0]["url"].as_str(),
-        Some("https://acme.example/#research")
-    );
-    assert_eq!(
-        payload["routing_trace"]["candidates"][0]["url_contains_match"].as_bool(),
-        Some(false)
-    );
-    assert_eq!(
-        payload["routing_trace"]["decision"].as_str(),
-        Some("no_match")
-    );
+    // U6: an intent phrase matching no live runtime returns the honest
+    // runtime_not_found code with a re-list next-step (was: an opaque string +
+    // routing_trace). Still NOT_FOUND, still no dispatch. The evidence lists the
+    // live runtimes so the agent can pick a real one.
+    assert_eq!(payload["error"]["code"].as_str(), Some("runtime_not_found"));
+    assert!(payload["error"]["next_step"].is_string());
+    assert_eq!(payload["error"]["evidence"]["intent"].as_str(), Some("https://beta.example/"));
+    let runtimes = payload["error"]["evidence"]["runtimes"].as_array().unwrap();
+    assert_eq!(runtimes.len(), 1);
+    assert_eq!(runtimes[0]["runtime_id"].as_str(), Some("runtime-a"));
 }
 
 #[tokio::test]

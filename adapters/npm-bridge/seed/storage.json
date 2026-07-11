@@ -1,0 +1,34 @@
+{
+  "protocol": "actions.json.storage",
+  "version": "0.1.0",
+  "owner": {
+    "type": "person",
+    "id": "you"
+  },
+  "visibility": "root-private",
+  "default_mount": "private",
+  "mounts": {
+    "private": {
+      "path": "scopes/private",
+      "mount_type": "local",
+      "visibility": "private",
+      "default": true,
+      "description": "Your owner-only browsing memory, observations, overlays, run logs, item indexes, and unreviewed action maps. Local by default; point it at your OWN private repo to sync the same memory across your machines and agents (see scopes/private/README.md)."
+    },
+    "public": {
+      "path": "scopes/public",
+      "mount_type": "git_clone",
+      "repo": "https://github.com/yaniv256/actions.json.storage.public.git",
+      "visibility": "public",
+      "description": "Reviewed, reusable public site-action maps (Trello, Gmail, Docs, GitHub, LinkedIn, Calendar, …). Cloned from the public maps repo on first run; pull to update, or point this at your own public repo."
+    }
+  },
+  "default_policy": {
+    "observations": "write_to_private_scope",
+    "item_indexes": "write_to_private_scope",
+    "runs": "write_to_private_scope",
+    "overlays": "write_to_private_scope",
+    "action_maps": "reviewed_change_in_scope",
+    "promotion": "review_required"
+  }
+}

@@ -1,6 +1,33 @@
 # Development Cycle
 
-## The repo model: PRIVATE dev repo → PUBLIC repo (READ THIS FIRST)
+## The workflow ORDER — the public sync is the LAST step, never the first (READ THIS FIRST)
+
+**"Cut the release" / "ship it" does NOT mean "sync to the public repo now."** The public
+sync is the *final* gate, reached only after the change has been proven live. Testing comes
+first, and it comes in a fixed order. Do not skip ahead to the public sync — that is the exact
+mistake this section exists to stop.
+
+**The mandatory sequence for any runtime/bridge/extension change:**
+
+1. **Land the work on private `main`** (merge the feature branch into `actions.json.dev` main).
+2. **Self-test on a Chrome YOU launch** — package the extension + build the bridge, load the
+   unpacked extension into a real Chromium you drive (Playwright / the live-smoke harness), and
+   prove the change works end-to-end *yourself*. Iterate here until green. This is the
+   agent-side gate; the human is NOT involved yet. (Restarting your own session to reload the
+   staged bridge is part of this step when the change is bridge-side.)
+3. **Human loads the verified build into THEIR browser** — only after step 2 is green, hand the
+   human a real release URL (with verified assets) to install, and test together on their
+   browser. This is the human live-test gate.
+4. **ONLY THEN: the public sync** — dev → public via the reviewed PR below (analyze → draft PR
+   text → human approves → sync + open PR → human merges).
+
+So: **self-launched-Chrome test → human-browser test → public sync.** Never jump from "the code
+is written" (or even "unit tests pass") straight to step 4. Unit/integration tests green is not
+a live proof; the human's browser is not the first place a build gets tested. If asked to "cut
+the release," start at step 1/2, not step 4 — and if a live harness for the change does not
+exist yet, building it IS the work of step 2.
+
+## The repo model: PRIVATE dev repo → PUBLIC repo
 
 **`actions.json.dev` (this repo) is PRIVATE — it is our DEV BRANCH.** All development and
 testing happens here. It is NOT made public and never will be; it stays the private working repo.
@@ -59,17 +86,65 @@ Do NOT skip any line under momentum — each is a failure that actually happened
 1. [ ] **Run the Playwright live test** (`npm run test:a11y-live`, or the harness
    covering your change) and confirm it passes on the code you're about to ship —
    BEFORE asking a human to install. Give yourself eyes; don't make a human your oracle.
-2. [ ] **Package + publish the extension** (`scripts/package-extension.sh` + `gh
-   release create ... --prerelease` with the zip + `SHA256SUMS.txt`). Staging the
+2. [ ] **Package + publish the extension prerelease TO THE DEV REPO** — `scripts/package-extension.sh`
+   then `gh release create extension-v<v> --repo ActionsJson/actions.json.dev --target main --prerelease`
+   with the zip + `SHA256SUMS.txt`. **The `--repo` MUST be `ActionsJson/actions.json.dev` (the private
+   dev repo) — NEVER `yaniv256/actions.json` (public).** Prereleases are dev-repo-only; the public repo
+   receives NOTHING except through the reviewed sync PR (see the repo-targeting rule below). Staging the
    bridge is NOT releasing the extension.
 3. [ ] **Verify the fix is in the packaged zip** (`unzip -p <zip> src/<file> | grep <marker>`)
    BEFORE publishing — the package can build from stale/pre-merge main.
 4. [ ] **New runtime FILES** added to the change → add them to the explicit list in
    `scripts/package-extension.sh` or the zip ships broken.
 5. [ ] **The human ask MUST contain the GitHub release URL** with verified assets
-   (`gh release view <tag> --json assets`). No URL = step 2 wasn't done.
+   (`gh release view <tag> --json assets`). No URL = step 2 wasn't done. **Verify the URL is the
+   DEV repo** (`github.com/ActionsJson/actions.json.dev/releases/...`), not the public one.
 
 The full rationale for each is below. Read it; then act on the checklist.
+
+## WHICH REPO does a release go to? (the rule that prevents leaking to public)
+
+**This is a real failure that happened (2026-07-09):** an agent "cut the release," ran a bare
+`gh release create ... --prerelease`, and pointed `--repo` at the PUBLIC `yaniv256/actions.json`
+instead of the dev repo — creating a premature public release + tag before the sync gate. No source
+leaked (a GitHub release is a tag + notes + an uploaded asset, NOT a code push — the tag pointed at
+an already-public commit), but the public repo should never carry a version that hasn't been synced.
+The fix is this rule; internalize it.
+
+- **Every prerelease / dev test build → `--repo ActionsJson/actions.json.dev` (the PRIVATE dev repo).**
+  This is where the human installs test builds from. `gh` defaults to the cwd's remote, but ALWAYS
+  pass `--repo ActionsJson/actions.json.dev` explicitly so a wrong cwd can't misfire.
+- **The PUBLIC repo `yaniv256/actions.json` receives NOTHING by a bare `gh release create`.** Public
+  releases are produced ONLY by the reviewed dev→public **sync PR** flow (analyze → PR text → Yaniv
+  approves → sync + open PR → Yaniv merges) and, for the binaries, by `scripts/release-binaries.sh`
+  run **as part of that approved public release** — never ad-hoc, never before the sync.
+- **A GitHub release is a tag + release notes + uploaded assets — it does NOT push commits/source.**
+  So a mis-targeted `--repo public` does not leak private code, but it DOES plant a premature
+  tag+release the public repo shouldn't have. If it happens: `gh release delete <tag> --repo
+  yaniv256/actions.json --cleanup-tag --yes` to remove both the release and its tag, then re-cut on
+  the dev repo. Verify public is back to its last real version with `gh release list --repo yaniv256/actions.json`.
+- **Sanity check before EVERY `gh release create`:** the `--repo` value is `ActionsJson/actions.json.dev`.
+  If you typed `yaniv256/actions.json`, stop — that is the public surface and needs the sync PR, not a
+  bare release.
+
+## Distribution surfaces — there are THREE, and they do NOT auto-track each other
+
+A release reaches users through three independently-loaded surfaces. Updating one does not update the others:
+
+1. **The GitHub release** on `yaniv256/actions.json` — the extension zip + the four per-platform bridge tarballs (`actions-json-mcp-<v>-<slug>.tar.gz`) + `SHA256SUMS.txt`. Cut via `scripts/release-binaries.sh`.
+
+   **Ordering constraint (learned the hard way, 2026-07-09):** `release-binaries.sh` builds `win-x64` **on the Windows host**, by cloning `$GIT_URL` (= `$repo`, default the **public** repo) and checking out `$tag`. **A tag that exists only on the dev repo cannot resolve there.** So the bridge binaries can only be cut **after the tag is pushed to `$repo`** — i.e. after the public sync lands, not before. Pass `--repo`/`--tag` if you mean a different pair.
+
+   The script now **verifies its own output**: after building, it asserts a non-empty tarball for every requested platform and aborts non-zero, naming what is missing. It used to exit 0 with `win-x64` silently absent, because a platform build runs inside `collect < <(build_x)` and a process substitution's exit status is not propagated — `set -euo pipefail` cannot see it. A release cut that way ships with no Windows bridge binary. Guarded by `npm run test:release-scripts`. **Never read "the loop ran" as "the artifacts exist."**
+2. **The staged local bridge** (`~/.local/share/actions-json-mcp/<ver>-<slug>/`) that a session restart reloads from `~/.claude.json`.
+3. **The npm wrapper `@actions-json/bridge`** (`adapters/npm-bridge/`) — how `npx @actions-json/bridge mcp` users get the bridge. It is **published separately to npm** and does NOT auto-track a GitHub release. It fell 66+ versions behind exactly because the release cycle ignored it. When a release changes the bridge binary or the tool catalog, you MUST:
+   - bump `bridgeBinaryVersion` in `adapters/npm-bridge/package.json` to the release version (it downloads `actions-json-mcp-<bridgeBinaryVersion>-<slug>.tar.gz` from the `extension-v<...>` release — verify those binaries exist, or the pin 404s on first `npx`);
+   - re-copy the bundled dictionary so it is byte-identical to canonical: `cp extensions/chrome-overlay-runtime/actions/overlay.actions.json adapters/npm-bridge/dictionary/overlay.actions.json` — the `dictionary-freshness.test.js` guard fails loudly on drift (a fresh binary + stale catalog = npx users missing headline primitives);
+   - bump the package `version` (npm rejects republishing the same one) and `npm publish --access public` (auth is in `~/.npmrc` as `yaniv256`).
+
+**The `chrome-launcher-helper` (native-Windows pipe owner) ships as its OWN release asset**, not inside the bridge tarball — it installs where the BROWSER runs, which in the WSL→Windows split is a different machine than the one that pulls the bridge tarball. See `scripts/release-binaries.sh` `package_helper()`.
+
+**Two-mirror release truth (do NOT trust local `git tag`).** The private dev repo (`actions.json.dev`, this checkout) and the public release repo (`yaniv256/actions.json`, where npx downloads) are DIFFERENT git remotes with divergent tags — local `git tag` lagged the real release by a full version. Release/version truth = `gh release list --repo yaniv256/actions.json`, never local tags.
 
 
 You cannot meaningfully test a runtime change from an unmerged working tree —

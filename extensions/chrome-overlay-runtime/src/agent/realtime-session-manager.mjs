@@ -12,8 +12,9 @@ import {
   realtimeTurnDetectionConfig,
 } from "./voice-settings-store.mjs";
 import { estimateRealtimeCost, PRICING_VERSION } from "./realtime-cost.mjs";
+import { DEFAULT_MODEL } from "./realtime-model.mjs";
 
-const DEFAULT_MODEL = "gpt-realtime-2";
+export { DEFAULT_MODEL };
 const MAX_REALTIME_IMAGE_DATA_URL_CHARS = 512_000;
 const DEFAULT_DEVELOPER_TEXT_RESPONSE_TIMEOUT_MS = 45_000;
 

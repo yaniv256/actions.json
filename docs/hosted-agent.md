@@ -6,7 +6,7 @@ has_children: true
 
 # Hosted Agent
 
-The Chrome extension can host a `gpt-realtime-2` voice/text agent directly in
+The Chrome extension can host a `gpt-realtime-2.1` voice/text agent directly in
 the browser.
 
 This is the end-user path for `actions.json`: install the extension, authorize a
@@ -34,7 +34,7 @@ stop the live voice session. Use **Stop** when you want the session to end.
 
 Current capabilities include:
 
-- voice conversation through `gpt-realtime-2`;
+- voice conversation through `gpt-realtime-2.1`;
 - a text transcript with one mutable user and assistant bubble while speech
   deltas arrive, plus a composer for typed input;
 - page screenshots after user authorization;

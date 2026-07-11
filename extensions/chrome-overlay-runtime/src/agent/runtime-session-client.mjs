@@ -1,3 +1,5 @@
+import { DEFAULT_MODEL } from "./realtime-model.mjs";
+
 export function createRuntimeHostedSessionClient({
   chromeApi = globalThis.chrome,
   eventObserver = null,
@@ -8,7 +10,7 @@ export function createRuntimeHostedSessionClient({
   const observer = typeof eventObserver === "function" ? eventObserver : null;
   let state = {
     status: "disconnected",
-    model: "gpt-realtime-2",
+    model: DEFAULT_MODEL,
     error: null,
     inputMuted: false,
     outputMuted: false,
@@ -88,7 +90,7 @@ export function createUnavailableHostedSessionClient({
 } = {}) {
   let state = {
     status: "disconnected",
-    model: "gpt-realtime-2",
+    model: DEFAULT_MODEL,
     error: null,
     inputMuted: false,
     outputMuted: false,

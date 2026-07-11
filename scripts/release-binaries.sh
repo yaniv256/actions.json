@@ -63,8 +63,8 @@ GIT_URL="https://github.com/${repo}.git"
 
 log() { printf '\n=== %s ===\n' "$*" >&2; }
 
-# Package a built binary into dist/ using the existing packaging conventions.
-# Args: <slug> <path-to-binary>
+# Package the bridge binary into a per-platform dist/ tarball.
+# Args: <slug> <path-to-bridge-binary>
 package() {
   local slug="$1" bin_src="$2"
   local bin_name="actions-json-mcp"
@@ -75,6 +75,29 @@ package() {
   install -m 644 "$repo_root/mcp/actions-json-mcp/README.md" "$tmp/README.md"
   printf '%s\n' "$version" > "$tmp/VERSION"
   ( cd "$tmp" && tar -czf "$art" "$bin_name" README.md VERSION )
+  rm -rf "$tmp"
+  ( cd "$dist" && shasum -a 256 "$(basename "$art")" >> SHA256SUMS.txt 2>/dev/null \
+      || sha256sum "$(basename "$art")" >> SHA256SUMS.txt )
+  echo "$art"
+}
+
+# Package the chrome-launcher-helper as its OWN standalone release asset.
+# Rationale (Yaniv 2026-07-09): the helper must be installed where the BROWSER
+# runs, which in the WSL→Windows topology is a DIFFERENT machine than the one
+# that pulls the bridge tarball (the agent host, typically linux-x64). Bundling
+# it inside the win-x64 bridge tarball only serves an all-Windows setup and hides
+# it from the split setup it exists for. So it ships as its own asset the browser
+# host fetches independently: chrome-launcher-helper-<v>-<slug>.tar.gz.
+# Args: <slug> <path-to-helper-binary>
+package_helper() {
+  local slug="$1" bin_src="$2"
+  local bin_name="chrome-launcher-helper"
+  [[ "$slug" == win-* ]] && bin_name="chrome-launcher-helper.exe"
+  local art="$dist/chrome-launcher-helper-${version}-${slug}.tar.gz"
+  local tmp; tmp="$(mktemp -d)"
+  install -m 755 "$bin_src" "$tmp/$bin_name"
+  printf '%s\n' "$version" > "$tmp/VERSION"
+  ( cd "$tmp" && tar -czf "$art" "$bin_name" VERSION )
   rm -rf "$tmp"
   ( cd "$dist" && shasum -a 256 "$(basename "$art")" >> SHA256SUMS.txt 2>/dev/null \
       || sha256sum "$(basename "$art")" >> SHA256SUMS.txt )
@@ -98,8 +121,14 @@ build_windows() {
     win_ps "if (-not (Test-Path '$WIN_REPO_WIN')) { git clone '$GIT_URL' '$WIN_REPO_WIN' }" | tail -2 || true
     win_ps "Set-Location '$WIN_REPO_WIN'; git fetch --tags --quiet; git checkout --quiet '$tag'" | tail -2
     win_ps "Set-Location '$WIN_REPO_WIN\\mcp\\actions-json-mcp'; cargo build --release --locked" | tail -4
+    # The native-Windows pipe owner: the WSL→Windows Chrome launch path can't own
+    # the --remote-debugging-pipe fds from WSL. Built natively on the Windows host
+    # and shipped as its OWN standalone release asset (see package_helper) so the
+    # browser host can fetch it regardless of which bridge tarball the agent pulls.
+    win_ps "Set-Location '$WIN_REPO_WIN\\mcp\\chrome-launcher-helper'; cargo build --release --locked" | tail -4
   } >&2
   package "win-x64" "${WIN_REPO_WSL}/mcp/actions-json-mcp/target/release/actions-json-mcp.exe"
+  package_helper "win-x64" "${WIN_REPO_WSL}/mcp/chrome-launcher-helper/target/release/chrome-launcher-helper.exe"
 }
 
 mac_ssh() { ssh -i "$MAC_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$MAC_HOST" "$@"; }
@@ -143,16 +172,54 @@ for p in "${wanted[@]}"; do [[ "$p" == macos-* ]] && mac_needed=1; done
 [[ "$mac_needed" == 1 ]] && { log "syncing Mac checkout to $tag"; mac_prepare; }
 
 built=()
-[[ "$no_extension" == 0 ]] && built+=("$(build_extension)")
+# collect(): append each newline-separated artifact path from a build_* function
+# as its own array element. build_windows emits TWO paths (bridge tarball + the
+# standalone chrome-launcher-helper asset), so a plain built+=("$(...)") would
+# collapse both into one malformed element — split on newlines here.
+collect() { local line; while IFS= read -r line; do [[ -n "$line" ]] && built+=("$line"); done; }
+[[ "$no_extension" == 0 ]] && collect < <(build_extension)
 for p in "${wanted[@]}"; do
   case "$p" in
-    linux-x64)   built+=("$(build_linux)") ;;
-    win-x64)     built+=("$(build_windows)") ;;
-    macos-arm64) built+=("$(build_mac macos-arm64 aarch64-apple-darwin)") ;;
-    macos-x64)   built+=("$(build_mac macos-x64 x86_64-apple-darwin)") ;;
+    linux-x64)   collect < <(build_linux) ;;
+    win-x64)     collect < <(build_windows) ;;
+    macos-arm64) collect < <(build_mac macos-arm64 aarch64-apple-darwin) ;;
+    macos-x64)   collect < <(build_mac macos-x64 x86_64-apple-darwin) ;;
     *) echo "unknown platform: $p" >&2; exit 2 ;;
   esac
 done
+
+# VERIFY-OR-FAIL (the postcondition). A platform build runs inside
+# `collect < <(build_x)`, and a process substitution's exit status is NOT
+# propagated — `set -euo pipefail` cannot see it. So a failed build is silently
+# discarded and the script would march on to publish a PARTIAL release.
+# (Real: 2026-07-09, win-x64's Windows-side `git checkout <tag>` failed, three of
+# four tarballs were produced, and the script exited 0. A release cut that way
+# ships with no Windows bridge binary; npx users on Windows 404 on the pin.)
+# Never trust "the loop ran" as "the artifacts exist" — assert the artifacts.
+verify_artifacts() {
+  local missing=() p art
+  for p in "${wanted[@]}"; do
+    art="$dist/actions-json-mcp-${version}-${p}.tar.gz"
+    [[ -s "$art" ]] || missing+=("$p ($(basename "$art"))")
+  done
+  if (( ${#missing[@]} )); then
+    echo "" >&2
+    echo "RELEASE ABORTED — ${#missing[@]} requested platform(s) produced no tarball:" >&2
+    printf '  - %s\n' "${missing[@]}" >&2
+    echo "" >&2
+    echo "A platform build failed (a process substitution hides its exit status, so" >&2
+    echo "the failure is not otherwise visible). Scroll up for that platform's output." >&2
+    echo "" >&2
+    echo "Common cause for win-x64: it clones \$GIT_URL (= \$repo, default the PUBLIC" >&2
+    echo "repo) and checks out '$tag'. A tag that only exists on the DEV repo will not" >&2
+    echo "resolve there — so the bridge binaries can only be cut AFTER the tag is" >&2
+    echo "pushed to \$repo. Pass --repo/--tag to match where the tag actually lives." >&2
+    echo "" >&2
+    echo "Do NOT publish a partial release." >&2
+    exit 1
+  fi
+}
+verify_artifacts
 
 log "built artifacts"
 printf '%s\n' "${built[@]}"

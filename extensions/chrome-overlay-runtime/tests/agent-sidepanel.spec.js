@@ -125,7 +125,7 @@ test("side panel saves a redacted key and controls a mocked hosted session", asy
   await expect(page.locator("#agentState")).toHaveText("Live");
   await expect(page.locator("#startAgent")).toHaveAttribute("data-voice-state", "live");
   await expect(page.locator("#voiceLauncherLabel")).toHaveText("Session live");
-  await expect(page.locator("#targetSummary")).toContainText("gpt-realtime-2 voice session connected");
+  await expect(page.locator("#targetSummary")).toContainText("gpt-realtime-2.1 voice session connected");
   await expect(page.locator("#transcript")).toContainText("Voice session started");
   await expect(page.locator("#memoryStatus")).toHaveText("Memory: 3 events.");
   const sessionUpdate = await page.evaluate(() =>
@@ -784,19 +784,19 @@ test("side panel starts production voice through the durable extension session h
                     type: "response.output_audio_transcript.done",
                     transcript: "Durable session stayed alive.",
                   },
-                  state: { status: "connected", model: "gpt-realtime-2", error: null },
+                  state: { status: "connected", model: "gpt-realtime-2.1", error: null },
                 });
               }
             });
             return {
               ok: true,
-              state: { status: "connected", model: "gpt-realtime-2", error: null },
+              state: { status: "connected", model: "gpt-realtime-2.1", error: null },
             };
           }
           if (message.type === "actions-json:agent-session-stop") {
             return {
               ok: true,
-              state: { status: "stopped", model: "gpt-realtime-2", error: null },
+              state: { status: "stopped", model: "gpt-realtime-2.1", error: null },
             };
           }
           return { ok: true };
@@ -880,7 +880,7 @@ test("side panel refreshes durable session state on load so stop stays available
           if (message.type === "actions-json:agent-session-state") {
             return {
               ok: true,
-              state: { status: "connected", model: "gpt-realtime-2", error: null, inputMuted: true, outputMuted: true },
+              state: { status: "connected", model: "gpt-realtime-2.1", error: null, inputMuted: true, outputMuted: true },
             };
           }
           return { ok: true };
@@ -930,7 +930,7 @@ test("side panel refreshes durable session state on load so stop stays available
   await expect(page.locator("#muteSpeaker")).toHaveClass(/is-muted/);
   await expect(page.locator("#muteMic")).toHaveCSS("color", "rgb(182, 64, 64)");
   await expect(page.locator("#muteSpeaker")).toHaveCSS("color", "rgb(182, 64, 64)");
-  await expect(page.locator("#targetSummary")).toContainText("gpt-realtime-2 voice session connected");
+  await expect(page.locator("#targetSummary")).toContainText("gpt-realtime-2.1 voice session connected");
 });
 
 test("side panel sends typed agent prompts through the transcript composer", async ({ page }) => {

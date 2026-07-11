@@ -5,9 +5,12 @@ nav_order: 1
 
 # actions.json Documentation
 
-`actions.json` is a readable action map for websites. It lets agents operate a
-site through declared actions instead of scraping, guessing, or rediscovering
-the DOM.
+`actions.json` gives you a **voice agent that runs on any website** — install the
+Chrome extension, bring your OpenAI key, and talk to the site while the agent
+sees the page, navigates, and acts for you. Underneath, `actions.json` is a
+**readable action map for websites**: it lets an agent operate a site through
+declared actions instead of scraping, guessing, or rediscovering the DOM, and a
+site that publishes a map turns the generic voice agent into an expert on that site.
 
 Use this page to choose what to read next.
 
@@ -31,7 +34,7 @@ Use this page to choose what to read next.
 - [Getting Started](getting-started.md): choose an install path, authorize a
   tab, add an OpenAI key, upload storage, and verify that tools are available.
 - [Hosted Agent](hosted-agent.md): user guide for the extension-hosted
-  `gpt-realtime-2` voice/text agent.
+  `gpt-realtime-2.1` voice/text agent.
 - [Chrome Extension](chrome-extension.md): the popup-settings UI (all settings
   live in the extension popup) and the runtime capabilities behind the hosted
   agent: overlays, storage tools, screenshots, bridge connection, and debugger
@@ -39,7 +42,7 @@ Use this page to choose what to read next.
 - [Hosted Agent Tools](hosted-agent-tools.md): how `actions.site`, direct
   primitives, screenshots, and storage-backed context reach the hosted agent.
 - [Expenditure Tracking](expenditure-tracking.md): live per-response cost
-  estimation for the hosted `gpt-realtime-2` session, whole-day totals, the
+  estimation for the hosted `gpt-realtime-2.1` session, whole-day totals, the
   cache-miss drain signature, and optional cloud persistence of usage records.
 - [Awaiting Agent Events](agent-event-await.md): the `runtime.agent.await_event`
   supervision loop — learn of each hosted-agent response, tool call, refusal, or
