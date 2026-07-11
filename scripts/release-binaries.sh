@@ -106,8 +106,9 @@ package_helper() {
 
 build_linux() {
   log "linux-x64 (this host)"
-  ( cd "$repo_root/mcp/actions-json-mcp" && cargo build --release --locked ) >&2
-  package "linux-x64" "$repo_root/mcp/actions-json-mcp/target/release/actions-json-mcp"
+  local target_dir="$repo_root/mcp/target"
+  ( cd "$repo_root/mcp/actions-json-mcp" && cargo build --release --locked --target-dir "$target_dir" ) >&2
+  package "linux-x64" "$target_dir/release/actions-json-mcp"
 }
 
 win_ps() { "$PWSH" -NoProfile -Command "$1" 2>&1 | grep -ivE 'UNC paths|CMD.EXE|wsl.localhost|started with the above|Defaulting to Windows'; }
@@ -120,15 +121,15 @@ build_windows() {
   {
     win_ps "if (-not (Test-Path '$WIN_REPO_WIN')) { git clone '$GIT_URL' '$WIN_REPO_WIN' }" | tail -2 || true
     win_ps "Set-Location '$WIN_REPO_WIN'; git fetch --tags --quiet; git checkout --quiet '$tag'" | tail -2
-    win_ps "Set-Location '$WIN_REPO_WIN\\mcp\\actions-json-mcp'; cargo build --release --locked" | tail -4
+    win_ps "Set-Location '$WIN_REPO_WIN\\mcp\\actions-json-mcp'; cargo build --release --locked --target-dir '$WIN_REPO_WIN\\mcp\\target'" | tail -4
     # The native-Windows pipe owner: the WSL→Windows Chrome launch path can't own
     # the --remote-debugging-pipe fds from WSL. Built natively on the Windows host
     # and shipped as its OWN standalone release asset (see package_helper) so the
     # browser host can fetch it regardless of which bridge tarball the agent pulls.
-    win_ps "Set-Location '$WIN_REPO_WIN\\mcp\\chrome-launcher-helper'; cargo build --release --locked" | tail -4
+    win_ps "Set-Location '$WIN_REPO_WIN\\mcp\\chrome-launcher-helper'; cargo build --release --locked --target-dir '$WIN_REPO_WIN\\mcp\\target'" | tail -4
   } >&2
-  package "win-x64" "${WIN_REPO_WSL}/mcp/actions-json-mcp/target/release/actions-json-mcp.exe"
-  package_helper "win-x64" "${WIN_REPO_WSL}/mcp/chrome-launcher-helper/target/release/chrome-launcher-helper.exe"
+  package "win-x64" "${WIN_REPO_WSL}/mcp/target/release/actions-json-mcp.exe"
+  package_helper "win-x64" "${WIN_REPO_WSL}/mcp/target/release/chrome-launcher-helper.exe"
 }
 
 mac_ssh() { ssh -i "$MAC_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new "$MAC_HOST" "$@"; }
@@ -144,12 +145,12 @@ mac_prepare() {
 build_mac() {
   local slug="$1" target="$2"
   log "$slug (Mac, $target)"
-  local remote="$MAC_REPO/mcp/actions-json-mcp/target/$target/release/actions-json-mcp"
+  local remote="$MAC_REPO/mcp/target/$target/release/actions-json-mcp"
   local local_bin="$dist/.mac-$slug-actions-json-mcp"
   # Build + fetch chatter to stderr so the capture sees only the artifact path.
   {
     mac_ssh "$MAC_PATH_EXPORT; cd '$MAC_REPO/mcp/actions-json-mcp' && \
-      cargo build --release --locked --target $target" 2>&1 | tail -4
+      cargo build --release --locked --target $target --target-dir '$MAC_REPO/mcp/target'" 2>&1 | tail -4
     scp -i "$MAC_KEY" -o IdentitiesOnly=yes "$MAC_HOST:$remote" "$local_bin" 2>&1 | tail -1
   } >&2
   package "$slug" "$local_bin"
@@ -166,6 +167,9 @@ build_extension() {
 
 # --- Run ----------------------------------------------------------------------
 rm -f "$dist/SHA256SUMS.txt"
+rm -f "$dist/actions-json-overlay-runtime-${version}.zip" \
+  "$dist"/actions-json-mcp-"$version"-*.tar.gz \
+  "$dist"/chrome-launcher-helper-"$version"-*.tar.gz
 IFS=',' read -ra wanted <<< "$platforms"
 mac_needed=0
 for p in "${wanted[@]}"; do [[ "$p" == macos-* ]] && mac_needed=1; done
