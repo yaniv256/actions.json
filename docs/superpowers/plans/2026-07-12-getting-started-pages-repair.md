@@ -15,11 +15,11 @@
 **Files:**
 - Create: `scripts/tests/getting-started-docs.test.mjs`
 
-- [ ] Assert both guide paths are regular files rather than symbolic links.
-- [ ] Assert the two copies are byte-identical.
-- [ ] Assert all relative Markdown links from the Pages copy resolve inside `docs/`.
-- [ ] Assert the guide contains exact contracts for prerequisites, credential sources, version checks, checksums, concrete verification, network security, and limitations.
-- [ ] Run `node --test scripts/tests/getting-started-docs.test.mjs` and capture the expected red failure against the symlink.
+- [x] Assert both guide paths are regular files rather than symbolic links.
+- [x] Assert the two copies are byte-identical.
+- [x] Assert all relative Markdown links from the Pages copy resolve inside `docs/`.
+- [x] Assert the guide contains exact contracts for prerequisites, credential sources, version checks, checksums, concrete verification, network security, and limitations.
+- [x] Run `node --test scripts/tests/getting-started-docs.test.mjs` and capture the expected red failure against the symlink.
 
 ### Task 2: Rewrite the canonical onboarding guide
 
@@ -27,15 +27,15 @@
 - Replace: `docs/getting-started.md`
 - Modify: `skills/write-actions-json/references/getting-started.md`
 
-- [ ] Replace the Pages symlink with a regular Markdown file.
-- [ ] Reframe path selection around hosted-agent use versus map authoring.
-- [ ] Add the prerequisites and security contracts.
-- [ ] Correct OpenAI credential hydration instructions.
-- [ ] Add extension download checksum verification and version inspection.
-- [ ] Add bridge/runtime verification with expected outputs and ordered diagnostics.
-- [ ] Move the bookmarklet note into a concise limitations section.
-- [ ] Copy the reviewed guide byte-for-byte to the skill reference.
-- [ ] Run the focused test and require all assertions to pass.
+- [x] Replace the Pages symlink with a regular Markdown file.
+- [x] Reframe path selection around hosted-agent use versus map authoring.
+- [x] Add the prerequisites and security contracts.
+- [x] Correct OpenAI credential hydration instructions.
+- [x] Add extension download checksum verification and version inspection.
+- [x] Add bridge/runtime verification with expected outputs and ordered diagnostics.
+- [x] Move the bookmarklet note into a concise limitations section.
+- [x] Copy the reviewed guide byte-for-byte to the skill reference.
+- [x] Run the focused test and require all assertions to pass.
 
 ### Task 3: Integrate the regression gate
 
@@ -43,20 +43,20 @@
 - Modify: `package.json`
 - Modify: `scripts/validate-skills.mjs`
 
-- [ ] Add `test:getting-started-docs` to package scripts.
-- [ ] Make validation check the Pages copy as a regular file and enforce parity without widening unrelated canonical-skill discovery.
-- [ ] Run the focused test and release-script test suite.
-- [ ] Record the pre-existing `validate-skills` canonical-skill-count failure without misattributing it to this change.
+- [x] Add `test:getting-started-docs` to package scripts.
+- [x] Make validation check the Pages copy as a regular file and enforce parity without widening unrelated canonical-skill discovery.
+- [x] Run the focused test and release-script test suite.
+- [x] Record the two unrelated release-script baseline failures without misattributing them to this change.
 
 ### Task 4: Verify the publishing surface
 
 **Files:**
 - Modify: `investigations/getting-started-pages-404.md`
 
-- [ ] Run the GitHub Pages Jekyll build container against `./docs`.
-- [ ] Assert `docs/_site/getting-started.html` exists and contains the expected title.
-- [ ] Serve `docs/_site` locally and require HTTP 200 from `/getting-started.html`.
-- [ ] Complete investigation phases 6–10 with experiment, blame, recurrence search, and remediation evidence.
+- [x] Run the GitHub Pages Jekyll build container against `./docs`.
+- [x] Assert `_site/getting-started.html` exists and contains the expected title.
+- [x] Serve `_site` locally and require HTTP 200 from `/getting-started.html`.
+- [x] Complete investigation phases 6–10 with experiment, blame, recurrence search, and remediation evidence.
 
 ### Task 5: Review and deliver
 

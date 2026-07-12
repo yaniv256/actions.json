@@ -42,6 +42,9 @@ Maximum-pain choice: test H3/H4 first because the public-sync layout is our own 
 5. **E5:** The latest Pages log fails in Jekyll `entry_filter.rb` with `Errno::ENOENT` while resolving `/github/workspace/docs/getting-started.md`.
 6. **E6:** Five consecutive Pages workflows failed after the reorganization; the July 4 deployment is the last successful one.
 7. **E7:** GitHub Pages documentation defines the publishing source as a branch plus root or `/docs`; files must be present in that source tree at build time.
+8. **E8:** After repairing the symlink, the Pages container exposed two previously masked Liquid syntax failures in Markdown examples. Both are now wrapped in Jekyll `{% raw %}` blocks.
+9. **E9:** The public npm wrapper was version `0.1.187` but pinned binary release `0.1.186`; that GitHub release does not exist, so a clean `npx` install failed with HTTP 404.
+10. **E10:** Release `extension-v0.1.204` contains all four supported platform binaries and checksums. Publishing wrapper `0.1.204` against that release makes a clean registry install succeed.
 
 ## Phase 4 — Revised hypotheses
 
@@ -58,11 +61,11 @@ H4 is confirmed at 99% and subsumes H3: the stale, source-escaping symlink is bo
 ### X2: Build the repaired tree
 
 - **Prediction if H4 is true:** replacing the symlink with a regular Markdown file makes the same Pages build complete and produce `_site/getting-started.html`.
-- **Status:** pending implementation.
+- **Observed:** the exact `ghcr.io/actions/jekyll-build-pages:v1.0.13` container completed, emitted `_site/getting-started.html`, and the locally served route returned HTTP 200.
 
 ## Phase 6 — Final hypothesis
 
-Pending X2. Root-cause confidence is 99%; the experiment will prove the proposed repair rather than merely restating the log.
+The 404 was caused by a stale source-escaping symlink introduced during the skill reorganization. Replacing it with a regular Pages-owned file fixes the route. The npm wrapper/release mismatch was a separate onboarding failure found while verifying the rewritten guide end to end.
 
 ## Phase 7 — Blame
 
@@ -72,6 +75,8 @@ Pending X2. Root-cause confidence is 99%; the experiment will prove the proposed
 |---|---|---|
 | Critical | `docs/getting-started.md` | Source-escaping symlink points to a deleted pre-reorganization path. |
 | High | `scripts/validate-skills.mjs` | Validates only the skill copy and has no Pages-source regular-file/parity invariant. |
+| High | `adapters/npm-bridge/package.json` | Points clean installs at a binary release that does not exist. |
+| Medium | Two Markdown example files under `docs/` | Expose literal Liquid tags to Jekyll without raw fences. |
 
 ### Level 2: anti-pattern
 
@@ -81,6 +86,27 @@ The public sync created a convenience symlink across independently packaged/publ
 
 Release verification checked repository content and extension packaging but did not gate promotion on a Pages build or the existence of the rendered onboarding route. A self-reported successful public sync was treated as delivery proof.
 
-## Phases 8–10
+## Phase 8 — Immediate repair
 
-The immediate repair, recurrence search, verification results, and remediation plan will be filled with executed evidence before this investigation is closed.
+- Replaced `docs/getting-started.md` with a regular Markdown file and kept the skill-packaged copy byte-identical.
+- Added prerequisites, checksums, credential-source truth, version compatibility, expected results, ordered diagnostics, exposure warnings, and current limitations.
+- Wrapped the two repository-wide unescaped Liquid examples revealed by the repaired build.
+- Published `@actions-json/bridge@0.1.204`, pinned to the existing `extension-v0.1.204` binary assets, and implemented the documented `--version` behavior.
+
+## Phase 9 — Recurrence search
+
+- Scanned all `docs/` Markdown for symlinks and source-escaping links.
+- Scanned all `docs/` Markdown for executable Liquid tags; the two unwrapped occurrences were fixed.
+- Compared the extension and npm-bundled dictionaries byte-for-byte.
+- Exercised a packed wrapper and a clean registry install from an isolated directory and npm cache.
+
+## Phase 10 — Verification and durable remediation
+
+- `node --test scripts/tests/getting-started-docs.test.mjs`: 3/3 pass.
+- `node scripts/validate-skills.mjs`: pass.
+- `node --test adapters/npm-bridge/test/*.test.js`: 16/16 pass.
+- Exact GitHub Pages container build: pass; `_site/getting-started.html` exists.
+- Local HTTP probe of rendered `/getting-started.html`: HTTP 200.
+- Clean `npx -y @actions-json/bridge@latest --version`: `0.1.204`.
+- Added `.github/workflows/docs-validation.yml` to build Pages and require the rendered onboarding route on relevant changes.
+- Added regular-file, parity, link, and content-contract regression tests so the publishing source cannot silently drift from the packaged guide.

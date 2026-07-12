@@ -1,0 +1,52 @@
+name: Documentation validation
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "skills/write-actions-json/references/getting-started.md"
+      - "scripts/tests/getting-started-docs.test.mjs"
+      - "scripts/validate-skills.mjs"
+      - "package.json"
+      - "adapters/npm-bridge/**"
+      - ".github/workflows/docs-validation.yml"
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "skills/write-actions-json/references/getting-started.md"
+      - "scripts/tests/getting-started-docs.test.mjs"
+      - "scripts/validate-skills.mjs"
+      - "package.json"
+      - "adapters/npm-bridge/**"
+      - ".github/workflows/docs-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Verify Getting Started copies, content contracts, and links
+        run: node --test scripts/tests/getting-started-docs.test.mjs
+      - name: Verify public skill layout and documentation parity
+        run: node scripts/validate-skills.mjs
+      - name: Verify the npm bridge install and version contracts
+        run: node --test adapters/npm-bridge/test/*.test.js
+
+  build-pages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the same Jekyll source used by GitHub Pages
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./docs
+          destination: ./_site
+      - name: Require the rendered onboarding route
+        run: test -s _site/getting-started.html

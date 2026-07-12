@@ -41,6 +41,11 @@ function withDefaults(args) {
 }
 
 async function main() {
+  if (process.argv[2] === '--version' || process.argv[2] === '-v') {
+    process.stdout.write(`${require('../package.json').version}\n`);
+    return;
+  }
+
   // `install` is a wrapper-side subcommand (register the MCP server with the
   // local coding agents); it does not touch the bridge binary or launch it.
   if (process.argv[2] === 'install') {

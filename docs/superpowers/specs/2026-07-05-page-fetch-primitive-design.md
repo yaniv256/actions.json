@@ -83,6 +83,7 @@ Errors: `page_fetch_cross_origin`, `page_fetch_failed`.
 
 ## How the maps consume it (not in this primitive's scope, but the shape)
 
+{% raw %}
 ```
 docs.read (workflow action):
   step fetchDoc: page.fetch { url: "{% 'https://docs.google.com/document/d/' & input.doc_id & '/mobilebasic' %}" }
@@ -90,6 +91,7 @@ docs.read (workflow action):
                $body := <regex/JSONata strip tags to text>;
                { 'title': <title>, 'body': $body } ) %}
 ```
+{% endraw %}
 Sheets: `/spreadsheets/d/<id>/htmlview` → parse `<table>` rows. Slides:
 `/presentation/d/<id>/mobilebasic` → slide text. Note: DOMParser is CSP-blocked
 on Google pages (TrustedHTML); extraction is regex/JSONata, not parseFromString.

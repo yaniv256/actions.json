@@ -88,6 +88,7 @@ el.scrollIntoView({ block: 'center' });
 returned the 1×1 `<input>`; the actual click target was a 32×28 sibling with its own testid,
 unique inside a row carrying a stable id.
 
+{% raw %}
 ```jsonc
 // BEFORE — a11y.query resolves the 1x1 input; pointer.click takes its raw centre
 { "id": "findItem", "primitive": "a11y.query",
@@ -108,6 +109,7 @@ unique inside a row carrying a stable id.
     "{% ($id := steps.findRowId.output.matches[0].attributes.`data-checklist-item-id`; $id ? '[data-checklist-item-id=\"' & $id & '\"] [data-testid=\"clickable-checkbox\"]' : undefined) %}" } },
   "retry_until": "{% $exists(steps.findItem.output.clickable_center) %}", "on_error": "stop" }
 ```
+{% endraw %}
 
 The selector is built by string concatenation, so it must **fail closed**. With zero matches
 the first version produced `[data-checklist-item-id=""] …` — a *syntactically valid* selector

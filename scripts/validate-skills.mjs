@@ -1,13 +1,14 @@
-import { readdir, readFile, readlink } from "node:fs/promises";
+import { lstat, readdir, readFile, readlink } from "node:fs/promises";
 import { join } from "node:path";
 
 const canonicalSkillPath = "skills/write-actions-json/SKILL.md";
 const openAiMetadataPath = "skills/write-actions-json/agents/openai.yaml";
 const gettingStartedPath = "skills/write-actions-json/references/getting-started.md";
+const gettingStartedPagesPath = "docs/getting-started.md";
 // Skills under skills/ that are standalone submodules with their own repo and
 // validation. They are not this repo's canonical inline authoring skill, so the
 // canonical-skill discovery below must ignore them.
-const submoduleSkillDirs = ["skills/incident-investigation"];
+const submoduleSkillDirs = ["skills/actions-json-dev-cycle", "skills/incident-investigation"];
 const publicDocReferences = [
   "actions-bridge-protocol.md",
   "actions-json-format.md",
@@ -121,16 +122,24 @@ for (const internalTopic of [
 }
 
 const gettingStarted = await readFile(gettingStartedPath, "utf8");
+const gettingStartedPagesStat = await lstat(gettingStartedPagesPath);
+if (!gettingStartedPagesStat.isFile() || gettingStartedPagesStat.isSymbolicLink()) {
+  throw new Error(`${gettingStartedPagesPath}: expected a regular GitHub Pages source file`);
+}
+const gettingStartedPages = await readFile(gettingStartedPagesPath, "utf8");
+if (gettingStartedPages !== gettingStarted) {
+  throw new Error(`${gettingStartedPagesPath}: must be byte-identical to ${gettingStartedPath}`);
+}
 for (const phrase of [
   "# Getting Started",
-  "Choose A Path",
-  "Path A: Chrome Extension Hosted Agent",
-  "Path B: External Coding Agent Through The Bridge",
-  "Path C: Bookmarklet Or Embed-Path Testing",
-  "Upload And Download Storage",
-  "Verify Hosted Tools",
+  "Prerequisites",
+  "Path A: Use The Hosted Browser Agent",
+  "Path B: Connect An External Coding Agent",
+  "Install And Verify The Chrome Extension",
+  "Verify the complete bridge path",
+  "Current Limitations",
   "127.0.0.1:17345",
-  "Content Security",
+  "SHA256SUMS.txt",
 ]) {
   if (!gettingStarted.includes(phrase)) {
     throw new Error(`${gettingStartedPath}: missing required section or phrase: ${phrase}`);
