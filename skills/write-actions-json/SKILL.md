@@ -275,7 +275,7 @@ coding-agent host, the normal launch shape is:
 ```bash
 cd /path/to/actions.json.dev
 cargo build --manifest-path mcp/actions-json-mcp/Cargo.toml
-./mcp/actions-json-mcp/target/debug/actions-json-mcp mcp \
+./mcp/target/debug/actions-json-mcp mcp \
   --bind 0.0.0.0:17345 \
   --actions /path/to/actions.json.dev/extensions/chrome-overlay-runtime/actions/overlay.actions.json \
   --storage-root /path/to/actions.json.storage

@@ -14,7 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const BRIDGE_BIN = path.resolve(HERE, '../../../mcp/actions-json-mcp/target/debug/actions-json-mcp');
+const BRIDGE_BIN = path.resolve(HERE, '../../../mcp/target/debug/actions-json-mcp');
 const RUN = process.env.EVAL_SMOKE === '1' && existsSync(BRIDGE_BIN)
   && process.env.DEPLOY_CHROME && process.env.DEPLOY_USER_DATA;
 

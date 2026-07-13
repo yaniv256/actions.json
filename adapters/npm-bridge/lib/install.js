@@ -103,7 +103,7 @@ async function ensureBinary() {
       '  git clone https://github.com/yaniv256/actions.json.git\n' +
       '  cd actions.json\n' +
       '  cargo build --release --manifest-path mcp/actions-json-mcp/Cargo.toml\n' +
-      'then run mcp/actions-json-mcp/target/release/actions-json-mcp.';
+      'then run mcp/target/release/actions-json-mcp.';
     const e = new Error(msg);
     e.code = 'UNSUPPORTED_PLATFORM';
     throw e;

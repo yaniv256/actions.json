@@ -140,7 +140,7 @@ export async function startEvalBridge(opts = {}) {
   const bind = opts.bind || process.env.EVAL_BRIDGE_BIND || '0.0.0.0:17346';
   const host = opts.host || process.env.EVAL_BRIDGE_HOST || bind.replace('0.0.0.0', '127.0.0.1');
   const binary = opts.binary || process.env.EVAL_BRIDGE_BINARY
-    || path.resolve(HERE, '../../../../mcp/actions-json-mcp/target/debug/actions-json-mcp');
+    || path.resolve(HERE, '../../../../mcp/target/debug/actions-json-mcp');
   const actions = opts.actions || process.env.EVAL_BRIDGE_ACTIONS
     || path.resolve(HERE, '../../actions/overlay.actions.json');
   const storageRoot = opts.storageRoot || process.env.EVAL_BRIDGE_STORAGE || path.resolve(HERE, '../../../../../actions.json.storage');
