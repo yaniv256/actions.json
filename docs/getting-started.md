@@ -43,27 +43,57 @@ described below.
 2. Download both:
    - `actions-json-overlay-runtime-<version>.zip`
    - `SHA256SUMS.txt`
+
+   The Chrome extension is the `actions-json-overlay-runtime-<version>.zip`
+   asset; bridge binaries are the platform-specific `.tar.gz` assets. Do not
+   rename or substitute an `actions-json-mcp-*.tar.gz` archive here: those
+   archives contain the external bridge, not the Chrome extension.
 3. Verify the archive before unzipping it.
 
 On Linux:
 
 ```bash
-archive="$(ls actions-json-overlay-runtime-*.zip)"
-grep " $(basename "$archive")$" SHA256SUMS.txt | sha256sum -c -
+archive="$(find . -maxdepth 1 -type f -name 'actions-json-overlay-runtime-*.zip' -print -quit)"
+if [ -z "$archive" ]; then
+  echo "No actions-json-overlay-runtime-*.zip found. Download the Chrome extension ZIP, not an actions-json-mcp-*.tar.gz bridge archive." >&2
+  exit 1
+fi
+checksum_line="$(grep -F " $(basename "$archive")" SHA256SUMS.txt || true)"
+if [ -z "$checksum_line" ]; then
+  echo "No SHA256SUMS.txt entry found for $(basename "$archive")." >&2
+  exit 1
+fi
+printf '%s\n' "$checksum_line" | sha256sum -c -
 ```
 
 On macOS:
 
 ```bash
-archive="$(ls actions-json-overlay-runtime-*.zip)"
-grep " $(basename "$archive")$" SHA256SUMS.txt | shasum -a 256 -c -
+archive="$(find . -maxdepth 1 -type f -name 'actions-json-overlay-runtime-*.zip' -print -quit)"
+if [ -z "$archive" ]; then
+  echo "No actions-json-overlay-runtime-*.zip found. Download the Chrome extension ZIP, not an actions-json-mcp-*.tar.gz bridge archive." >&2
+  exit 1
+fi
+checksum_line="$(grep -F " $(basename "$archive")" SHA256SUMS.txt || true)"
+if [ -z "$checksum_line" ]; then
+  echo "No SHA256SUMS.txt entry found for $(basename "$archive")." >&2
+  exit 1
+fi
+printf '%s\n' "$checksum_line" | shasum -a 256 -c -
 ```
 
 On Windows PowerShell:
 
 ```powershell
 $archive = Get-ChildItem actions-json-overlay-runtime-*.zip | Select-Object -First 1
-$expected = ((Select-String -Path SHA256SUMS.txt -Pattern ([regex]::Escape($archive.Name))).Line -split '\s+')[0].ToLower()
+if (-not $archive) {
+  throw "No actions-json-overlay-runtime-*.zip found. Download the Chrome extension ZIP, not an actions-json-mcp-*.tar.gz bridge archive."
+}
+$checksumLine = Select-String -Path SHA256SUMS.txt -SimpleMatch " $($archive.Name)" | Select-Object -First 1
+if (-not $checksumLine) {
+  throw "No SHA256SUMS.txt entry found for $($archive.Name)."
+}
+$expected = ($checksumLine.Line -split '\s+')[0].ToLower()
 $actual = (Get-FileHash $archive.FullName -Algorithm SHA256).Hash.ToLower()
 if ($actual -ne $expected) { throw "SHA-256 mismatch for $($archive.Name)" }
 "SHA-256 verified: $($archive.Name)"

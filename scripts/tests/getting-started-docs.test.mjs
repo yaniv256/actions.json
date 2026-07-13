@@ -48,6 +48,17 @@ test("Getting Started addresses the ten onboarding contracts", async () => {
   assert.doesNotMatch(text, /\*\*TODO:\*\*/);
 });
 
+test("extension verification distinguishes release assets and fails clearly when the ZIP is absent", async () => {
+  const text = await readFile(skillPath, "utf8");
+
+  assert.match(text, /The Chrome extension is the .*\.zip.*bridge binaries are .*\.tar\.gz/is);
+  assert.match(text, /Do not\s+rename or substitute an .*\.tar\.gz.*archive here/is);
+
+  assert.match(text, /if \[ -z "\$archive" \]; then[\s\S]*No actions-json-overlay-runtime-\*\.zip found/);
+  assert.match(text, /if \(-not \$archive\)[\s\S]*No actions-json-overlay-runtime-\*\.zip found/);
+  assert.match(text, /if \(-not \$checksumLine\)[\s\S]*No SHA256SUMS\.txt entry found/);
+});
+
 test("every relative Markdown link in Getting Started resolves inside docs", async () => {
   const text = await readFile(pagesPath, "utf8");
   const links = [...text.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)].map((match) => match[1]);

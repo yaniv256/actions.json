@@ -50,3 +50,11 @@ jobs:
           destination: ./_site
       - name: Require the rendered onboarding route
         run: test -s _site/getting-started.html
+
+  verify-windows-release-instructions:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the published PowerShell commands against the latest real release
+        shell: pwsh
+        run: ./scripts/tests/getting-started-release-verification.ps1
