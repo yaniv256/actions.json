@@ -37,6 +37,7 @@ fi
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bridge_dir="$repo_root/mcp/actions-json-mcp"
+workspace_target_dir="$repo_root/mcp/target"
 
 # Windows binaries carry a .exe suffix.
 bin_name="actions-json-mcp"
@@ -49,9 +50,9 @@ build_args=(build --release --locked --manifest-path "$bridge_dir/Cargo.toml")
 if [[ -n "$target" ]]; then
   rustup target add "$target" >/dev/null 2>&1 || true
   build_args+=(--target "$target")
-  target_dir="$bridge_dir/target/$target/release"
+  target_dir="$workspace_target_dir/$target/release"
 else
-  target_dir="$bridge_dir/target/release"
+  target_dir="$workspace_target_dir/release"
 fi
 
 cargo "${build_args[@]}"

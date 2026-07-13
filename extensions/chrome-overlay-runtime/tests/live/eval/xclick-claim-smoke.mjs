@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXT = path.resolve(HERE, '../../..');                 // extensions/chrome-overlay-runtime
-const BRIDGE_BIN = path.resolve(HERE, '../../../../../mcp/actions-json-mcp/target/debug/actions-json-mcp');
+const BRIDGE_BIN = path.resolve(HERE, '../../../../../mcp/target/debug/actions-json-mcp');
 const ACTIONS = path.resolve(HERE, '../../../actions/overlay.actions.json');
 const STORAGE = path.resolve(HERE, '../../../../../actions.json.storage');
 const BRIDGE_PORT = process.env.XCLICK_BRIDGE_PORT || '17352';

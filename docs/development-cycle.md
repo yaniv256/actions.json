@@ -199,7 +199,7 @@ one human action makes everything live at once.**
    ```bash
    STAGE=~/.local/share/actions-json-mcp/<newver>-<slug>
    mkdir -p "$STAGE"
-   cp mcp/actions-json-mcp/target/debug/actions-json-mcp "$STAGE/actions-json-mcp"
+   cp mcp/target/debug/actions-json-mcp "$STAGE/actions-json-mcp"
    cp extensions/chrome-overlay-runtime/actions/overlay.actions.json "$STAGE/overlay.actions.json"
    chmod +x "$STAGE/actions-json-mcp"
    # then repoint BOTH command and --actions in ~/.claude.json mcpServers.actions-json to $STAGE
