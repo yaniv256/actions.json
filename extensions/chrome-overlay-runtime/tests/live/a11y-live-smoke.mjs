@@ -30,6 +30,8 @@ async function main() {
     //    queuing it (spoke:0). The liveOverride_ fix threads the observer's
     //    DOM-sourced metadata so the fork queues + speaks it.
     r.end('<!doctype html><h1>a11y smoke</h1>' +
+      '<button id="covered" style="position:absolute;left:20px;top:20px;width:220px;height:48px">Covered action</button>' +
+      '<div id="sticky-cover" style="position:fixed;left:0;top:0;width:320px;height:120px;background:white;z-index:10000">Sticky cover</div>' +
       '<div id="lr" role="status" aria-live="assertive" aria-atomic="true"></div>' +
       '<div id="docs-like"><section><div aria-live="polite"><span class="cvox">' +
       '</span></div></section></div>');
@@ -56,6 +58,26 @@ async function main() {
     }, url);
     if (tabId == null) throw new Error('fixture tab not found in SW');
     console.log('fixture tabId:', tabId, 'url committed');
+
+    const queryResult = await sw.evaluate(({id}) => self.__a11yTest.query(id, {
+      role: 'button',
+      name: 'Covered action',
+    }), {id: tabId});
+    const query = queryResult?.output;
+    const queryChecks = {
+      found: query?.found === true,
+      attested: query?.actionability_attested === true,
+      occluded: query?.receives_events === false && query?.clickable === false,
+      no_click_point: !Object.prototype.hasOwnProperty.call(query || {}, 'clickable_center'),
+      geometry_present: Number.isFinite(query?.visible_center?.x) && Number.isFinite(query?.visible_center?.y),
+      blocker_reported: query?.occluded_by?.id === 'sticky-cover',
+    };
+    for (const [name, passed] of Object.entries(queryChecks)) {
+      console.log(`${passed ? 'PASS' : 'FAIL'}  a11y.query ${name}`);
+    }
+    if (!Object.values(queryChecks).every(Boolean)) {
+      throw new Error(`a11y.query actionability checks failed: ${JSON.stringify(queryResult)}`);
+    }
 
     const watch = await sw.evaluate((id) => self.__a11yTest.watch(id), tabId);
     console.log('a11y.watch:', JSON.stringify(watch));

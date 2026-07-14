@@ -32,7 +32,7 @@ A claimed tab has two distinct identities that must not be collapsed:
 
 This creates two boundary hazards. A bridge-global inventory can contain duplicate `tab_id` values owned by different runtimes, so dispatching an explicit tab ID without its owner can reach the wrong browser. Separately, a navigation response can preserve the correct tab ID while returning the runtime ID of the document that was just replaced.
 
-The owner-identity investigation recorded both failures. Development PRs #176 and #195 established owner-qualified lifecycle addressing and replacement-runtime attestation so document-changing navigation cannot report success with stale identity.
+The owner-identity investigation recorded both failures. Development changes established owner-qualified lifecycle addressing, complete initial registration, and replacement-runtime attestation so document-changing navigation cannot report success with stale identity.
 
 ## Guidance
 
@@ -123,5 +123,5 @@ If the replacement runtime does not register before the response boundary, the t
 
 - [Global claimed-tab lifecycle owner identity investigation](../../../investigations/global-claimed-tab-owner-qualified-lifecycle-2026-07-12.md)
 - [Verify navigation workflows against destination-route state](../logic-errors/verify-navigation-workflows-against-destination-route-state.md)
-- Development PR #176: require owner-qualified claimed-tab lifecycle targets
-- Development PR #195: attest claimed-tab identity after navigation
+- Development change: require owner-qualified claimed-tab lifecycle targets
+- Development change: attest claimed-tab identity after navigation

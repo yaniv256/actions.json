@@ -86,10 +86,10 @@ Do NOT skip any line under momentum — each is a failure that actually happened
 1. [ ] **Run the Playwright live test** (`npm run test:a11y-live`, or the harness
    covering your change) and confirm it passes on the code you're about to ship —
    BEFORE asking a human to install. Give yourself eyes; don't make a human your oracle.
-2. [ ] **Package + publish the extension prerelease TO THE DEV REPO** — `scripts/package-extension.sh`
-   then create a prerelease in the private development repository, targeting `main`,
-   with the zip + `SHA256SUMS.txt`. **The release target MUST be the private
-   dev repo) — NEVER `yaniv256/actions.json` (public).** Prereleases are dev-repo-only; the public repo
+2. [ ] **Package + publish the extension prerelease TO THE DEVELOPMENT CHANNEL** — `scripts/package-extension.sh`
+   then create a prerelease targeting `main` with the zip + `SHA256SUMS.txt`. **The release target
+   MUST be the development channel — NEVER the public distribution channel.** Prereleases are
+   development-only; the public repo
    receives NOTHING except through the reviewed sync PR (see the repo-targeting rule below). Staging the
    bridge is NOT releasing the extension.
 3. [ ] **Verify the fix is in the packaged zip** (`unzip -p <zip> src/<file> | grep <marker>`)
@@ -111,9 +111,9 @@ leaked (a GitHub release is a tag + notes + an uploaded asset, NOT a code push �
 an already-public commit), but the public repo should never carry a version that hasn't been synced.
 The fix is this rule; internalize it.
 
-- **Every prerelease / dev test build → the private development repository.**
-  This is where the human installs test builds from. `gh` defaults to the cwd's remote, but ALWAYS
-  select the private development repository explicitly so a wrong cwd can't misfire.
+- **Every prerelease / dev test build → the development release channel.**
+  This is where the human installs test builds from. Select the development channel explicitly so a
+  wrong working directory cannot publish to the public distribution channel.
 - **The PUBLIC repo `yaniv256/actions.json` receives NOTHING by a bare `gh release create`.** Public
   releases are produced ONLY by the reviewed dev→public **sync PR** flow (analyze → PR text → Yaniv
   approves → sync + open PR → Yaniv merges) and, for the binaries, by `scripts/release-binaries.sh`
@@ -123,9 +123,8 @@ The fix is this rule; internalize it.
   tag+release the public repo shouldn't have. If it happens: `gh release delete <tag> --repo
   yaniv256/actions.json --cleanup-tag --yes` to remove both the release and its tag, then re-cut on
   the dev repo. Verify public is back to its last real version with `gh release list --repo yaniv256/actions.json`.
-- **Sanity check before EVERY prerelease:** the target is the private development repository.
-  If you typed `yaniv256/actions.json`, stop — that is the public surface and needs the sync PR, not a
-  bare release.
+- **Sanity check before EVERY prerelease:** the target is the development release channel.
+  If you selected the public distribution channel, stop — it needs the sync PR, not a bare release.
 
 ## Distribution surfaces — there are THREE, and they do NOT auto-track each other
 

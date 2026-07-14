@@ -313,6 +313,75 @@ export class ShimTree {
   }
 
   /**
+   * Attest that the accessibility node's geometric center is owned by the
+   * page element itself. AX bounds identify a node, but do not prove that a
+   * sticky header, overlay, or another hit-test surface receives a pointer.
+   */
+  async actionability(node) {
+    const visibleCenter = await this.clickableCenter(node);
+    const result = {
+      visible_center: visibleCenter,
+      visible_rect: null,
+      clickable: false,
+      receives_events: null,
+      actionability_attested: false,
+      occluded_by: null,
+    };
+    if (!node?.backendDOMNodeId) return result;
+
+    let objectId = null;
+    try {
+      const resolved = await this.cdp('DOM.resolveNode', {backendNodeId: node.backendDOMNodeId});
+      objectId = resolved?.object?.objectId || null;
+      if (!objectId) return result;
+      const evaluated = await this.cdp('Runtime.callFunctionOn', {
+        objectId,
+        returnByValue: true,
+        functionDeclaration: `function() {
+          const rect = this.getBoundingClientRect();
+          const visibleRect = {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+            width: rect.width,
+            height: rect.height,
+          };
+          const x = rect.left + rect.width / 2;
+          const y = rect.top + rect.height / 2;
+          const hit = (rect.width > 0 && rect.height > 0)
+            ? document.elementFromPoint(x, y)
+            : null;
+          const receives = Boolean(hit && (hit === this || this.contains(hit)));
+          const text = hit && typeof hit.textContent === 'string'
+            ? hit.textContent.trim().replace(/\\s+/g, ' ').slice(0, 160)
+            : '';
+          return {
+            visible_center: {x: Math.round(x), y: Math.round(y)},
+            visible_rect: visibleRect,
+            receives_events: receives,
+            clickable: receives,
+            occluded_by: !receives && hit ? {
+              tag_name: String(hit.tagName || '').toLowerCase() || null,
+              id: hit.id || null,
+              text,
+            } : null,
+          };
+        }`,
+      });
+      const value = evaluated?.result?.value;
+      if (!value || typeof value !== 'object') return result;
+      return {...result, ...value, actionability_attested: true};
+    } catch {
+      return result;
+    } finally {
+      if (objectId) {
+        try { await this.cdp('Runtime.releaseObject', {objectId}); } catch {}
+      }
+    }
+  }
+
+  /**
    * a11y.tree: compact role/name outline for agent consumption. Skips ignored
    * and empty structural nodes; depth-limits to keep envelopes bounded.
    */

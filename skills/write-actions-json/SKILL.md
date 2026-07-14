@@ -641,6 +641,13 @@ using those coordinates. If navigation fails, inspect `runtime.session.log` by
 boundary before changing prompts, adding primitives, or falling back to
 JavaScript navigation.
 
+`dom.observe.visible` separates geometry from actionability: use its
+`clickable_center` only when that field is present and the same match reports
+`clickable: true` and `receives_events: true`. A `visible_center` is descriptive
+geometry only; never pass it to `pointer.click`. When `clickable_center` is absent,
+re-resolve after removing the occluder or scroll the target into a hit-testable
+position. The runtime also reports `occluded_by` to make the obstruction explicit.
+
 A locator may call a coordinate clickable only after it proves both geometry
 and hit-test ownership. Require `visibility.receives_events: true`: at the
 returned `clickable_center`, `document.elementFromPoint` must be the resolved
@@ -650,6 +657,14 @@ header or floating control owns the point, the locator should return
 `state: "requires_scroll"`, `receives_events: false`, `occluded_by`, and a
 concrete `scroll_operation`; with auto-scroll enabled it should perform that
 operation and remeasure before returning a coordinate.
+
+The same rule applies to `a11y.query`. Accessibility identity is still the
+first-choice resolver, but its AX bounds are not pointer proof. Consume
+`clickable_center` only when `actionability_attested: true`, `clickable: true`,
+and `receives_events: true`. If the field is absent, use `visible_center` only
+as geometry for diagnosis or scrolling; inspect `occluded_by` and re-resolve
+after the obstruction is removed. Never pass an unattested `visible_center` to
+`pointer.click`.
 
 Even a hit-test-certified coordinate is not proof of semantic activation. Some controls only respond
 after the page has entered a hover, focus, expanded, or otherwise armed state.
@@ -2801,10 +2816,13 @@ exposes accessibility primitives that every map should lean on and every map's
 exist):
 
 - `a11y.query {role, name}` or `{role, name_contains}` → resolves a control by
-  its ARIA role and accessible name and returns its exact `clickable_center`
-  (and backend node id, state). Use it before `pointer.click` for any button,
-  menu item, link, or field you'd otherwise pixel-hunt — "Create", "Add a card",
-  "Save", a named menu entry, a toolbar toggle. Identity, not geometry.
+  its ARIA role and accessible name and returns hit-test diagnostics. Use
+  `clickable_center` only when `actionability_attested`, `clickable`, and
+  `receives_events` are all true. Otherwise treat `visible_center` as geometry
+  only, inspect `occluded_by`, and re-resolve after scrolling or dismissing the
+  overlay. Use it before `pointer.click` for any button, menu item, link, or
+  field you'd otherwise pixel-hunt — "Create", "Add a card", "Save", a named
+  menu entry, a toolbar toggle. Identity first; geometry is not actionability.
 - `a11y.tree` → a role/name/state outline of the page (and its live regions).
   Consult it when you're unsure what's on screen or what a control is called,
   instead of squinting at a screenshot.

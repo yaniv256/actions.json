@@ -2144,6 +2144,65 @@ mod tests {
         assert!(desc.contains("site catalog"));
     }
 
+    #[test]
+    fn schema_validation_aggregates_independent_missing_required_fields() {
+        let tool = json!({
+            "name": "browser.extract_elements",
+            "input_schema": {
+                "type": "object",
+                "required": ["item_selector", "fields"],
+                "properties": {
+                    "item_selector": { "type": "string" },
+                    "fields": { "type": "array" }
+                }
+            }
+        });
+        let error = validate_tool_arguments(&tool, "browser.extract_elements", &json!({}))
+            .expect_err("both missing fields must be reported");
+        let body = (error.1).0;
+        assert_eq!(body["error"]["code"], "invalid_input");
+        assert_eq!(body["error"]["evidence"]["missing_required"], json!([
+            "arguments.item_selector",
+            "arguments.fields"
+        ]));
+        assert_eq!(body["error"]["evidence"]["validation_errors"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn schema_validation_reports_siblings_but_stops_at_wrong_parent_type() {
+        let tool = json!({
+            "name": "example",
+            "input_schema": {
+                "type": "object",
+                "required": ["options"],
+                "properties": {
+                    "options": {
+                        "type": "object",
+                        "required": ["mode", "limit"],
+                        "properties": {
+                            "mode": { "type": "string" },
+                            "limit": { "type": "integer" }
+                        }
+                    },
+                    "query": { "type": "string" }
+                }
+            }
+        });
+        let error = validate_tool_arguments(
+            &tool,
+            "example",
+            &json!({"options": "wrong", "query": 4}),
+        )
+        .expect_err("invalid siblings must be reported");
+        let body = (error.1).0;
+        let errors = body["error"]["evidence"]["validation_errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0]["keyword"], "type");
+        assert_eq!(errors[0]["path"], "arguments.options");
+        assert_eq!(errors[1]["keyword"], "type");
+        assert_eq!(errors[1]["path"], "arguments.query");
+    }
+
     #[tokio::test]
     async fn select_runtime_falls_back_to_active_tab_when_ambiguous() {
         let state = two_runtime_state();
@@ -3183,6 +3242,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_resources_list_ignores_pipeline_proof_packages() {
+        let root = tempdir().unwrap();
+        let site_dir = root.path().join("scopes/private/sites/example.com/page");
+        let proof_dir = site_dir.join("proof/validated-2026-07-14");
+        std::fs::create_dir_all(&proof_dir).unwrap();
+        std::fs::write(
+            site_dir.join("actions.json"),
+            r#"{
+              "protocol": "actions.json",
+              "x_actions": {
+                "files": [{
+                  "id": "example-skill",
+                  "path": "SKILL.md",
+                  "kind": "skill",
+                  "description": "Example skill."
+                }]
+              },
+              "tools": []
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(site_dir.join("SKILL.md"), "# Example skill\n").unwrap();
+        std::fs::copy(site_dir.join("actions.json"), proof_dir.join("actions.json")).unwrap();
+
+        let manifest = json!({ "protocol": "actions.json", "tools": [] });
+        let (catalog_manifest, site_manifest, site_action_names) =
+            build_catalog_manifests(manifest.clone(), &[], Some(root.path()))
+                .await
+                .unwrap();
+        let state = state_from_catalog(
+            ActionCatalog {
+                base_manifest: manifest,
+                map_paths: Vec::new(),
+                manifest: catalog_manifest,
+                site_manifest,
+                site_action_names,
+            },
+            Vec::new(),
+            Some(root.path().to_path_buf()),
+        );
+        let response = mcp_resources_list(&state).await.unwrap();
+        let uris = response["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|resource| resource["uri"].as_str())
+            .collect::<Vec<_>>();
+
+        assert!(uris.contains(
+            &"actions-json://storage/file/scopes/private/sites/example.com/page/SKILL.md"
+        ));
+        assert!(!uris.iter().any(|uri| uri.contains("/proof/")));
+    }
+
+    #[tokio::test]
     async fn storage_site_actions_inherit_host_target_from_path() {
         let root = tempdir().unwrap();
         let trello_dir = root.path().join("scopes/private/sites/trello.com/board");
@@ -3234,6 +3348,31 @@ mod tests {
 
         assert!(names.contains(&"trello.site.map"));
         assert!(!names.contains(&"graphifymd.site.map"));
+    }
+
+    #[tokio::test]
+    async fn storage_map_discovery_ignores_pipeline_proof_packages() {
+        let root = tempdir().unwrap();
+        let site_dir = root.path().join("scopes/private/sites/example.com/page");
+        let proof_dir = site_dir.join("proof/validated-2026-07-14");
+        std::fs::create_dir_all(&proof_dir).unwrap();
+        std::fs::write(
+            site_dir.join("actions.json"),
+            r#"{
+              "protocol": "actions.json",
+              "tools": [{
+                "name": "example.site.map",
+                "input_schema": { "type": "object" },
+                "x_actions": { "static_output": { "ok": true } }
+              }]
+            }"#,
+        )
+        .unwrap();
+        std::fs::copy(site_dir.join("actions.json"), proof_dir.join("actions.json")).unwrap();
+
+        let maps = discover_storage_action_maps(root.path()).await.unwrap();
+
+        assert_eq!(maps, vec![site_dir.join("actions.json")]);
     }
 
     #[tokio::test]
@@ -4425,6 +4564,7 @@ async fn discover_storage_action_maps(storage_root: &Path) -> Result<Vec<PathBuf
             if file_type.is_file()
                 && path.file_name() == Some(OsStr::new("actions.json"))
                 && path_has_sites_component(&path)
+                && !path_has_proof_component(&path)
             {
                 maps.push(path);
             }
@@ -4440,6 +4580,15 @@ fn path_has_sites_component(path: &Path) -> bool {
         matches!(
             component,
             Component::Normal(name) if name == OsStr::new("sites")
+        )
+    })
+}
+
+fn path_has_proof_component(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            Component::Normal(name) if name == OsStr::new("proof")
         )
     })
 }
@@ -7336,12 +7485,28 @@ fn validate_tool_arguments(
     arguments: &Value,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     let schema = tool.get("input_schema").unwrap_or(&Value::Null);
-    validate_value_against_schema(arguments, schema, "").map_err(|message| {
-        (
-            StatusCode::BAD_REQUEST,
-            structured_error("invalid_input", message, json!({ "tool": tool_name })),
-        )
-    })
+    let errors = validate_value_against_schema(arguments, schema, "");
+    if errors.is_empty() {
+        return Ok(());
+    }
+    let messages = errors.iter().map(|error| error.message.as_str()).collect::<Vec<_>>();
+    let missing_required = errors
+        .iter()
+        .filter(|error| error.keyword == "required")
+        .map(|error| error.path.clone())
+        .collect::<Vec<_>>();
+    Err((
+        StatusCode::BAD_REQUEST,
+        structured_error(
+            "invalid_input",
+            messages.join("; "),
+            json!({
+                "tool": tool_name,
+                "validation_errors": errors,
+                "missing_required": missing_required,
+            }),
+        ),
+    ))
 }
 
 // Routing fields are meta-arguments: an MCP client can only carry them inside
@@ -7463,29 +7628,43 @@ fn validate_policy_exception_report(
     Ok(())
 }
 
-fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
+#[derive(Debug, Serialize)]
+struct ValidationError {
+    path: String,
+    keyword: String,
+    message: String,
+}
+
+fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> Vec<ValidationError> {
     let Some(schema_object) = schema.as_object() else {
-        return Ok(());
+        return Vec::new();
     };
+    let mut errors = Vec::new();
     if let Some(schema_type) = schema_object.get("type").and_then(Value::as_str) {
-        validate_json_type(value, schema_type, path)?;
+        if let Err(message) = validate_json_type(value, schema_type, path) {
+            errors.push(ValidationError {
+                path: if path.is_empty() { "arguments".to_string() } else { path.to_string() },
+                keyword: "type".to_string(),
+                message,
+            });
+            return errors;
+        }
     }
 
     if schema_object.get("type").and_then(Value::as_str) == Some("object") {
         let Some(object) = value.as_object() else {
-            return Err(format!(
-                "{} must be an object",
-                if path.is_empty() { "arguments" } else { path }
-            ));
+            return errors;
         };
 
         if let Some(required) = schema_object.get("required").and_then(Value::as_array) {
             for required_key in required.iter().filter_map(Value::as_str) {
                 if !object.contains_key(required_key) {
-                    return Err(format!(
-                        "{} is required",
-                        schema_path_join(path, required_key)
-                    ));
+                    let required_path = schema_path_join(path, required_key);
+                    errors.push(ValidationError {
+                        path: required_path.clone(),
+                        keyword: "required".to_string(),
+                        message: format!("{required_path} is required"),
+                    });
                 }
             }
         }
@@ -7501,10 +7680,12 @@ fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> R
                     .map(|properties| !properties.contains_key(key))
                     .unwrap_or(true)
                 {
-                    return Err(format!(
-                        "{} is not declared in input_schema",
-                        schema_path_join(path, key)
-                    ));
+                    let property_path = schema_path_join(path, key);
+                    errors.push(ValidationError {
+                        path: property_path.clone(),
+                        keyword: "additionalProperties".to_string(),
+                        message: format!("{property_path} is not declared in input_schema"),
+                    });
                 }
             }
         }
@@ -7512,11 +7693,11 @@ fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> R
         if let Some(properties) = properties {
             for (key, property_schema) in properties {
                 if let Some(child) = object.get(key) {
-                    validate_value_against_schema(
+                    errors.extend(validate_value_against_schema(
                         child,
                         property_schema,
                         &schema_path_join(path, key),
-                    )?;
+                    ));
                 }
             }
         }
@@ -7525,7 +7706,7 @@ fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> R
     if schema_object.get("type").and_then(Value::as_str) == Some("array") {
         if let (Some(items), Some(values)) = (schema_object.get("items"), value.as_array()) {
             for (index, item) in values.iter().enumerate() {
-                validate_value_against_schema(
+                errors.extend(validate_value_against_schema(
                     item,
                     items,
                     &format!(
@@ -7533,12 +7714,12 @@ fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> R
                         if path.is_empty() { "arguments" } else { path },
                         index
                     ),
-                )?;
+                ));
             }
         }
     }
 
-    Ok(())
+    errors
 }
 
 fn validate_json_type(value: &Value, schema_type: &str, path: &str) -> Result<(), String> {

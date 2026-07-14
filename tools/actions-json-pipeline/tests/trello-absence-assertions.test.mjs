@@ -138,11 +138,11 @@ test("no workflow step waits for the unimplemented state:'hidden'", async (t) =>
 // A card whose visible rows are all checked would have read as complete. That is the
 // instrument the whole task OS uses to decide whether anything is done.
 //
-// Completion is now taken from Trello's own computed percentage badge, and no field
-// claims to be a total. The row counts are named `visible_*` so their name carries
-// the constraint.
+// `checklist.read` derives completion and counts from the same card-wide mounted
+// checkbox rows. Candidate-based reads remain viewport-limited diagnostics and
+// cannot claim card-wide totals.
 
-test("trello.card.checklist.read never reports a DOM-derived total", async (t) => {
+test("trello.card.checklist.read derives card-wide completion from one row authority", async (t) => {
   let source;
   try {
     source = await readFile(mapPath, "utf8");
@@ -160,16 +160,9 @@ test("trello.card.checklist.read never reports a DOM-derived total", async (t) =
     "the checklist is virtualized; no field may claim to be the total",
   );
   assert.match(output, /'complete'/, "completion must be reported");
-  assert.match(
-    output,
-    /percent_complete/,
-    "completion must come from Trello's own percentage badge, not from counting DOM rows",
-  );
-  assert.match(
-    output,
-    /visible_item_count/,
-    "row counts must be named so the name itself says they are viewport-limited",
-  );
+  assert.match(output, /percent_complete/, "completion percentage must be reported");
+  assert.match(output, /item_count/, "the mounted card-wide row count must be reported");
+  assert.match(output, /\$checked := \$count\(\$rows/, "checked_count must use the same card-wide rows as items");
 
   // Any count emitted from candidate_count is a visible-only count and must not be
   // presented as authoritative. element_info builds candidate_count by filtering with
@@ -181,4 +174,39 @@ test("trello.card.checklist.read never reports a DOM-derived total", async (t) =
     [],
     `these fields are viewport-dependent counts presented as facts: ${countsFromCandidateCount.join(", ")}`,
   );
+});
+
+test("trello.card.checklist.read stays bounded for 59 long unchecked items", async (t) => {
+  const tool = await loadTool(t, "trello.card.checklist.read");
+  if (!tool) return;
+
+  const matches = Array.from({ length: 59 }, (_, index) => ({
+    attributes: {
+      "aria-label": `Review backlog artifact ${String(index + 1).padStart(2, "0")} — ${"source-backed investigation title ".repeat(4)}`,
+      "aria-checked": "false",
+    },
+  }));
+
+  const result = await executeWorkflowAction({
+    actionName: tool.name,
+    workflow: tool.workflow,
+    input: {},
+    executePrimitive: async ({ name, arguments: args }) => {
+      if (name === "dom.observe.attributes" && args.selector.includes("input[type='checkbox']")) {
+        return ok({ matches, match_count: matches.length });
+      }
+      if (name === "dom.observe.attributes") {
+        return ok({ matches: [{ attributes: { text: "0%" } }], match_count: 1 });
+      }
+      if (name === "locator.text_content") return ok({ text: "Description" });
+      return ok({});
+    },
+  });
+
+  assert.equal(result.ok, true, result.error?.message);
+  const value = result.output.value;
+  assert.equal(value.item_count, 59);
+  assert.equal(value.items.length, 59);
+  assert.equal("unchecked_items" in value, false, "unchecked titles must not be emitted twice");
+  assert(Buffer.byteLength(JSON.stringify(value), "utf8") < 16_000, "semantic output needs headroom below the evaluator cap");
 });

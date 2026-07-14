@@ -155,6 +155,26 @@ test("local actions catalog lists current-site actions from a shared storage bun
   assert.equal(actions[1].target_url_contains, "acme.example");
 });
 
+test("local actions catalog ignores pipeline proof-package map copies", () => {
+  const bundleWithProof = structuredClone(bundle);
+  bundleWithProof.entries.push({
+    path: "scopes/shared/acme/sites/acme.example/home/proof/validated-2026-07-14/actions.json",
+    content: bundle.entries[0].content,
+  });
+
+  const actions = listSiteActionsFromBundle(bundleWithProof, "https://acme.example/");
+
+  assert.deepEqual(
+    actions.map((action) => action.name),
+    [
+      "acme.site.map",
+      "acme.sections.list",
+      "acme.card.by_title.candidates",
+      "acme.card.by_title.open",
+    ],
+  );
+});
+
 test("local actions catalog resolves workflow-backed stored actions", () => {
   const result = resolveSiteActionFromBundle(bundle, "https://acme.example/", {
     action: "acme.card.by_title.open",

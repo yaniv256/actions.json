@@ -1387,7 +1387,11 @@
       isHidden: () => host.dataset.hidden === "true",
       geometry: () => {
         const rect = host.getBoundingClientRect();
-        return {
+        const visibleCenter = {
+          x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
+          y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2
+        };
+        const result = {
           left: Math.round(rect.left),
           top: Math.round(rect.top),
           width: Math.round(rect.width),
@@ -2546,7 +2550,11 @@
         const rect = element.getBoundingClientRect();
         const geometry = visibilityGeometryFor(element);
         const visibleRect = geometry.visible_rect || rect;
-        return {
+        const visibleCenter = {
+          x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
+          y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2
+        };
+        const result = {
           tag_name: element.tagName.toLowerCase(),
           text: normalizeText(element.textContent || element.getAttribute("aria-label")),
           bounding_box: {
@@ -2559,12 +2567,16 @@
             right: rect.right,
             bottom: rect.bottom
           },
-          clickable_center: {
-            x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
-            y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2
-          },
-          clickable: geometry.clickable
+          visible_center: visibleCenter,
+          clickable: geometry.clickable,
+          receives_events: geometry.receives_events,
+          occluded_by: geometry.occluded_by || null,
+          visible_rect: geometry.visible_rect || visibleRect
         };
+        if (geometry.clickable && geometry.receives_events !== false) {
+          result.clickable_center = visibleCenter;
+        }
+        return result;
       });
     const payload = { matches, match_count: matches.length };
     const approximateBytes = new Blob([JSON.stringify(payload)]).size;
@@ -3439,10 +3451,25 @@
       };
     }
     const visibleRect = visibleRectFor(element) || element.getBoundingClientRect();
-    const point = {
-      x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
-      y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2,
-    };
+    const actionability = visibilityGeometryFor(element);
+    if (!actionability.clickable || !actionability.receives_events || !actionability.action_point) {
+      return {
+        error: primitiveError(primitive, "target_not_actionable", `The ${role} locator resolved, but its visible point does not receive pointer events.`, {
+          [role]: locator,
+          actionability: {
+            state: actionability.state,
+            visible: actionability.visible,
+            fully_visible: actionability.fully_visible,
+            clickable: actionability.clickable,
+            receives_events: actionability.receives_events,
+            visible_rect: actionability.visible_rect,
+            occluded_by: actionability.occluded_by,
+            scroll_operation: actionability.scroll_operation,
+          },
+        }),
+      };
+    }
+    const point = actionability.action_point;
     const viewportError = validateViewportPoint(primitive, point.x, point.y, point);
     if (viewportError) return { error: viewportError };
     return {
@@ -3455,6 +3482,12 @@
         text: normalizeText(element.textContent),
         bounding_box: rectDiagnostic(element),
         point,
+        actionability: {
+          clickable: actionability.clickable,
+          receives_events: actionability.receives_events,
+          fully_visible: actionability.fully_visible,
+          occluded_by: actionability.occluded_by,
+        },
       },
     };
   };
@@ -3836,9 +3869,9 @@
 
   // text.type — type a string into the focused element as keystrokes. Synthetic by
   // default (portable). With { trusted:true } it relays to the background CDP
-  // Input.insertText, which REPLACES the active selection and reaches canvas editors
-  // (Docs/Slides/Sheets) — the overtype path for a keyboard-made selection, where
-  // clipboard.paste does not route to the live selection.
+  // per-character Input.dispatchKeyEvent path, which REPLACES the active selection
+  // and reaches canvas editors (Docs/Slides/Sheets) — the overtype path for a
+  // keyboard-made selection, where clipboard.paste does not route to the live selection.
   const textType = async (args = {}, reportProgress) => {
     const text = String(args.text ?? "");
     if (args.trusted === true) {

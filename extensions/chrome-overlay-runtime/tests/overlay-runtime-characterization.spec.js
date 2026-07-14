@@ -4547,6 +4547,49 @@ test("extension pointer.drag resolves source and destination locators", async ({
   await expect(page.evaluate(() => document.body.dataset.dragLocatorEnded)).resolves.toBe("yes");
 });
 
+test("extension pointer.drag rejects an occluded locator instead of dispatching a blind drag", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "pointer.drag", input_schema: { type: "object" } },
+    ],
+  });
+
+  await page.setContent(`
+    <div data-testid="source-card"
+      style="position:absolute;left:120px;top:140px;width:160px;height:56px;background:#dbeafe"
+      onpointerdown="document.body.dataset.dragOcclusionStarted = 'yes'">Move me</div>
+    <div data-testid="target-list"
+      style="position:absolute;left:420px;top:220px;width:180px;height:96px;background:#dcfce7">Done</div>
+    <div data-testid="occluder"
+      style="position:absolute;left:120px;top:140px;width:160px;height:56px;background:#111827;z-index:10">Overlay</div>
+  `);
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "extension-pointer-drag-occluded", "pointer.drag", {
+    from: { selector: "[data-testid='source-card']" },
+    to: { selector: "[data-testid='target-list']" },
+    duration_ms: 0,
+  });
+
+  await expect.poll(() => actionOutput(page, "extension-pointer-drag-occluded")).toMatchObject({
+    output: {
+      ok: false,
+      primitive: "pointer.drag",
+      adapter: "extension",
+      error: {
+        code: "target_not_actionable",
+        evidence: {
+          actionability: {
+            receives_events: false,
+            clickable: false,
+          },
+        },
+      },
+    },
+  });
+  await expect(page.evaluate(() => document.body.dataset.dragOcclusionStarted || "")).resolves.toBe("");
+});
+
 test("extension transfer buffer writes, reads, and inserts rendered data through the action path", async ({ page }) => {
   await installRuntime(page, {
     tools: [
@@ -4900,6 +4943,26 @@ test("extension implements page, DOM, locator text, wait, and keyboard primitive
     },
   });
   await expect(page.evaluate(() => document.body.dataset.modifierChord)).resolves.toBe("yes");
+});
+
+test("dom.observe.visible omits clickable_center for an occluded match", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [{ name: "dom.observe.visible", input_schema: { type: "object" } }],
+  });
+  await page.setContent(`
+    <button id="covered" style="position:absolute;left:20px;top:20px;width:220px;height:48px">Covered action</button>
+    <div id="sticky-cover" style="position:fixed;left:0;top:0;width:320px;height:120px;background:#fff;z-index:10000">Sticky cover</div>
+  `);
+  await connectRuntime(page);
+  await callRuntimeAction(page, "occluded-dom-observe", "dom.observe.visible", { selector: "#covered" });
+  const output = (await actionOutput(page, "occluded-dom-observe")).output.value;
+  expect(output.match_count).toBe(1);
+  const match = output.matches[0];
+  expect(match.clickable).toBe(false);
+  expect(match.receives_events).toBe(false);
+  expect(match.clickable_center).toBeUndefined();
+  expect(match.visible_center).toEqual(expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }));
+  expect(match.occluded_by).toEqual(expect.objectContaining({ tag_name: "div" }));
 });
 
 test("dom.observe.visible refuses oversized broad payloads with narrowing hints", async ({ page }) => {

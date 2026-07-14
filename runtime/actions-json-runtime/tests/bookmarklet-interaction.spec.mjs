@@ -1479,6 +1479,29 @@ test("bookmarklet implements page, DOM, locator text, wait, and keyboard primiti
   expect(await page.evaluate(() => document.body.dataset.key)).toBe("Enter");
 });
 
+test("bookmarklet dom.observe.visible omits clickable_center for an occluded match", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await installFakeBookmarkletSocket(page);
+  await page.route("https://example.test/occluded", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><button id="covered" style="position:absolute;left:20px;top:20px;width:220px;height:48px">Covered action</button><div style="position:fixed;left:0;top:0;width:320px;height:120px;background:#fff;z-index:10000">Sticky cover</div>`,
+    });
+  });
+  await page.goto("https://example.test/occluded");
+  await page.addScriptTag({ content: bookmarkletSource });
+  await page.evaluate(() => window.__actionsJsonFakeSockets[0].emit("open"));
+  await callBookmarkletAction(page, "occluded-dom-observe", "dom.observe.visible", { selector: "#covered" });
+  const output = (await readActionOutput(page, "occluded-dom-observe")).value;
+  expect(output.match_count).toBe(1);
+  const match = output.matches[0];
+  expect(match.clickable).toBe(false);
+  expect(match.receives_events).toBe(false);
+  expect(match.clickable_center).toBeUndefined();
+  expect(match.visible_center).toEqual(expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }));
+  expect(match.occluded_by).toEqual(expect.objectContaining({ tag_name: "div" }));
+});
+
 async function installFakeBookmarkletSocket(page) {
   await page.addInitScript(() => {
     window.__actionsJsonFakeSockets = [];

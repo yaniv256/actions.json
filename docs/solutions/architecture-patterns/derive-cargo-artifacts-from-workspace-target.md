@@ -100,7 +100,7 @@ Run `sha256sum -c` from the directory containing both `SHA256SUMS.txt` and the a
 
 ## Cross-repository closure
 
-The development source and public source are separate remediation boundaries. Development PR #174 fixed and tested the development repository. Public PR [#37](https://github.com/yaniv256/actions.json/pull/37) applied the same active-consumer fixes and regression gate to the user-facing repository.
+The development source and public source are separate remediation boundaries. Development changes fixed and tested the source, and the corresponding public change applied the same active-consumer fixes and regression gate to the user-facing repository.
 
 Do not close a cross-repository investigation when only the private source is corrected. Verify the public default branch independently.
 

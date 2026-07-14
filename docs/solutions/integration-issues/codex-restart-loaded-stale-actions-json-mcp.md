@@ -41,7 +41,7 @@ This was a recurrence. The same split had been diagnosed three days earlier, but
 
 The immediate recovery repointed both `command` and `--actions` in the Codex launcher entry to the intended staged directory. A second restart then loaded the expected manifest.
 
-The durable remediation in development PR #184 adds a mandatory pre-restart check:
+The durable remediation adds a mandatory pre-restart check:
 
 ```bash
 node scripts/verify-actions-json-launcher-config.mjs \

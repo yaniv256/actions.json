@@ -2571,6 +2571,9 @@ const captureVisibleTab = (message, sender, sendResponse) => {
     format: message.format,
     quality: message.quality,
     delayMs: message.delayMs,
+    maxWidth: message.max_width,
+    maxHeight: message.max_height,
+    maxKilobytes: message.max_kilobytes,
   }).then((result) => {
     if (!result.ok) {
       sendResponse({ ok: false, error: result.error?.message, code: result.error?.code });
@@ -2602,6 +2605,9 @@ const executeScreenshotDirect = async (tab, call = {}) => {
     format,
     quality: args.quality,
     delayMs: args.delay_ms,
+    maxWidth: args.max_width,
+    maxHeight: args.max_height,
+    maxKilobytes: args.max_kilobytes,
   });
   if (!result.ok) {
     return {
@@ -2631,9 +2637,8 @@ const executeScreenshotDirect = async (tab, call = {}) => {
         surface_identity: result.surface_identity,
         freshness: result.freshness,
         delay_ms_applied: result.delay_ms_applied,
-        ignored_arguments: ["max_kb", "max_kilobytes", "max_width", "max_height"]
-          .filter((name) => args[name] !== undefined),
-        note: "Active-tab identity was verified before background capture. Pixel freshness is unverified; use an independent site projection for semantic state. Background capture does not apply resize arguments.",
+        screenshot_compaction: result.screenshot_compaction || { compacted: false },
+        note: "Active-tab identity was verified before background capture. Pixel freshness is unverified; use an independent site projection for semantic state. Hosted size bounds are applied before bridge delivery.",
       },
     },
     error: null,
@@ -3313,16 +3318,25 @@ const executeBackgroundHostedToolCall = async (call = {}, routedTabId = null) =>
       if (!node) {
         return { found: false, role: args.role || null, name: args.name ?? args.name_contains ?? null };
       }
-      const center = await tree.clickableCenter(node);
-      return {
+      const attestation = await tree.actionability(node);
+      const output = {
         found: true,
         role: node.role,
         name: node.name,
         value: node.value ?? null,
         state: node.state,
         backend_dom_node_id: node.backendDOMNodeId ?? null,
-        clickable_center: center,
+        visible_center: attestation.visible_center,
+        visible_rect: attestation.visible_rect,
+        clickable: attestation.clickable,
+        receives_events: attestation.receives_events,
+        actionability_attested: attestation.actionability_attested,
+        occluded_by: attestation.occluded_by,
       };
+      if (attestation.clickable && attestation.receives_events === true) {
+        output.clickable_center = attestation.visible_center;
+      }
+      return output;
     });
     return { ok: true, call_id: call.call_id, output, error: null };
   }
@@ -4581,6 +4595,11 @@ self.__a11yRoutingProbe = async () => {
 self.__a11yTest = {
   watch: (tabId) => runA11yWatch(tabId, { enableScreenReader: false }),
   read: (tabId) => ({ announcements: readA11yAnnouncements(tabId) }),
+  query: (tabId, args = {}) => executeBackgroundHostedToolCall({
+    name: "a11y.query",
+    call_id: "a11y-test-query",
+    arguments: args,
+  }, tabId),
   eventLog: (tabId) => (a11yEventLogs.get(tabId) || []),
   // Feed a synthetic observer batch straight to the announcer, isolating the
   // announcer pipeline (getTree → resolveNode_ → fork → sink → store) from tab

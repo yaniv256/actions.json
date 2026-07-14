@@ -25,7 +25,7 @@ import { normalizeGatedRepeatArgs, runGatedRepeat } from "../extensions/chrome-o
 import { TransferBuffer, TransferBufferError } from "../extensions/chrome-overlay-runtime/src/agent/transfer-buffer.mjs";
 import { executeWorkflowAction } from "../extensions/chrome-overlay-runtime/src/agent/workflow-actions.mjs";
 import { normalizeSiteActionCallArgs } from "../extensions/chrome-overlay-runtime/src/agent/site-action-args.mjs";
-import { captureTabSurface, createChromeScreenshotBrowser } from "../extensions/chrome-overlay-runtime/src/agent/background-screenshot-capture.mjs";
+import { captureTabSurface, compactScreenshotDataUrl, createChromeScreenshotBrowser } from "../extensions/chrome-overlay-runtime/src/agent/background-screenshot-capture.mjs";
 import { createCloudStore } from "../extensions/chrome-overlay-runtime/src/agent/cloud-store.mjs";
 import { reconcileDay } from "../extensions/chrome-overlay-runtime/src/agent/usage-reconciler.mjs";
 import { agentEventFromSessionEvent } from "../extensions/chrome-overlay-runtime/src/agent/agent-event-map.mjs";
@@ -145,6 +145,41 @@ test("background screenshot capture activates the exact tab before captureVisibl
     freshness: "unverified",
     delay_ms_applied: 0,
   });
+});
+
+test("background screenshot compacts hosted captures to requested bounds", async () => {
+  const canvases = [];
+  const sourceBlob = {
+    size: 100_000,
+    async arrayBuffer() { return new Uint8Array([1, 2, 3]).buffer; },
+  };
+  const result = await compactScreenshotDataUrl(
+    "data:image/png;base64,source",
+    { format: "jpeg", maxWidth: 960, maxHeight: 960, maxKilobytes: 20, quality: 60 },
+    {
+      async fetchImpl() { return { async blob() { return sourceBlob; } }; },
+      async bitmapFactory() { return { width: 1920, height: 1200 }; },
+      canvasFactory(width, height) {
+        const canvas = {
+          width,
+          height,
+          getContext() { return { drawImage() {} }; },
+          async convertToBlob() {
+            const size = width <= 960 && height <= 960 ? 10_000 : 100_000;
+            return { size, async arrayBuffer() { return new Uint8Array([4, 5]).buffer; } };
+          },
+        };
+        canvases.push(canvas);
+        return canvas;
+      },
+    },
+  );
+  assert.equal(result.compacted, true);
+  assert.equal(result.output_width, 960);
+  assert.equal(result.output_height, 600);
+  assert.equal(result.output_bytes, 10_000);
+  assert.match(result.dataUrl, /^data:image\/jpeg;base64,/);
+  assert.equal(canvases.length, 1);
 });
 
 

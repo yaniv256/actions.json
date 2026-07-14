@@ -842,7 +842,7 @@
         "reason": null,
         "capability_class": "portable",
         "portable": true,
-        "summary": "Observe visible DOM candidates that match a selector or text query.",
+        "summary": "Observe visible DOM candidates that match a selector or text query. `clickable_center` is returned only when hit-testing confirms the point receives events; otherwise use `visible_center` only as geometry and do not click it.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -1819,7 +1819,7 @@
         "reason": null,
         "capability_class": "portable",
         "portable": true,
-        "summary": "Type a string at the focused element (trusted:true overtypes a selection in canvas editors).",
+        "summary": "Type a string at the focused element (trusted:true sends awaited per-character key events and overtypes a selection in canvas editors).",
         "input_schema": {
           "type": "object",
           "required": [
@@ -1832,7 +1832,7 @@
             },
             "trusted": {
               "type": "boolean",
-              "description": "When true, types via CDP Input.insertText (trusted) \u2014 REPLACES the active selection and reaches canvas editors (Docs/Slides/Sheets). Default false = synthetic insert at the focused editable."
+              "description": "When true, types via awaited per-character CDP Input.dispatchKeyEvent calls (trusted) \u2014 REPLACES the active selection and reaches canvas editors (Docs/Slides/Sheets). Default false = synthetic insert at the focused editable."
             },
             "mode": {
               "type": "string",
@@ -1878,7 +1878,7 @@
         "reason": null,
         "capability_class": "privileged",
         "portable": false,
-        "summary": "Identity-based element lookup (role + accessible name) with clickable center.",
+        "summary": "Identity-based element lookup with hit-test-attested actionability.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -4264,7 +4264,7 @@
     },
     {
       "name": "text.type",
-      "description": "Type a string at the focused element as keystrokes. Synthetic by default; with trusted:true it uses CDP Input.insertText, which overtypes the active selection and works in canvas editors \u2014 the overtype step after a keyboard selection (clipboard.paste does not route to a keyboard-made selection).",
+      "description": "Type a string at the focused element as keystrokes. Synthetic by default; with trusted:true it sends awaited per-character CDP Input.dispatchKeyEvent calls, which overtype the active selection and work in canvas editors \u2014 the overtype step after a keyboard selection (clipboard.paste does not route to a keyboard-made selection).",
       "input_schema": {
         "type": "object",
         "required": [
@@ -4277,7 +4277,7 @@
           },
           "trusted": {
             "type": "boolean",
-            "description": "When true, types via CDP Input.insertText (trusted) \u2014 REPLACES the active selection and reaches canvas editors (Docs/Slides/Sheets). Default false = synthetic insert at the focused editable."
+            "description": "When true, types via awaited per-character CDP Input.dispatchKeyEvent calls (trusted) \u2014 REPLACES the active selection and reaches canvas editors (Docs/Slides/Sheets). Default false = synthetic insert at the focused editable."
           },
           "mode": {
             "type": "string",
@@ -4316,7 +4316,7 @@
     },
     {
       "name": "a11y.query",
-      "description": "Resolve an element by accessibility identity (role and/or accessible name) to its node and clickable center \u2014 the identity-based locator that replaces CSS/geometry targeting.",
+      "description": "Resolve an element by accessibility identity (role and/or accessible name). Returns visible geometry and hit-test actionability; clickable_center is emitted only when receives_events is true, otherwise inspect visible_center and occluded_by.",
       "input_schema": {
         "type": "object",
         "properties": {

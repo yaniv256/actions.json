@@ -36,6 +36,10 @@ Primitives divide by the context they run in, and the division is load-bearing. 
 
 **State projection** — a named read, optionally constrained to a route scope, that turns a website's current rendered state into a logical object an agent or workflow can verify. When a projection declares route scope, applicability is evaluated on the page where the read runs, so a route-changing action must choose one available on its destination route.
 
+**Proof package** — an immutable evidence bundle produced by validating an operational site map, distinct from the live map even when it contains a byte-identical `actions.json`. A proof package records what was tested; its files must never be discovered as executable actions, projections, or relative companion declarations.
+
+**Single-authority projection** — a State projection contract in which each logical row is emitted once and derived views (unchecked items, failures, subsets) are computed by consumers from that row collection. Duplicating an unbounded source collection into convenience arrays spends the workflow expression budget on redundant facts and can make otherwise valid large objects unreadable.
+
 **Workflow postcondition** — a logical assertion evaluated after a workflow succeeds, using a State projection and the workflow's original input to decide whether the intended effect actually occurred. Dispatch success alone cannot satisfy it; if the projection is unavailable or the assertion fails, the action reports failure even when earlier interaction steps already changed the page.
 
 **Visible (as a predicate)** — in this codebase *visible* means an element currently intersects the viewport, never that it exists. An element scrolled out of view is present in the DOM and addressable, yet reports as not visible; so any read that filters on visibility answers "what is rendered", not "what is there".

@@ -39,7 +39,7 @@ Use two complementary gates.
 
 ### 1. Bind every exceptional route name back to production source
 
-Development PR #175 retained the small dynamic-route set but made every entry prove that its matching `message.name` branch exists in the real `content.js` dispatcher. Adding a name to the test set alone can no longer satisfy the contract.
+The route-contract change retained the small dynamic-route set but made every entry prove that its matching `message.name` branch exists in the real `content.js` dispatcher. Adding a name to the test set alone can no longer satisfy the contract.
 
 The static catalog test now checks the complete relationship:
 
@@ -55,7 +55,7 @@ This is the fast anti-drift gate. It detects missing declarations and missing ro
 
 ### 2. Drive the real content action path in an isolated browser
 
-Static source evidence does not prove that Chrome can execute the route. Development PR #188 added `hosted-catalog-routes-smoke.mjs`, which loads the unpacked extension and drives:
+Static source evidence does not prove that Chrome can execute the route. The live smoke harness loads the unpacked extension and drives:
 
 ```text
 extension-owned page

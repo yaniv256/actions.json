@@ -89,11 +89,16 @@ function isSkillFile(file) {
   return file.kind === "skill" || /(^|\/)SKILL\.md$/i.test(file.path);
 }
 
+function isOperationalSiteMap(parsed) {
+  const parts = String(parsed?.sitePath || "").split("/").filter(Boolean);
+  return parts.at(-1) === "actions.json" && !parts.includes("proof");
+}
+
 export function loadSiteActionMapsFromBundle(bundle, pageUrl) {
   const maps = [];
   for (const entry of storageBundleEntries(bundle)) {
     const parsed = parseStoragePath(entry.path);
-    if (!parsed || !parsed.sitePath.endsWith("actions.json") || !siteHostMatchesPage(parsed.siteHost, pageUrl)) {
+    if (!parsed || !isOperationalSiteMap(parsed) || !siteHostMatchesPage(parsed.siteHost, pageUrl)) {
       continue;
     }
     try {
