@@ -39,7 +39,7 @@ Treat release artifacts as typed products, not as interchangeable archives.
 1. Name the artifact and its role together. Do not rely on file extensions or repository
    context to communicate which product a user needs.
 2. Validate discovery before validation. A checksum command may run only after the script has
-   proved that exactly the required artifact and checksum entry exist.
+   proved that a matching required artifact and checksum entry exist.
 3. Make the failure message corrective. It should name the expected file and distinguish the
    commonly confused alternative.
 4. Execute published snippets in CI. Static tests can preserve wording, but only execution
@@ -80,7 +80,7 @@ The repaired actions.json onboarding flow now:
 
 - explicitly distinguishes the extension ZIP from bridge tarballs;
 - stops with an actionable message when the ZIP or checksum entry is missing;
-- verifies the real latest release on Linux and macOS; and
+- was manually verified against release `0.1.204` on Linux and macOS; and
 - runs the published PowerShell block, including its missing-ZIP path, on Windows CI.
 
 The original customer report, hypotheses, command reproductions, and closure evidence are in
