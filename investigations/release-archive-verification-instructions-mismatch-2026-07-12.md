@@ -1,6 +1,6 @@
 # Release archive verification instructions mismatch
 
-Status: REMEDIATION IN PROGRESS — code and tests complete; publication and live verification pending
+Status: CLOSED — public fix merged, live guide verified, and durable solution recorded
 
 ## Phase 0 — tools
 
@@ -83,8 +83,8 @@ Repository-wide text search found the unsafe onboarding commands only in the two
 - [x] Static regression contract for asset roles and zero-match guards
 - [x] Real latest-release verification with Linux and macOS checksum tools
 - [x] Windows CI that executes the published PowerShell block against real assets and its missing-ZIP path
-- [ ] Merge the public PR
-- [ ] Verify the GitHub Pages route contains the corrected guidance
-- [ ] Run CE Compound and record the outcome
+- [x] Merge the public PR ([#35](https://github.com/yaniv256/actions.json/pull/35), merge commit `0415a65`)
+- [x] Verify the [GitHub Pages route](https://yaniv256.github.io/actions.json/getting-started.html) contains the corrected guidance
+- [x] Run CE Compound and record the outcome in [Release assets need product roles and zero-match guards](../docs/solutions/documentation-gaps/release-assets-need-product-roles-and-zero-match-guards.md)
 
-This investigation must remain open until the final three items are complete.
+Closed on 2026-07-13 after all three gates completed.
