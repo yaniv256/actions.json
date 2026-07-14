@@ -137,9 +137,10 @@ cases where no reviewed site action exists. They fall into these groups.
 
 **Privileged / authoring**
 
-- `browser.run_javascript`: run declared page-context JavaScript where allowed;
-- `debug.run_javascript`: authoring-only privileged fallback through the Chrome
-  debugger.
+- `browser.run_javascript`: compatibility name for debugger-backed declared
+  JavaScript; authoring-only and non-portable;
+- `debug.run_javascript`: explicit authoring-only privileged evaluator through
+  the Chrome debugger.
 
 Agents should prefer stored actions. Direct primitives require a
 `policy_exception_report` (below).
@@ -252,13 +253,14 @@ insert on another.
 
 ## Blocked Primitives And Site Policy
 
-Some sites should not receive page-context JavaScript evaluation. A site map can
-declare blocked primitives. The current hosted tool catalog suppresses
-`browser.run_javascript` when a matching site map declares page eval blocked.
+Some sites should not receive arbitrary JavaScript evaluation. A site map can
+declare blocked primitives. The current hosted tool catalog can suppress the
+compatibility name `browser.run_javascript` when a matching site map declares
+page evaluation blocked.
 
-`debug.run_javascript` is not a portable product primitive. It remains available
-as an authoring/debug fallback in the extension host where permission and policy
-allow it.
+Both JavaScript names use Chrome Debugger Protocol in the extension and are
+debugger-class, non-portable authoring capabilities. `debug.run_javascript`
+remains the explicit form where permission and policy allow it.
 
 ## Tool Results And Logs
 

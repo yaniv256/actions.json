@@ -21,11 +21,43 @@ A map is optional for Path A. Without one, the hosted agent uses its direct
 browser primitives; adding a map makes it faster and more knowledgeable on that
 site.
 
+## Fastest Path: Connect The Bridge And Start Voice
+
+Use this sequence when you want both an external coding agent and the hosted
+voice agent working on the same browser tab.
+
+1. Download `actions-json-overlay-runtime-<version>.zip` from the
+   [latest release](https://github.com/yaniv256/actions.json/releases/latest).
+   Do not download an `actions-json-mcp-*.tar.gz` file; those archives contain
+   bridge binaries, not the Chrome extension.
+2. Unzip it, open `chrome://extensions`, enable **Developer mode**, choose
+   **Load unpacked**, and select the unzipped extension directory.
+3. Register the bridge, then restart or reconnect your coding agent:
+
+   ```bash
+   codex mcp add actions-json -- npx -y @actions-json/bridge@latest mcp
+   ```
+
+   For Claude Code, replace `codex` with `claude`.
+4. Open a normal HTTPS website in your regular Chrome profile. Click the
+   actions.json extension, then click **Take control of this tab**. The default
+   local bridge address is already configured.
+5. Click **Open agent overlay**, open **Settings → OpenAI API key**, save your
+   key, and press **Start voice**. Allow microphone access when Chrome asks.
+
+**Success:** your coding agent can list the claimed tab, and the hosted agent
+answers you aloud. The detailed paths below explain each part and provide
+diagnostics when this shortest path fails.
+
 ## Prerequisites
 
 Before starting, confirm that you have:
 
 - **Google Chrome** with permission to load an unpacked extension;
+- any account-required target site, such as Trello, already signed in through
+  your regularly launched Chrome profile. Do not try to complete Google-backed
+  authentication in a Chrome session launched with remote debugging; Chrome or
+  the identity provider may reject that login;
 - **Node.js 18 or newer** and `npm`/`npx` for the bridge wrapper;
 - for Path B, an MCP-capable client such as **Codex** or **Claude Code**;
 - for hosted voice/text, an **OpenAI API** project key with available billing or
@@ -37,74 +69,51 @@ Never paste an API key into a website, issue, chat message, or committed file.
 Use the extension popup, the environment variable, or the ignored local config
 described below.
 
-## Install And Verify The Chrome Extension
+## Install The Chrome Extension
 
 1. Open the [latest release](https://github.com/yaniv256/actions.json/releases/latest).
-2. Download both:
-   - `actions-json-overlay-runtime-<version>.zip`
-   - `SHA256SUMS.txt`
+2. Download `actions-json-overlay-runtime-<version>.zip`.
+   Do not download an `actions-json-mcp-*.tar.gz` file; those archives contain
+   bridge binaries, not the Chrome extension.
+3. Unzip the archive.
+4. Open `chrome://extensions`.
+5. Enable **Developer mode**.
+6. Choose **Load unpacked** and select the unzipped extension directory.
 
-   The Chrome extension is the `actions-json-overlay-runtime-<version>.zip`
-   asset; bridge binaries are the platform-specific `.tar.gz` assets. Do not
-   rename or substitute an `actions-json-mcp-*.tar.gz` archive here: those
-   archives contain the external bridge, not the Chrome extension.
-3. Verify the archive before unzipping it.
+If Chrome shows an extension error, open the error details before continuing.
+Record the extension version only when reporting a problem; a successful setup
+does not require a separate version check.
+
+### Optional: Verify The Download
+
+Checksum verification can detect an incomplete or corrupted download. It is
+optional for the normal installation path. To verify the archive, also download
+`SHA256SUMS.txt` from the same release and run the command for your platform
+before unzipping the ZIP.
 
 On Linux:
 
 ```bash
-archive="$(find . -maxdepth 1 -type f -name 'actions-json-overlay-runtime-*.zip' -print -quit)"
-if [ -z "$archive" ]; then
-  echo "No actions-json-overlay-runtime-*.zip found. Download the Chrome extension ZIP, not an actions-json-mcp-*.tar.gz bridge archive." >&2
-  exit 1
-fi
-checksum_line="$(grep -F " $(basename "$archive")" SHA256SUMS.txt || true)"
-if [ -z "$checksum_line" ]; then
-  echo "No SHA256SUMS.txt entry found for $(basename "$archive")." >&2
-  exit 1
-fi
-printf '%s\n' "$checksum_line" | sha256sum -c -
+archive="$(ls actions-json-overlay-runtime-*.zip)"
+grep " $(basename "$archive")$" SHA256SUMS.txt | sha256sum -c -
 ```
 
 On macOS:
 
 ```bash
-archive="$(find . -maxdepth 1 -type f -name 'actions-json-overlay-runtime-*.zip' -print -quit)"
-if [ -z "$archive" ]; then
-  echo "No actions-json-overlay-runtime-*.zip found. Download the Chrome extension ZIP, not an actions-json-mcp-*.tar.gz bridge archive." >&2
-  exit 1
-fi
-checksum_line="$(grep -F " $(basename "$archive")" SHA256SUMS.txt || true)"
-if [ -z "$checksum_line" ]; then
-  echo "No SHA256SUMS.txt entry found for $(basename "$archive")." >&2
-  exit 1
-fi
-printf '%s\n' "$checksum_line" | shasum -a 256 -c -
+archive="$(ls actions-json-overlay-runtime-*.zip)"
+grep " $(basename "$archive")$" SHA256SUMS.txt | shasum -a 256 -c -
 ```
 
 On Windows PowerShell:
 
 ```powershell
 $archive = Get-ChildItem actions-json-overlay-runtime-*.zip | Select-Object -First 1
-if (-not $archive) {
-  throw "No actions-json-overlay-runtime-*.zip found. Download the Chrome extension ZIP, not an actions-json-mcp-*.tar.gz bridge archive."
-}
-$checksumLine = Select-String -Path SHA256SUMS.txt -SimpleMatch " $($archive.Name)" | Select-Object -First 1
-if (-not $checksumLine) {
-  throw "No SHA256SUMS.txt entry found for $($archive.Name)."
-}
-$expected = ($checksumLine.Line -split '\s+')[0].ToLower()
+$expected = ((Select-String -Path SHA256SUMS.txt -Pattern ([regex]::Escape($archive.Name))).Line -split '\s+')[0].ToLower()
 $actual = (Get-FileHash $archive.FullName -Algorithm SHA256).Hash.ToLower()
 if ($actual -ne $expected) { throw "SHA-256 mismatch for $($archive.Name)" }
 "SHA-256 verified: $($archive.Name)"
 ```
-
-4. Unzip the archive.
-5. Open `chrome://extensions`.
-6. Enable **Developer mode**.
-7. Choose **Load unpacked** and select the unzipped extension directory.
-8. Open the extension's **Details** page and record its **extension version**.
-   If Chrome shows errors, stop and open the error details before continuing.
 
 ## Path A: Use The Hosted Browser Agent
 
@@ -180,7 +189,7 @@ For another MCP client, use:
 
 Restart or reconnect the MCP client so it launches the registered server.
 
-### 2. Verify the installed bridge artifact
+### 2. Verify the installed bridge artifact when troubleshooting
 
 From a clean terminal, run:
 
@@ -197,9 +206,9 @@ version may differ when the wrapper deliberately pins a compatible binary; a
 missing release asset or HTTP 404 is a broken installation, not a compatible
 version difference.
 
-Compare this output with the extension version recorded above. Use the latest
-public extension and latest npm wrapper together. When reporting a problem,
-include both version numbers and the full download error.
+Use the latest public extension and latest npm wrapper together. When reporting
+a problem, include the extension version from `chrome://extensions`, the output
+above, and the full download error.
 
 ### 3. Configure OpenAI credential hydration (optional)
 
@@ -228,16 +237,16 @@ in the extension popup.
 
 ### 4. Connect Chrome to the bridge
 
-1. Open a normal HTTPS website.
+1. In your regular Chrome profile, sign in to the target website if required,
+   then open a normal HTTPS page on that site. Use the installed actions.json
+   extension in this browser. Debugger-launched Chrome sessions are for isolated
+   extension testing, not for establishing a fresh Trello/Google login.
 2. Open the extension popup.
-3. Under **Bridge**, enter:
+3. Click **Take control of this tab**. This authorizes the tab and connects it
+   to the default local bridge at `ws://127.0.0.1:17345/extension`.
 
-   ```text
-   ws://127.0.0.1:17345/extension
-   ```
-
-4. Click **Connect**.
-5. Click **Take control of this tab**.
+Open **Settings → Bridge** only when you need a non-default address or the
+connection fails.
 
 Use `127.0.0.1` only when Chrome and the bridge run on the same computer.
 

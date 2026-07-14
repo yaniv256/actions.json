@@ -108,10 +108,12 @@ The extension manifest currently includes:
 - JavaScript tools: `browser.run_javascript`, `debug.run_javascript`;
 - current-site tool: `actions.site`.
 
-Site maps can remove unsafe or blocked portable tools for a given website. For
-example, if page JavaScript evaluation is blocked or inappropriate, remove
-`browser.run_javascript` from the site-facing action set while keeping
-`debug.run_javascript` available for extension authoring.
+Site maps can remove unsafe or blocked tools for a given website. Both
+JavaScript names are debugger-class and non-portable in the extension because
+Manifest V3 content-script CSP forbids dynamic string evaluation. If arbitrary
+evaluation is inappropriate, remove `browser.run_javascript` from the
+site-facing set; keep `debug.run_javascript` only where explicit extension
+authoring policy permits it.
 
 ## Verify A Local Build
 

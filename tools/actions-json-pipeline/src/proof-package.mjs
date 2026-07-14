@@ -67,13 +67,107 @@ function validateScreenshotManifest(input) {
       if (typeof screenshot?.purpose !== "string" || !screenshot.purpose) {
         throw new Error(`Screenshot entry ${index} must include purpose.`);
       }
+      if (typeof screenshot?.source !== "string" || !screenshot.source) {
+        throw new Error(`Screenshot entry ${index} must include source.`);
+      }
+      if (
+        typeof screenshot?.captured_at !== "string" ||
+        !screenshot.captured_at ||
+        Number.isNaN(Date.parse(screenshot.captured_at))
+      ) {
+        throw new Error(
+          `Screenshot entry ${index} must include a valid captured_at timestamp.`,
+        );
+      }
+      const surfaceIdentity = validateSurfaceIdentity(
+        screenshot.surface_identity,
+        index,
+      );
+      const freshness = validateFreshness(screenshot.freshness, index);
+      if (
+        freshness.status === "independently_verified" &&
+        freshness.evidence.trim() === screenshot.captured_at.trim()
+      ) {
+        throw new Error(
+          `Screenshot entry ${index} freshness evidence must be independent of captured_at.`,
+        );
+      }
+      const evidencePolicy = screenshot.evidence_policy;
+      if (!["positive_only", "bidirectional"].includes(evidencePolicy)) {
+        throw new Error(
+          `Screenshot entry ${index} evidence_policy must be positive_only or bidirectional.`,
+        );
+      }
+      if (
+        freshness.status === "unverified" &&
+        evidencePolicy !== "positive_only"
+      ) {
+        throw new Error(
+          `Screenshot entry ${index} with unverified freshness must use evidence_policy positive_only.`,
+        );
+      }
+      if (
+        freshness.status === "independently_verified" &&
+        evidencePolicy !== "bidirectional"
+      ) {
+        throw new Error(
+          `Screenshot entry ${index} with independently verified freshness must use evidence_policy bidirectional.`,
+        );
+      }
       return {
         path: screenshot.path,
         purpose: screenshot.purpose,
-        source: typeof screenshot.source === "string" ? screenshot.source : null,
-        captured_at: typeof screenshot.captured_at === "string" ? screenshot.captured_at : null,
+        source: screenshot.source,
+        captured_at: screenshot.captured_at,
+        surface_identity: surfaceIdentity,
+        freshness,
+        evidence_policy: evidencePolicy,
       };
     }),
+  };
+}
+
+function validateSurfaceIdentity(identity, index) {
+  for (const field of ["kind", "value", "method"]) {
+    if (typeof identity?.[field] !== "string" || !identity[field].trim()) {
+      throw new Error(
+        `Screenshot entry ${index} surface_identity must include ${field}.`,
+      );
+    }
+  }
+  return {
+    kind: identity.kind,
+    value: identity.value,
+    method: identity.method,
+  };
+}
+
+function validateFreshness(freshness, index) {
+  if (!["unverified", "independently_verified"].includes(freshness?.status)) {
+    throw new Error(
+      `Screenshot entry ${index} freshness.status must be unverified or independently_verified.`,
+    );
+  }
+  if (freshness.status === "unverified") {
+    return { status: "unverified" };
+  }
+  for (const field of ["method", "evidence", "verified_at"]) {
+    if (typeof freshness[field] !== "string" || !freshness[field].trim()) {
+      throw new Error(
+        `Screenshot entry ${index} independently verified freshness must include ${field}.`,
+      );
+    }
+  }
+  if (Number.isNaN(Date.parse(freshness.verified_at))) {
+    throw new Error(
+      `Screenshot entry ${index} freshness.verified_at must be a valid timestamp.`,
+    );
+  }
+  return {
+    status: "independently_verified",
+    method: freshness.method,
+    evidence: freshness.evidence,
+    verified_at: freshness.verified_at,
   };
 }
 

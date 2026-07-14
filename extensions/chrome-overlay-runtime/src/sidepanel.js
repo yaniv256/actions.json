@@ -37,7 +37,7 @@ import {
   filterRealtimeToolsForBlockedPrimitives,
 } from "./agent/realtime-tool-catalog.mjs";
 
-const DEFAULT_BRIDGE_URL = "ws://100.99.150.49:17345/extension";
+const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:17345/extension";
 const EXTENSION_STORAGE_BUNDLE_KEY = "actionsJsonStorageBundle";
 const DEFAULT_STORAGE_SCOPE = "private";
 const EXTENSION_ACTIONS_URL = "actions/overlay.actions.json";

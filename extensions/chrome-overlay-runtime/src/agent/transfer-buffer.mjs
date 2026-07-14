@@ -2,6 +2,11 @@ const DEFAULT_TTL_SECONDS = 7200;
 const DEFAULT_MAX_BYTES = 256 * 1024;
 const SUPPORTED_FORMATS = new Set(["text/plain", "application/json", "text/uri-list"]);
 
+export const transferInsertValue = (rendered) => {
+  const text = typeof rendered === "string" ? rendered : String(rendered ?? "");
+  return { rendered_text: text, text };
+};
+
 export class TransferBufferError extends Error {
   constructor(code, message, details = {}) {
     super(message);

@@ -27,6 +27,21 @@ const fixtureCdp = async (method, params) => {
     assert.strictEqual(params.backendNodeId, 102);
     return {model: {content: [10, 20, 110, 20, 110, 60, 10, 60]}};
   }
+  if (method === 'DOM.resolveNode') {
+    assert.strictEqual(params.backendNodeId, 102);
+    return {object: {objectId: 'fixture-button'}};
+  }
+  if (method === 'Runtime.callFunctionOn') {
+    assert.strictEqual(params.objectId, 'fixture-button');
+    return {result: {value: {
+      visible_center: {x: 60, y: 40},
+      visible_rect: {left: 10, top: 20, right: 110, bottom: 60, width: 100, height: 40},
+      receives_events: false,
+      clickable: false,
+      occluded_by: {tag_name: 'div', id: 'sticky-cover', text: 'Sticky cover'},
+    }}};
+  }
+  if (method === 'Runtime.releaseObject') return {};
   throw new Error(`unexpected CDP call ${method}`);
 };
 
@@ -46,6 +61,17 @@ test('role/name/state mapping and tree walking match the fixture', async () => {
   assert.strictEqual(root.firstChild.role, 'heading');
   assert.strictEqual(root.lastChild.role, 'status');
   assert.strictEqual(tree.nodeById('5').root.id, '1');
+});
+
+test('actionability attestation separates AX identity from hit-test ownership', async () => {
+  const tree = await makeTree();
+  const hit = tree.query({role: 'button', name: 'Reply'});
+  const attestation = await tree.actionability(hit);
+  assert.strictEqual(attestation.actionability_attested, true);
+  assert.strictEqual(attestation.receives_events, false);
+  assert.strictEqual(attestation.clickable, false);
+  assert.deepStrictEqual(attestation.visible_center, {x: 60, y: 40});
+  assert.deepStrictEqual(attestation.occluded_by, {tag_name: 'div', id: 'sticky-cover', text: 'Sticky cover'});
 });
 
 test('synthetic desktop→window topology serves the suppression walk', async () => {

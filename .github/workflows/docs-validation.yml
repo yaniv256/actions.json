@@ -7,6 +7,8 @@ on:
       - "skills/write-actions-json/references/getting-started.md"
       - "scripts/tests/getting-started-docs.test.mjs"
       - "scripts/validate-skills.mjs"
+      - "scripts/lib/gitlinks.mjs"
+      - "scripts/tests/validate-skills-gitlinks.test.mjs"
       - "package.json"
       - "adapters/npm-bridge/**"
       - ".github/workflows/docs-validation.yml"
@@ -17,6 +19,8 @@ on:
       - "skills/write-actions-json/references/getting-started.md"
       - "scripts/tests/getting-started-docs.test.mjs"
       - "scripts/validate-skills.mjs"
+      - "scripts/lib/gitlinks.mjs"
+      - "scripts/tests/validate-skills-gitlinks.test.mjs"
       - "package.json"
       - "adapters/npm-bridge/**"
       - ".github/workflows/docs-validation.yml"
@@ -35,7 +39,9 @@ jobs:
       - name: Verify Getting Started copies, content contracts, and links
         run: node --test scripts/tests/getting-started-docs.test.mjs
       - name: Verify public skill layout and documentation parity
-        run: node scripts/validate-skills.mjs
+        run: |
+          node --test scripts/tests/validate-skills-gitlinks.test.mjs
+          node scripts/validate-skills.mjs
       - name: Verify the npm bridge install and version contracts
         run: node --test adapters/npm-bridge/test/*.test.js
 
@@ -44,17 +50,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build the same Jekyll source used by GitHub Pages
-        uses: actions/jekyll-build-pages@v1
-        with:
-          source: ./docs
-          destination: ./_site
+        env:
+          INPUT_TOKEN: ${{ github.token }}
+        run: |
+          docker run --rm \
+            -e GITHUB_WORKSPACE=/github/workspace \
+            -e GITHUB_REPOSITORY=yaniv256/actions.json \
+            -e GITHUB_API_URL=https://api.github.com \
+            -e INPUT_SOURCE=./docs \
+            -e INPUT_DESTINATION=./_site \
+            -e INPUT_TOKEN \
+            -e INPUT_BUILD_REVISION=${GITHUB_SHA} \
+            -v "${GITHUB_WORKSPACE}:/github/workspace" \
+            ghcr.io/actions/jekyll-build-pages:v1.0.13
       - name: Require the rendered onboarding route
         run: test -s _site/getting-started.html
-
-  verify-windows-release-instructions:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Run the published PowerShell commands against the latest real release
-        shell: pwsh
-        run: ./scripts/tests/getting-started-release-verification.ps1

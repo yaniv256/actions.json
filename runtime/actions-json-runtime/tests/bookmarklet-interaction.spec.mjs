@@ -416,6 +416,13 @@ test("bookmarklet captures screenshots through user-consented screen capture", a
     width: 320,
     height: 180,
     mime_type: "image/png",
+    surface_identity: {
+      kind: "user_selected_display_surface",
+      value: "browser",
+      method: "getDisplayMedia user selection",
+    },
+    freshness: { status: "unverified" },
+    evidence_policy: "positive_only",
   });
   expect(output.data_url).toBe("data:image/png;base64,ZmFrZS1zY3JlZW5zaG90");
   expect(await page.evaluate(() => window.__actionsJsonGetDisplayMediaCalls)).toBe(1);
@@ -1470,6 +1477,29 @@ test("bookmarklet implements page, DOM, locator text, wait, and keyboard primiti
     value: { pressed: true, key: "Enter", fidelity: "page_level" },
   });
   expect(await page.evaluate(() => document.body.dataset.key)).toBe("Enter");
+});
+
+test("bookmarklet dom.observe.visible omits clickable_center for an occluded match", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await installFakeBookmarkletSocket(page);
+  await page.route("https://example.test/occluded", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><button id="covered" style="position:absolute;left:20px;top:20px;width:220px;height:48px">Covered action</button><div style="position:fixed;left:0;top:0;width:320px;height:120px;background:#fff;z-index:10000">Sticky cover</div>`,
+    });
+  });
+  await page.goto("https://example.test/occluded");
+  await page.addScriptTag({ content: bookmarkletSource });
+  await page.evaluate(() => window.__actionsJsonFakeSockets[0].emit("open"));
+  await callBookmarkletAction(page, "occluded-dom-observe", "dom.observe.visible", { selector: "#covered" });
+  const output = (await readActionOutput(page, "occluded-dom-observe")).value;
+  expect(output.match_count).toBe(1);
+  const match = output.matches[0];
+  expect(match.clickable).toBe(false);
+  expect(match.receives_events).toBe(false);
+  expect(match.clickable_center).toBeUndefined();
+  expect(match.visible_center).toEqual(expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }));
+  expect(match.occluded_by).toEqual(expect.objectContaining({ tag_name: "div" }));
 });
 
 async function installFakeBookmarkletSocket(page) {

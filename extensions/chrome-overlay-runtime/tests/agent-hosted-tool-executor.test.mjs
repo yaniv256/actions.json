@@ -281,7 +281,7 @@ test("chrome hosted tool executor falls back to the default bridge URL when stor
     arguments: {},
   });
 
-  assert.deepEqual(fetchCalls.map((call) => call.url), ["http://100.99.150.49:17345/mcp/tools/call"]);
+  assert.deepEqual(fetchCalls.map((call) => call.url), ["http://127.0.0.1:17345/mcp/tools/call"]);
 });
 
 test("chrome hosted tool executor converts http bridge URLs without changing the origin", async () => {

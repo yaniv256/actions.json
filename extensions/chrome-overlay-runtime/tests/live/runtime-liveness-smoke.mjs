@@ -170,14 +170,14 @@ async function main() {
       value?.surface_identity === 'verified_active_tab'
       && value?.freshness === 'unverified'
       && value?.delay_ms_applied === 25
-      && (value?.ignored_arguments?.includes('max_width')
-        || (value?.encoded?.resized === true && value?.encoded?.width <= 800))
+      && value?.screenshot_compaction?.compacted === true
+      && value?.screenshot_compaction?.output_width <= 800
       && value?.data_url?.startsWith('data:image/jpeg;base64,'))
       && valueA.data_url !== valueB.data_url;
     console.log('background screenshot contract:', JSON.stringify({
       screenshotOk,
-      a: { url: valueA?.url, identity: valueA?.surface_identity, freshness: valueA?.freshness, ignored: valueA?.ignored_arguments },
-      b: { url: valueB?.url, identity: valueB?.surface_identity, freshness: valueB?.freshness, ignored: valueB?.ignored_arguments },
+      a: { url: valueA?.url, identity: valueA?.surface_identity, freshness: valueA?.freshness, compaction: valueA?.screenshot_compaction },
+      b: { url: valueB?.url, identity: valueB?.surface_identity, freshness: valueB?.freshness, compaction: valueB?.screenshot_compaction },
     }));
     if (!screenshotOk) throw new Error(`background screenshot contract failed: ${JSON.stringify({ shotA, shotB })}`);
 

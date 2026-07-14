@@ -48,15 +48,17 @@ test("Getting Started addresses the ten onboarding contracts", async () => {
   assert.doesNotMatch(text, /\*\*TODO:\*\*/);
 });
 
-test("extension verification distinguishes release assets and fails clearly when the ZIP is absent", async () => {
+test("Getting Started puts successful activation before optional verification", async () => {
   const text = await readFile(skillPath, "utf8");
+  const install = text.indexOf("## Fastest Path: Connect The Bridge And Start Voice");
+  const success = text.indexOf("**Success:**");
+  const optionalVerification = text.indexOf("### Optional: Verify The Download");
 
-  assert.match(text, /The Chrome extension is the .*\.zip.*bridge binaries are .*\.tar\.gz/is);
-  assert.match(text, /Do not\s+rename or substitute an .*\.tar\.gz.*archive here/is);
-
-  assert.match(text, /if \[ -z "\$archive" \]; then[\s\S]*No actions-json-overlay-runtime-\*\.zip found/);
-  assert.match(text, /if \(-not \$archive\)[\s\S]*No actions-json-overlay-runtime-\*\.zip found/);
-  assert.match(text, /if \(-not \$checksumLine\)[\s\S]*No SHA256SUMS\.txt entry found/);
+  assert.ok(install >= 0, "missing combined activation path");
+  assert.ok(success > install, "activation path must define success");
+  assert.ok(optionalVerification > success, "optional checksum verification must follow the success path");
+  assert.match(text, /Download `actions-json-overlay-runtime-<version>\.zip`/);
+  assert.match(text, /Do not download an `actions-json-mcp-\*\.tar\.gz` file/);
 });
 
 test("every relative Markdown link in Getting Started resolves inside docs", async () => {

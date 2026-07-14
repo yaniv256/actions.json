@@ -151,10 +151,11 @@ runtime.
 Important boundaries:
 
 - `browser.screenshot` is user-authorized extension behavior.
-- `debug.run_javascript` is an authoring/debug fallback for pages where content
-  script JavaScript is blocked or insufficient.
-- `browser.run_javascript` is page-context JavaScript and can be suppressed for
-  sites that declare page eval blocked.
+- `debug.run_javascript` is an authoring/debug fallback evaluated through Chrome
+  Debugger Protocol.
+- `browser.run_javascript` is a compatibility name for the same debugger-class,
+  non-portable execution path. Manifest V3 content-script CSP forbids dynamic
+  string evaluation, so it is never a generic content-script capability.
 - Debugger discoveries should be converted into reviewed `actions.json`
   actions before normal use.
 

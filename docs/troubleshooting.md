@@ -265,13 +265,15 @@ operations, then restore it (`overlay.menu.show`).
 
 ## `browser.run_javascript` Is Missing
 
-Some sites block page JavaScript evaluation or make it unsafe as a portable
-action. On those sites, the site map should remove `browser.run_javascript` from
-the agent-facing action set.
+Some sites prohibit arbitrary JavaScript evaluation or make it inappropriate
+for the agent-facing action set. On those sites, the site map should remove
+`browser.run_javascript`.
 
-The extension may still expose `debug.run_javascript` for authoring because it
-uses Chrome Debugger Protocol. Use it to learn the page, then encode the result
-as portable actions.
+In the extension, `browser.run_javascript` is itself a debugger-backed
+compatibility name because Manifest V3 content-script CSP forbids dynamic string
+evaluation. The extension may still expose the explicit
+`debug.run_javascript` authoring tool where policy allows it. Use either only to
+learn the page, then encode the result as portable actions.
 
 ## Pull A Session Log
 

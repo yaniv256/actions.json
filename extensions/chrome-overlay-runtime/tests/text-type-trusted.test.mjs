@@ -3,19 +3,26 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 // Guards the 2026-07-05 select-and-type composite: text.type types a string as
-// keystrokes. trusted:true routes to CDP Input.insertText (overtypes the active
-// selection + reaches canvas editors, where clipboard.paste does not route to a
-// keyboard-made selection). Optional select_back_chars extends the selection
+// keystrokes. trusted:true routes to awaited per-character CDP
+// Input.dispatchKeyEvent calls (overtypes the active selection + reaches canvas
+// editors, where clipboard.paste does not route to a keyboard-made selection).
+// Optional select_back_chars extends the selection
 // backward first, so one atomic call both selects a phrase and overtypes it.
 
 const contentSource = await readFile(new URL("../src/content.js", import.meta.url), "utf8");
 const backgroundSource = await readFile(new URL("../src/background.js", import.meta.url), "utf8");
 const manifest = JSON.parse(await readFile(new URL("../actions/overlay.actions.json", import.meta.url), "utf8"));
 
-test("trusted text.type relays to the background CDP insertText path", () => {
+test("trusted text.type relays to the background per-character key-event path", () => {
   assert.ok(contentSource.includes('type: "actions-json:marker-trusted-text"'), "content must relay trusted text");
   assert.ok(backgroundSource.includes('message?.type === "actions-json:marker-trusted-text"'), "background must handle the relay");
-  assert.ok(backgroundSource.includes('debuggerSendCommand(target, "Input.insertText"'), "must use CDP Input.insertText");
+  const start = backgroundSource.indexOf("const dispatchTrustedText = async");
+  const end = backgroundSource.indexOf("const debugExpressionFor", start);
+  assert.ok(start >= 0 && end > start, "trusted text implementation must be present");
+  const implementation = backgroundSource.slice(start, end);
+  assert.ok(implementation.includes("for (const ch of Array.from(text))"), "trusted text must process each character");
+  assert.ok(implementation.includes('await debuggerSendCommand(target, "Input.dispatchKeyEvent"'), "trusted text must await CDP key dispatch");
+  assert.ok(!implementation.includes("Input.insertText"), "trusted text must not use stale CDP insertText implementation");
 });
 
 test("select_back_chars extends the selection with Shift+Left before inserting", () => {

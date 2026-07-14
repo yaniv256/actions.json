@@ -176,9 +176,10 @@ JavaScript-only embed path.
   storage.
 - Debugger-backed tools are privileged authoring tools. Convert debugger lessons
   into portable `actions.json` actions before relying on them.
-- If a site blocks page JavaScript evaluation, remove `browser.run_javascript`
-  from that site's available actions. `debug.run_javascript` may still work in
-  the extension authoring path because it uses Chrome Debugger Protocol.
+- Both `browser.run_javascript` and `debug.run_javascript` are debugger-class,
+  non-portable extension authoring tools. Manifest V3 content-script CSP forbids
+  the former's historical `new Function` implementation, so both names now use
+  Chrome Debugger Protocol. Convert their discoveries into portable actions.
 - Screenshots require host support and browser permission.
 - The bridge and runtimes should return structured errors rather than silently
   falling back to unsafe behavior.

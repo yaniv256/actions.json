@@ -4,91 +4,184 @@ import vm from "node:vm";
 import test from "node:test";
 import {
   listSiteActionsFromBundle,
+  listSiteStorageFilesFromBundle,
+  readSiteStorageFileFromBundle,
   resolveSiteActionFromBundle,
   siteBlockedPrimitiveNamesFromBundle,
 } from "../extensions/chrome-overlay-runtime/src/agent/local-actions-catalog.mjs";
 import {
+  buildSemanticDeltas,
+  diffStates,
+  listStateProjectionsFromBundle,
+  verifyStatePostcondition,
+} from "../extensions/chrome-overlay-runtime/src/agent/state-projections.mjs";
+import {
   buildRealtimeToolCatalog,
   filterRealtimeToolsForBlockedPrimitives,
 } from "../extensions/chrome-overlay-runtime/src/agent/realtime-tool-catalog.mjs";
+import { BridgeOutputDeliveryQueue } from "../extensions/chrome-overlay-runtime/src/agent/bridge-output-delivery.mjs";
+import { ShimTree } from "../extensions/chrome-overlay-runtime/src/a11y/automation_shim.js";
+import { normalizeGatedRepeatArgs, runGatedRepeat } from "../extensions/chrome-overlay-runtime/src/a11y/gated-repeat.mjs";
+import { TransferBuffer, TransferBufferError } from "../extensions/chrome-overlay-runtime/src/agent/transfer-buffer.mjs";
+import { executeWorkflowAction } from "../extensions/chrome-overlay-runtime/src/agent/workflow-actions.mjs";
+import { normalizeSiteActionCallArgs } from "../extensions/chrome-overlay-runtime/src/agent/site-action-args.mjs";
+import { captureTabSurface, compactScreenshotDataUrl, createChromeScreenshotBrowser } from "../extensions/chrome-overlay-runtime/src/agent/background-screenshot-capture.mjs";
+import { createCloudStore } from "../extensions/chrome-overlay-runtime/src/agent/cloud-store.mjs";
+import { reconcileDay } from "../extensions/chrome-overlay-runtime/src/agent/usage-reconciler.mjs";
+import { agentEventFromSessionEvent } from "../extensions/chrome-overlay-runtime/src/agent/agent-event-map.mjs";
+import { DEFAULT_MODEL } from "../extensions/chrome-overlay-runtime/src/agent/realtime-model.mjs";
+
+class Announcer {
+  async start() {}
+  async stop() {}
+}
 
 function backgroundScriptForVm() {
-  return readFileSync("extensions/chrome-overlay-runtime/src/background.js", "utf8")
-    .replace(
-      /^import \{\n  listSiteActionsFromBundle,\n  resolveSiteActionFromBundle,\n  siteBlockedPrimitiveNamesFromBundle,\n\} from "\.\/agent\/local-actions-catalog\.mjs";\nimport \{\n  buildRealtimeToolCatalog,\n  filterRealtimeToolsForBlockedPrimitives,\n\} from "\.\/agent\/realtime-tool-catalog\.mjs";\n\n/,
-      "",
-    );
+  const source = readFileSync(
+    "extensions/chrome-overlay-runtime/src/background.js",
+    "utf8",
+  );
+  let inImport = false;
+  let removed = 0;
+  const body = source
+    .split("\n")
+    .filter((line) => {
+      if (!inImport && /^import\b/.test(line)) {
+        removed += 1;
+        inImport = !/;\s*$/.test(line);
+        return false;
+      }
+      if (inImport) {
+        inImport = !/;\s*$/.test(line);
+        return false;
+      }
+      return true;
+    })
+    .join("\n");
+  assert.ok(removed > 0, "VM loader must remove production ESM imports");
+  assert.doesNotMatch(body, /^import\b/m, "no import may leak into vm.Script");
+  return body;
 }
 
 function withBackgroundCatalog(context) {
   return {
     ...context,
+    self: context.self || { addEventListener() {} },
+    chrome: {
+      ...context.chrome,
+      debugger: {
+        onDetach: { addListener() {} },
+        onEvent: { addListener() {} },
+        ...context.chrome?.debugger,
+      },
+    },
     listSiteActionsFromBundle,
+    listSiteStorageFilesFromBundle,
+    readSiteStorageFileFromBundle,
     resolveSiteActionFromBundle,
     siteBlockedPrimitiveNamesFromBundle,
+    buildSemanticDeltas,
+    diffStates,
+    listStateProjectionsFromBundle,
+    verifyStatePostcondition,
     buildRealtimeToolCatalog,
     filterRealtimeToolsForBlockedPrimitives,
+    BridgeOutputDeliveryQueue,
+    ShimTree,
+    Announcer,
+    normalizeGatedRepeatArgs,
+    runGatedRepeat,
+    TransferBuffer,
+    TransferBufferError,
+    executeWorkflowAction,
+    normalizeSiteActionCallArgs,
+    captureTabSurface,
+    createChromeScreenshotBrowser,
+    createCloudStore,
+    reconcileDay,
+    agentEventFromSessionEvent,
+    DEFAULT_MODEL,
   };
 }
 
-test("background screenshot capture activates the sender tab before captureVisibleTab", async () => {
+test("background screenshot capture activates the exact tab before captureVisibleTab", async () => {
   const calls = [];
-  let messageListener;
-  const context = {
-    setTimeout,
-    chrome: {
-      runtime: {
-        lastError: null,
-        onInstalled: {
-          addListener() {},
-        },
-        onMessage: {
-          addListener(listener) {
-            messageListener = listener;
-          },
-        },
-      },
-      storage: {
-        local: {
-          async get() {
-            return {};
-          },
-          async set() {},
-        },
-      },
-      tabs: {
-        update(tabId, updateInfo, callback) {
-          calls.push(["update", tabId, updateInfo]);
-          callback();
-        },
-        captureVisibleTab(windowId, options, callback) {
-          calls.push(["captureVisibleTab", windowId, options]);
-          callback("data:image/png;base64,abc");
-        },
-      },
+  const browser = {
+    async focusWindow(windowId) {
+      calls.push(["focusWindow", windowId]);
+    },
+    async activateTab(tabId) {
+      calls.push(["activateTab", tabId]);
+    },
+    async readActiveTab(windowId) {
+      calls.push(["readActiveTab", windowId]);
+      return { id: 123 };
+    },
+    async delay(delayMs) {
+      calls.push(["delay", delayMs]);
+    },
+    async captureVisibleTab(windowId, options) {
+      calls.push(["captureVisibleTab", windowId, options]);
+      return "data:image/png;base64,abc";
     },
   };
 
-  vm.runInNewContext(backgroundScriptForVm(), withBackgroundCatalog(context));
+  const response = await captureTabSurface(
+    browser,
+    { id: 123, windowId: 456 },
+    { format: "png" },
+  );
 
-  const response = await new Promise((resolve) => {
-    const asyncResponse = messageListener(
-      { type: "actions-json:capture-visible-tab", format: "png" },
-      { tab: { id: 123, windowId: 456 } },
-      resolve
-    );
-    assert.equal(asyncResponse, true);
-  });
-
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
-    ["update", 123, { active: true }],
-    ["captureVisibleTab", 456, { format: "png" }],
+  assert.deepEqual(calls, [
+    ["focusWindow", 456],
+    ["activateTab", 123],
+    ["readActiveTab", 456],
+    ["captureVisibleTab", 456, { format: "png", quality: undefined }],
   ]);
-  assert.deepEqual(JSON.parse(JSON.stringify(response)), {
+  assert.deepEqual(response, {
     ok: true,
     dataUrl: "data:image/png;base64,abc",
+    surface_identity: "verified_active_tab",
+    freshness: "unverified",
+    delay_ms_applied: 0,
   });
 });
+
+test("background screenshot compacts hosted captures to requested bounds", async () => {
+  const canvases = [];
+  const sourceBlob = {
+    size: 100_000,
+    async arrayBuffer() { return new Uint8Array([1, 2, 3]).buffer; },
+  };
+  const result = await compactScreenshotDataUrl(
+    "data:image/png;base64,source",
+    { format: "jpeg", maxWidth: 960, maxHeight: 960, maxKilobytes: 20, quality: 60 },
+    {
+      async fetchImpl() { return { async blob() { return sourceBlob; } }; },
+      async bitmapFactory() { return { width: 1920, height: 1200 }; },
+      canvasFactory(width, height) {
+        const canvas = {
+          width,
+          height,
+          getContext() { return { drawImage() {} }; },
+          async convertToBlob() {
+            const size = width <= 960 && height <= 960 ? 10_000 : 100_000;
+            return { size, async arrayBuffer() { return new Uint8Array([4, 5]).buffer; } };
+          },
+        };
+        canvases.push(canvas);
+        return canvas;
+      },
+    },
+  );
+  assert.equal(result.compacted, true);
+  assert.equal(result.output_width, 960);
+  assert.equal(result.output_height, 600);
+  assert.equal(result.output_bytes, 10_000);
+  assert.match(result.dataUrl, /^data:image\/jpeg;base64,/);
+  assert.equal(canvases.length, 1);
+});
+
 
 test("background claims authorized tabs into an Open Browser Use style session group and reconnects after navigation", async () => {
   const calls = [];
@@ -201,10 +294,17 @@ test("background claims authorized tabs into an Open Browser Use style session g
   });
   assert.match(authorizeResponse.authorizationId, /^authorization-/);
   assert.equal(typeof updatedListener, "function");
-  assert.deepEqual(JSON.parse(JSON.stringify(calls.slice(0, 4))), [
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.slice(0, 5))), [
     ["tabs.group", { tabIds: [321] }],
     ["tabGroups.update", 771, { title: "actions.json", color: "blue", collapsed: false }],
     ["executeScript", { target: { tabId: 321 }, files: ["src/content.js"] }],
+    [
+      "executeScript",
+      {
+        target: { tabId: 321, allFrames: true },
+        files: ["src/a11y/live_region_observer.js"],
+      },
+    ],
     [
       "sendMessage",
       321,
@@ -232,6 +332,13 @@ test("background claims authorized tabs into an Open Browser Use style session g
 
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     ["executeScript", { target: { tabId: 321 }, files: ["src/content.js"] }],
+    [
+      "executeScript",
+      {
+        target: { tabId: 321, allFrames: true },
+        files: ["src/a11y/live_region_observer.js"],
+      },
+    ],
     [
       "sendMessage",
       321,
@@ -909,6 +1016,9 @@ test("background serves hosted actions.site from uploaded extension storage with
             target_url_contains: null,
           },
         ],
+        state_projections: [],
+        files: [],
+        skills: [],
       },
       error: null,
     },
@@ -1010,20 +1120,23 @@ test("background records hosted tool routing decisions in the session log", asyn
   assert.equal(response.ok, true);
   assert.equal(response.result.ok, false);
   const routingEvents = storage.ACTIONS_JSON_AGENT_MEMORY_V1.events.filter(
-    (event) => event.name === "background.hosted_tool.routing",
+    (event) =>
+      event.name === "background.hosted_tool.routing" &&
+      event.input?.call_id === "call-screenshot",
   );
-  assert.equal(routingEvents.length, 1);
+  assert.equal(routingEvents.length, 2);
+  const routingEvent = routingEvents.at(-1);
   assert.deepEqual(
     {
-      type: routingEvents[0].type,
-      tool: routingEvents[0].input.tool,
-      call_id: routingEvents[0].input.call_id,
-      active_tab_url: routingEvents[0].input.active_tab_url,
-      requested_target_url_contains: routingEvents[0].input.requested_target_url_contains,
-      route: routingEvents[0].output.route,
-      ok: routingEvents[0].output.ok,
-      bridge_status: routingEvents[0].output.bridge_status,
-      error_code: routingEvents[0].output.error_code,
+      type: routingEvent.type,
+      tool: routingEvent.input.tool,
+      call_id: routingEvent.input.call_id,
+      active_tab_url: routingEvent.input.active_tab_url,
+      requested_target_url_contains: routingEvent.input.requested_target_url_contains,
+      route: routingEvent.output.route,
+      ok: routingEvent.output.ok,
+      bridge_status: routingEvent.output.bridge_status,
+      error_code: routingEvent.output.error_code,
     },
     {
       type: "routing",
@@ -1212,7 +1325,14 @@ test("background reports hosted agent state without creating an offscreen docume
 
   assert.deepEqual(JSON.parse(JSON.stringify(response)), {
     ok: true,
-    state: { status: "disconnected", model: "gpt-realtime-2.1", error: null, inputMuted: false },
+    state: {
+      status: "disconnected",
+      model: "gpt-realtime-2.1",
+      error: null,
+      inputMuted: false,
+      outputMuted: false,
+      textOnly: true,
+    },
   });
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     [

@@ -67,7 +67,7 @@
         "reason": null,
         "capability_class": "privileged",
         "portable": false,
-        "summary": "Focus an already-claimed browser tab and reconnect its actions.json runtime.",
+        "summary": "Focus an already-claimed browser tab and reconnect its actions.json runtime. MCP callers must pair tab_id with its owning target_runtime_id.",
         "input_schema": {
           "type": "object",
           "required": [
@@ -88,7 +88,7 @@
         "reason": null,
         "capability_class": "privileged",
         "portable": false,
-        "summary": "Navigate a claimed tab to a URL (or reload it) and reconnect its runtime.",
+        "summary": "Navigate a claimed tab to a URL (or reload it) and reconnect its runtime. MCP callers targeting an explicit tab_id must also pass its owning target_runtime_id.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -136,7 +136,7 @@
         "reason": null,
         "capability_class": "privileged",
         "portable": false,
-        "summary": "Close a claimed tab (defaults to active); refuses to close the last remaining claimed tab.",
+        "summary": "Close a claimed tab (defaults to active); refuses to close the last remaining claimed tab. MCP callers targeting an explicit tab_id must also pass its owning target_runtime_id.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -154,7 +154,7 @@
         "reason": null,
         "capability_class": "privileged",
         "portable": false,
-        "summary": "Dismiss a native JS dialog (alert/confirm/prompt/beforeunload) blocking a claimed tab via CDP; recovers a wedged tab.",
+        "summary": "Dismiss a native JS dialog (alert/confirm/prompt/beforeunload) blocking a claimed tab via CDP; recovers a wedged tab. MCP callers targeting an explicit tab_id must also pass its owning target_runtime_id.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -842,7 +842,7 @@
         "reason": null,
         "capability_class": "portable",
         "portable": true,
-        "summary": "Observe visible DOM candidates that match a selector or text query.",
+        "summary": "Observe visible DOM candidates that match a selector or text query. `clickable_center` is returned only when hit-testing confirms the point receives events; otherwise use `visible_center` only as geometry and do not click it.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -1819,7 +1819,7 @@
         "reason": null,
         "capability_class": "portable",
         "portable": true,
-        "summary": "Type a string at the focused element (trusted:true overtypes a selection in canvas editors).",
+        "summary": "Type a string at the focused element (trusted:true sends awaited per-character key events and overtypes a selection in canvas editors).",
         "input_schema": {
           "type": "object",
           "required": [
@@ -1832,7 +1832,7 @@
             },
             "trusted": {
               "type": "boolean",
-              "description": "When true, types via CDP Input.insertText (trusted) \u2014 REPLACES the active selection and reaches canvas editors (Docs/Slides/Sheets). Default false = synthetic insert at the focused editable."
+              "description": "When true, types via awaited per-character CDP Input.dispatchKeyEvent calls (trusted) \u2014 REPLACES the active selection and reaches canvas editors (Docs/Slides/Sheets). Default false = synthetic insert at the focused editable."
             },
             "mode": {
               "type": "string",
@@ -1878,7 +1878,7 @@
         "reason": null,
         "capability_class": "privileged",
         "portable": false,
-        "summary": "Identity-based element lookup (role + accessible name) with clickable center.",
+        "summary": "Identity-based element lookup with hit-test-attested actionability.",
         "input_schema": {
           "type": "object",
           "properties": {
@@ -2714,7 +2714,7 @@
     },
     {
       "name": "browser.claimed_tabs.activate",
-      "description": "Focus an already-claimed tab and reconnect that tab's actions.json runtime to the bridge. Call browser.claimed_tabs.list first, then pass the selected tab_id. After a successful scheduled activation, refresh the runtime list before issuing page-specific actions.",
+      "description": "Focus an already-claimed tab and reconnect that tab's actions.json runtime to the bridge. Call browser.claimed_tabs.list first, then copy tab_id and runtime_id from the SAME row; on MCP pass runtime_id as target_runtime_id because raw Chrome tab ids are browser-local and can collide. After a successful scheduled activation, refresh the runtime list before issuing page-specific actions.",
       "input_schema": {
         "type": "object",
         "required": [
@@ -2731,7 +2731,7 @@
     },
     {
       "name": "browser.navigate",
-      "description": "Navigate a claimed tab to a URL (or reload it), then reconnect its runtime so it stays drivable after the load. Defaults to the active claimed tab; pass tab_id to target another. Use this to recover a tab that is wedged, stuck on a stale/soft-navigated view, or to move it to a known URL. Refuses chrome/about/file/edge URLs. Verify the result with page.info or a projection afterward.",
+      "description": "Navigate a claimed tab to a URL (or reload it), then reconnect its runtime so it stays drivable after the load. Defaults to the active claimed tab. On MCP, an explicit tab_id MUST be paired with target_runtime_id copied from the same browser.claimed_tabs.list row; tab ids are browser-local and can collide. Refuses chrome/about/file/edge URLs. Verify the result with page.info or a projection afterward.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2771,7 +2771,7 @@
     },
     {
       "name": "browser.close_tab",
-      "description": "Close a claimed tab you are done with (defaults to the active tab; pass tab_id to target another). Use to reap stale/duplicate tabs that cause ambiguous routing. Refuses to close the last remaining claimed tab. Removes the tab's runtime from the bridge.",
+      "description": "Close a claimed tab you are done with (defaults to the active tab). On MCP, an explicit tab_id MUST be paired with target_runtime_id copied from the same browser.claimed_tabs.list row; tab ids are browser-local and can collide. Use to reap stale/duplicate tabs that cause ambiguous routing. Refuses to close the last remaining claimed tab. Removes the tab's runtime from the bridge.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -2785,7 +2785,7 @@
     },
     {
       "name": "browser.dismiss_dialog",
-      "description": "Dismiss a native JavaScript dialog (alert/confirm/prompt/beforeunload) blocking a claimed tab, via the CDP Page domain. A native modal freezes the page main thread so no content-script primitive can clear it; this works below the page event loop and recovers a tab wedged after navigating away from an editor with unsaved changes. Defaults to the active claimed tab and accept=true.",
+      "description": "Dismiss a native JavaScript dialog (alert/confirm/prompt/beforeunload) blocking a claimed tab, via the CDP Page domain. A native modal freezes the page main thread so no content-script primitive can clear it; this works below the page event loop. Defaults to the active claimed tab and accept=true. On MCP, an explicit tab_id MUST be paired with target_runtime_id copied from the same browser.claimed_tabs.list row; tab ids are browser-local and can collide.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -3147,7 +3147,7 @@
     },
     {
       "name": "browser.run_javascript",
-      "description": "Run schema-declared JavaScript in the authorized page with structured arguments and return the script result. Page-specific actions belong in actions.json, not in the runtime.",
+      "description": "Authoring-only compatibility primitive that evaluates schema-declared JavaScript in the authorized page through the extension background debugger transport. It is debugger-class and non-portable; convert discoveries into reviewed actions.json behavior.",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -3173,12 +3173,16 @@
         "direction": "agent_to_html",
         "handler": "actionsJsonOverlay.runJavascript",
         "scope": "active_surface",
+        "capability_class": "debug",
+        "portable": false,
         "source": {
           "files": [
-            "src/content.js"
+            "src/content.js",
+            "src/background.js"
           ],
           "symbols": [
-            "actionsJsonOverlay.runJavascript"
+            "actionsJsonOverlay.runJavascript",
+            "chrome.debugger.sendCommand"
           ],
           "component": "ActionsJsonOverlay"
         },
@@ -3190,12 +3194,19 @@
             },
             "result": {},
             "url": {
-              "type": "string"
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "execution": {
+              "type": "object"
             }
           },
           "required": [
             "ok",
-            "result"
+            "result",
+            "execution"
           ]
         }
       }
@@ -4253,7 +4264,7 @@
     },
     {
       "name": "text.type",
-      "description": "Type a string at the focused element as keystrokes. Synthetic by default; with trusted:true it uses CDP Input.insertText, which overtypes the active selection and works in canvas editors \u2014 the overtype step after a keyboard selection (clipboard.paste does not route to a keyboard-made selection).",
+      "description": "Type a string at the focused element as keystrokes. Synthetic by default; with trusted:true it sends awaited per-character CDP Input.dispatchKeyEvent calls, which overtype the active selection and work in canvas editors \u2014 the overtype step after a keyboard selection (clipboard.paste does not route to a keyboard-made selection).",
       "input_schema": {
         "type": "object",
         "required": [
@@ -4266,7 +4277,7 @@
           },
           "trusted": {
             "type": "boolean",
-            "description": "When true, types via CDP Input.insertText (trusted) \u2014 REPLACES the active selection and reaches canvas editors (Docs/Slides/Sheets). Default false = synthetic insert at the focused editable."
+            "description": "When true, types via awaited per-character CDP Input.dispatchKeyEvent calls (trusted) \u2014 REPLACES the active selection and reaches canvas editors (Docs/Slides/Sheets). Default false = synthetic insert at the focused editable."
           },
           "mode": {
             "type": "string",
@@ -4305,7 +4316,7 @@
     },
     {
       "name": "a11y.query",
-      "description": "Resolve an element by accessibility identity (role and/or accessible name) to its node and clickable center \u2014 the identity-based locator that replaces CSS/geometry targeting.",
+      "description": "Resolve an element by accessibility identity (role and/or accessible name). Returns visible geometry and hit-test actionability; clickable_center is emitted only when receives_events is true, otherwise inspect visible_center and occluded_by.",
       "input_schema": {
         "type": "object",
         "properties": {

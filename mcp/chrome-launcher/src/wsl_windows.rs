@@ -11,6 +11,7 @@
 use crate::backend::{
     BackendFuture, ChromeEndpoint, ClaimResult, LaunchBackend, LauncherError, SessionResult,
 };
+use serde::Serialize;
 use std::time::Duration;
 use tokio::process::Command;
 
@@ -23,6 +24,104 @@ const SCHTASKS_PATH: &str = "/mnt/c/Windows/System32/schtasks.exe";
 const TASKLIST_PATH: &str = "/mnt/c/Windows/System32/tasklist.exe";
 const CHROME_PATH: &str = r"C:\Program Files\Google\Chrome\Application\chrome.exe";
 const DEFAULT_USER_DATA: &str = r"C:\temp\chrome-debug";
+
+#[derive(Serialize)]
+struct ChromeLaunchRequest<'a> {
+    chrome_exe: &'a str,
+    user_data_dir: &'a str,
+}
+
+fn invalid_input(field: &'static str, message: impl Into<String>) -> LauncherError {
+    LauncherError::Cdp {
+        stage: "input_validation",
+        message: format!("{field}: {}", message.into()),
+    }
+}
+
+fn validate_task_literal(field: &'static str, value: &str) -> Result<(), LauncherError> {
+    if value.is_empty() {
+        return Err(invalid_input(field, "must not be empty"));
+    }
+    if value.chars().any(|c| {
+        matches!(
+            c,
+            '\r' | '\n' | '"' | '%' | '!' | '&' | '|' | '<' | '>' | '^'
+        )
+    }) {
+        return Err(invalid_input(
+            field,
+            "contains characters that are unsafe in the trusted task wrapper",
+        ));
+    }
+    Ok(())
+}
+
+fn chrome_launch_request_json(
+    chrome_exe: &str,
+    user_data_dir: &str,
+) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(&ChromeLaunchRequest {
+        chrome_exe,
+        user_data_dir,
+    })
+}
+
+fn chrome_launch_task_action(script_win: &str) -> Result<String, LauncherError> {
+    validate_task_literal("script_win", script_win)?;
+    Ok(format!(
+        r#""C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{script_win}""#
+    ))
+}
+
+fn chrome_launch_script(request_win: &str, script_win: &str) -> String {
+    format!(
+        "$requestPath='{request_win}'; \
+         $scriptPath='{script_win}'; \
+         try {{ \
+             $request=Get-Content -Raw -LiteralPath $requestPath | ConvertFrom-Json; \
+             Remove-Item -Force -LiteralPath $requestPath -ErrorAction SilentlyContinue; \
+             $chromeArgs=@('--remote-debugging-port=9222','--remote-allow-origins=*','--enable-unsafe-extension-debugging',('--user-data-dir='+[string]$request.user_data_dir),'--start-maximized'); \
+             Start-Process -FilePath ([string]$request.chrome_exe) -ArgumentList $chromeArgs; \
+         }} finally {{ \
+             Remove-Item -Force -LiteralPath $scriptPath -ErrorAction SilentlyContinue; \
+         }}"
+    )
+}
+
+async fn write_chrome_launch_files(
+    stamp: &str,
+    user_data_dir: &str,
+) -> Result<(String, String, String, String), LauncherError> {
+    let request_win = format!(r"C:\temp\aj-chrome-launch-request-{stamp}.json");
+    let request_wsl = format!("/mnt/c/temp/aj-chrome-launch-request-{stamp}.json");
+    let script_win = format!(r"C:\temp\aj-chrome-launch-{stamp}.ps1");
+    let script_wsl = format!("/mnt/c/temp/aj-chrome-launch-{stamp}.ps1");
+    tokio::fs::create_dir_all("/mnt/c/temp")
+        .await
+        .map_err(|e| LauncherError::Process {
+            stage: "launch_request_dir",
+            source: e,
+        })?;
+    let request = chrome_launch_request_json(CHROME_PATH, user_data_dir).map_err(|e| {
+        invalid_input(
+            "chrome_launch_request",
+            format!("cannot serialize request: {e}"),
+        )
+    })?;
+    tokio::fs::write(&request_wsl, request)
+        .await
+        .map_err(|e| LauncherError::Process {
+            stage: "launch_request_write",
+            source: e,
+        })?;
+    tokio::fs::write(&script_wsl, chrome_launch_script(&request_win, &script_win))
+        .await
+        .map_err(|e| LauncherError::Process {
+            stage: "launch_script_write",
+            source: e,
+        })?;
+    Ok((request_wsl, script_win, script_wsl, request_win))
+}
 /// The WSL -> Windows backend. Holds the Chrome profile dir it operates on and the Windows path
 /// to the pipe helper binary (`chrome-launcher-helper.exe`).
 pub struct WslWindowsBackend {
@@ -57,9 +156,7 @@ impl WslWindowsBackend {
 
     /// GET /json/version off the debug endpoint. Returns None when Chrome isn't reachable.
     async fn get_endpoint_raw(&self) -> Option<serde_json::Value> {
-        let url = format!(
-            "http://{CHROME_DEBUG_HOST}:{CHROME_DEBUG_PORT}/json/version"
-        );
+        let url = format!("http://{CHROME_DEBUG_HOST}:{CHROME_DEBUG_PORT}/json/version");
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .build()
@@ -72,9 +169,7 @@ impl WslWindowsBackend {
     /// (chrome_launcher.py `_verify_visible_session`.)
     async fn verify_visible_session(&self) -> (bool, String) {
         let out = Command::new(TASKLIST_PATH)
-            .args([
-                "/v", "/fi", "IMAGENAME eq chrome.exe", "/fo", "csv", "/nh",
-            ])
+            .args(["/v", "/fi", "IMAGENAME eq chrome.exe", "/fo", "csv", "/nh"])
             .output()
             .await;
         match out {
@@ -96,29 +191,44 @@ impl WslWindowsBackend {
     /// Launch Chrome via schtasks /IT (visible, interactive session), Start-Process fallback.
     /// (chrome_launcher.py `_launch_chrome`.)
     async fn launch_chrome(&self) -> Result<String, LauncherError> {
-        let chrome_args = format!(
-            "--remote-debugging-port=9222 --remote-allow-origins=* \
-             --enable-unsafe-extension-debugging --user-data-dir={} --start-maximized",
-            self.user_data_dir
-        );
+        let stamp = short_stamp();
+        let (request_wsl, script_win, script_wsl, _request_win) =
+            write_chrome_launch_files(&stamp, &self.user_data_dir).await?;
 
         // Primary: schtasks /IT — runs in the logged-in user's interactive session.
-        let task_name = format!("ChromeLauncher_{}", short_stamp());
-        let chrome_cmd = format!("cmd /c \"\"{CHROME_PATH}\" {chrome_args}\"");
+        let task_name = format!("ChromeLauncher_{stamp}");
+        let chrome_cmd = chrome_launch_task_action(&script_win)?;
         let create = Command::new(SCHTASKS_PATH)
             .args([
-                "/Create", "/TN", &task_name, "/TR", &chrome_cmd, "/SC", "ONCE", "/ST",
-                "23:59", "/F", "/RL", "LIMITED", "/IT",
+                "/Create",
+                "/TN",
+                &task_name,
+                "/TR",
+                &chrome_cmd,
+                "/SC",
+                "ONCE",
+                "/ST",
+                "23:59",
+                "/F",
+                "/RL",
+                "LIMITED",
+                "/IT",
             ])
             .output()
             .await
-            .map_err(|e| LauncherError::Process { stage: "schtasks_create", source: e })?;
+            .map_err(|e| LauncherError::Process {
+                stage: "schtasks_create",
+                source: e,
+            })?;
         if create.status.success() {
             let run = Command::new(SCHTASKS_PATH)
                 .args(["/Run", "/TN", &task_name])
                 .output()
                 .await
-                .map_err(|e| LauncherError::Process { stage: "schtasks_run", source: e })?;
+                .map_err(|e| LauncherError::Process {
+                    stage: "schtasks_run",
+                    source: e,
+                })?;
             // Cleanup the task entry; chrome.exe keeps running independently.
             let _ = Command::new(SCHTASKS_PATH)
                 .args(["/Delete", "/TN", &task_name, "/F"])
@@ -130,20 +240,26 @@ impl WslWindowsBackend {
         }
 
         // Fallback: Start-Process (session 0; only if no interactive desktop is logged in).
-        let ps_script = format!(
-            "Start-Process '{CHROME_PATH}' -ArgumentList \
-             '--remote-debugging-port=9222','--remote-allow-origins=*',\
-             '--user-data-dir={}','--start-maximized'",
-            self.user_data_dir
-        );
         let result = Command::new(POWERSHELL_PATH)
-            .args(["-Command", &ps_script])
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &script_win,
+            ])
             .output()
             .await
-            .map_err(|e| LauncherError::Process { stage: "start_process", source: e })?;
+            .map_err(|e| LauncherError::Process {
+                stage: "start_process",
+                source: e,
+            })?;
         if result.status.success() {
             return Ok("OK (Start-Process — fallback, may be session 0)".into());
         }
+        let _ = tokio::fs::remove_file(&request_wsl).await;
+        let _ = tokio::fs::remove_file(&script_wsl).await;
         Err(LauncherError::Process {
             stage: "launch_all_failed",
             source: std::io::Error::new(std::io::ErrorKind::Other, "all launch paths failed"),
@@ -164,10 +280,14 @@ impl LaunchBackend for WslWindowsBackend {
             // Not running — launch, wait for Task Scheduler, re-query.
             self.launch_chrome().await?;
             tokio::time::sleep(Duration::from_secs(5)).await;
-            let data = self.get_endpoint_raw().await.ok_or_else(|| LauncherError::Timeout {
-                stage: "post_launch_connect",
-                message: "launched Chrome but cannot connect (check 9223->9222 portproxy)".into(),
-            })?;
+            let data = self
+                .get_endpoint_raw()
+                .await
+                .ok_or_else(|| LauncherError::Timeout {
+                    stage: "post_launch_connect",
+                    message: "launched Chrome but cannot connect (check 9223->9222 portproxy)"
+                        .into(),
+                })?;
             let (visible, _session) = self.verify_visible_session().await;
             endpoint_from_raw(&data, visible).ok_or_else(|| LauncherError::Cdp {
                 stage: "endpoint_parse",
@@ -185,7 +305,10 @@ impl LaunchBackend for WslWindowsBackend {
                 ])
                 .output()
                 .await
-                .map_err(|e| LauncherError::Process { stage: "kill", source: e })?;
+                .map_err(|e| LauncherError::Process {
+                    stage: "kill",
+                    source: e,
+                })?;
             tokio::time::sleep(Duration::from_secs(1)).await;
             // Verify it's gone; if still responding, that's a soft warning, not an error.
             if self.get_endpoint_raw().await.is_some() {
@@ -204,9 +327,12 @@ impl LaunchBackend for WslWindowsBackend {
         user_data_dir: &'a str,
     ) -> BackendFuture<'a, SessionResult> {
         Box::pin(async move {
-            let helper = self.helper_win.as_deref().ok_or(LauncherError::MissingDependency(
-                "helper path not set (WslWindowsBackend::with_helper)".into(),
-            ))?;
+            let helper = self
+                .helper_win
+                .as_deref()
+                .ok_or(LauncherError::MissingDependency(
+                    "helper path not set (WslWindowsBackend::with_helper)".into(),
+                ))?;
             crate::session::load_extension(extension_dir, user_data_dir, helper).await
         })
     }
@@ -217,9 +343,12 @@ impl LaunchBackend for WslWindowsBackend {
         user_data_dir: &'a str,
     ) -> BackendFuture<'a, SessionResult> {
         Box::pin(async move {
-            let helper = self.helper_win.as_deref().ok_or(LauncherError::MissingDependency(
-                "helper path not set (WslWindowsBackend::with_helper)".into(),
-            ))?;
+            let helper = self
+                .helper_win
+                .as_deref()
+                .ok_or(LauncherError::MissingDependency(
+                    "helper path not set (WslWindowsBackend::with_helper)".into(),
+                ))?;
             crate::session::start_extension_session(extension_dir, user_data_dir, helper).await
         })
     }
@@ -232,8 +361,7 @@ impl LaunchBackend for WslWindowsBackend {
         bridge_url: &'a str,
     ) -> BackendFuture<'a, ClaimResult> {
         Box::pin(async move {
-            crate::claim::claim_tab(cdp_ws_url, extension_id, target_url_contains, bridge_url)
-                .await
+            crate::claim::claim_tab(cdp_ws_url, extension_id, target_url_contains, bridge_url).await
         })
     }
 }
@@ -244,7 +372,10 @@ pub async fn wslpath_w(posix_path: &str) -> Result<String, LauncherError> {
         .args(["-w", posix_path])
         .output()
         .await
-        .map_err(|e| LauncherError::Process { stage: "wslpath", source: e })?;
+        .map_err(|e| LauncherError::Process {
+            stage: "wslpath",
+            source: e,
+        })?;
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
@@ -307,5 +438,39 @@ mod tests {
     fn short_stamp_is_hex() {
         let s = short_stamp();
         assert!(s.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn chrome_launch_task_action_keeps_profile_path_out_of_command_source() {
+        let hostile_profile = r#"C:\safe\" & echo AJ_WSL_CMD_INJECTION_SENTINEL & rem \""#;
+        let request = chrome_launch_request_json(CHROME_PATH, hostile_profile)
+            .expect("serialize chrome launch request");
+        let decoded: serde_json::Value = serde_json::from_slice(&request).unwrap();
+        assert_eq!(decoded["user_data_dir"], hostile_profile);
+
+        let action = chrome_launch_task_action(r"C:\temp\aj-launch-deadbeef.ps1")
+            .expect("trusted generated script path");
+        assert!(action.contains("powershell.exe"));
+        assert!(action.contains("-File"));
+        assert!(!action.contains(hostile_profile));
+        assert!(!action.contains("AJ_WSL_CMD_INJECTION_SENTINEL"));
+    }
+
+    #[test]
+    fn chrome_launch_task_action_allows_common_windows_path_characters() {
+        let action = chrome_launch_task_action(r"C:\Program Files (x86)\actions.json\launch.ps1")
+            .expect("parentheses are valid in a quoted task action path");
+        assert!(action.contains("Program Files (x86)"));
+    }
+
+    #[test]
+    fn chrome_launch_script_reads_profile_path_from_json_request() {
+        let script = chrome_launch_script(
+            r"C:\temp\aj-launch-request-deadbeef.json",
+            r"C:\temp\aj-launch-deadbeef.ps1",
+        );
+        assert!(script.contains("ConvertFrom-Json"));
+        assert!(script.contains("$request.user_data_dir"));
+        assert!(!script.contains("AJ_WSL_CMD_INJECTION_SENTINEL"));
     }
 }

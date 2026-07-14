@@ -112,6 +112,10 @@ struct AppState {
     // browser.claimed_tabs.activate; defaulted to the first runtime to connect.
     active_runtime_id: Arc<Mutex<Option<String>>>,
     pending: Arc<Mutex<HashMap<String, PendingCall>>>,
+    // Latest content-script phase for direct action calls. A handler can mutate
+    // the page and then wedge; retain this side-channel until the caller-side
+    // deadline so dispatch_timeout identifies the last safe retry boundary.
+    action_progress: Arc<Mutex<HashMap<String, Value>>>,
     // U3: in-flight liveness probes keyed by probe_id. A stale-but-unswept
     // runtime is probed (extension chrome.tabs.get) before dispatch; the
     // extension's runtime_probe_result resolves the matching oneshot here.
@@ -973,6 +977,56 @@ mod tests {
         assert_eq!(item["call_id"].as_str(), Some("call-1"));
         assert_eq!(item["runtime_id"].as_str(), Some("runtime-a"));
         assert_eq!(item["name"].as_str(), Some("storage.list"));
+    }
+
+    #[tokio::test]
+    async fn action_timeout_context_reports_the_last_content_mutation_boundary() {
+        let state = state_from_catalog(
+            ActionCatalog {
+                base_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                map_paths: Vec::new(),
+                manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_action_names: HashSet::new(),
+            },
+            Vec::new(),
+            None,
+        );
+        let (tx, _rx) = oneshot::channel::<Value>();
+        state.pending.lock().await.insert(
+            "call-progress".to_string(),
+            PendingCall {
+                runtime_id: "runtime-a".to_string(),
+                tx,
+            },
+        );
+
+        let accepted = ingest_action_progress(
+            &state,
+            &json!({
+                "type": "action_progress",
+                "call_id": "call-progress",
+                "runtime_id": "runtime-a",
+                "action": "text.type",
+                "last_entered_content_phase": "editable_handlers_settled",
+                "last_completed_content_phase": "synthetic_paste_dispatched",
+                "observed_at": "2026-07-13T00:00:00Z",
+            }),
+        )
+        .await;
+        assert!(accepted);
+
+        let context = take_action_timeout_context(&state, "call-progress", true).await;
+        assert_eq!(
+            context["last_entered_content_phase"].as_str(),
+            Some("editable_handlers_settled")
+        );
+        assert_eq!(
+            context["last_completed_content_phase"].as_str(),
+            Some("synthetic_paste_dispatched")
+        );
+        assert_eq!(context["pending_cleanup"].as_str(), Some("completed"));
+        assert!(state.action_progress.lock().await.is_empty());
     }
 
     #[test]
@@ -2090,6 +2144,65 @@ mod tests {
         assert!(desc.contains("site catalog"));
     }
 
+    #[test]
+    fn schema_validation_aggregates_independent_missing_required_fields() {
+        let tool = json!({
+            "name": "browser.extract_elements",
+            "input_schema": {
+                "type": "object",
+                "required": ["item_selector", "fields"],
+                "properties": {
+                    "item_selector": { "type": "string" },
+                    "fields": { "type": "array" }
+                }
+            }
+        });
+        let error = validate_tool_arguments(&tool, "browser.extract_elements", &json!({}))
+            .expect_err("both missing fields must be reported");
+        let body = (error.1).0;
+        assert_eq!(body["error"]["code"], "invalid_input");
+        assert_eq!(body["error"]["evidence"]["missing_required"], json!([
+            "arguments.item_selector",
+            "arguments.fields"
+        ]));
+        assert_eq!(body["error"]["evidence"]["validation_errors"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn schema_validation_reports_siblings_but_stops_at_wrong_parent_type() {
+        let tool = json!({
+            "name": "example",
+            "input_schema": {
+                "type": "object",
+                "required": ["options"],
+                "properties": {
+                    "options": {
+                        "type": "object",
+                        "required": ["mode", "limit"],
+                        "properties": {
+                            "mode": { "type": "string" },
+                            "limit": { "type": "integer" }
+                        }
+                    },
+                    "query": { "type": "string" }
+                }
+            }
+        });
+        let error = validate_tool_arguments(
+            &tool,
+            "example",
+            &json!({"options": "wrong", "query": 4}),
+        )
+        .expect_err("invalid siblings must be reported");
+        let body = (error.1).0;
+        let errors = body["error"]["evidence"]["validation_errors"].as_array().unwrap();
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0]["keyword"], "type");
+        assert_eq!(errors[0]["path"], "arguments.options");
+        assert_eq!(errors[1]["keyword"], "type");
+        assert_eq!(errors[1]["path"], "arguments.query");
+    }
+
     #[tokio::test]
     async fn select_runtime_falls_back_to_active_tab_when_ambiguous() {
         let state = two_runtime_state();
@@ -2612,7 +2725,7 @@ mod tests {
             target_url_contains: None,
             timeout_ms: default_timeout_ms(),
         };
-        let response = tools_call_inner(State(state), Json(request))
+        let response = tools_call_inner(State(state.clone()), Json(request))
             .await
             .expect("bridge-owned inventory succeeds")
             .0;
@@ -2634,6 +2747,71 @@ mod tests {
                 && row["active"] == false
         }));
         assert!(rows.iter().all(|row| row.get("bridge_url").is_none()));
+
+        let ambiguous_activate = ToolCallRequest {
+            name: "browser.claimed_tabs.activate".into(),
+            arguments: json!({"tab_id": 7}),
+            target_runtime_id: None,
+            target_url_contains: None,
+            timeout_ms: default_timeout_ms(),
+        };
+        let (status, Json(error)) = tools_call_inner(
+            State(state.clone()),
+            Json(ambiguous_activate),
+        )
+        .await
+        .expect_err("colliding browser-local tab id must not route implicitly");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["error"]["code"], "owner_runtime_required");
+        assert_eq!(error["error"]["evidence"]["tab_id"], 7);
+    }
+
+    #[test]
+    fn global_tab_lifecycle_calls_require_the_owner_runtime_for_explicit_tab_ids() {
+        for name in [
+            "browser.claimed_tabs.activate",
+            "browser.navigate",
+            "browser.close_tab",
+            "browser.dismiss_dialog",
+        ] {
+            let ambiguous = ToolCallRequest {
+                name: name.into(),
+                arguments: json!({"tab_id": 7}),
+                target_runtime_id: None,
+                target_url_contains: None,
+                timeout_ms: default_timeout_ms(),
+            };
+            let (status, Json(error)) =
+                validate_owner_qualified_lifecycle_target(&ambiguous).unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(error["error"]["code"], "owner_runtime_required");
+
+            let owner_bound = ToolCallRequest {
+                target_runtime_id: Some("rt-win".into()),
+                ..ambiguous
+            };
+            validate_owner_qualified_lifecycle_target(&owner_bound)
+                .expect("runtime + local tab id is owner-qualified");
+        }
+    }
+
+    #[test]
+    fn active_tab_lifecycle_calls_preserve_extension_local_behavior() {
+        for name in [
+            "browser.navigate",
+            "browser.close_tab",
+            "browser.dismiss_dialog",
+        ] {
+            let active_tab = ToolCallRequest {
+                name: name.into(),
+                arguments: json!({}),
+                target_runtime_id: None,
+                target_url_contains: None,
+                timeout_ms: default_timeout_ms(),
+            };
+            validate_owner_qualified_lifecycle_target(&active_tab)
+                .expect("omitting tab_id keeps active-runtime behavior");
+        }
     }
 
     // ---- U3: probe-at-dispatch — freshness-gated hard guarantee ----
@@ -3064,12 +3242,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_resources_list_ignores_pipeline_proof_packages() {
+        let root = tempdir().unwrap();
+        let site_dir = root.path().join("scopes/private/sites/example.com/page");
+        let proof_dir = site_dir.join("proof/validated-2026-07-14");
+        std::fs::create_dir_all(&proof_dir).unwrap();
+        std::fs::write(
+            site_dir.join("actions.json"),
+            r#"{
+              "protocol": "actions.json",
+              "x_actions": {
+                "files": [{
+                  "id": "example-skill",
+                  "path": "SKILL.md",
+                  "kind": "skill",
+                  "description": "Example skill."
+                }]
+              },
+              "tools": []
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(site_dir.join("SKILL.md"), "# Example skill\n").unwrap();
+        std::fs::copy(site_dir.join("actions.json"), proof_dir.join("actions.json")).unwrap();
+
+        let manifest = json!({ "protocol": "actions.json", "tools": [] });
+        let (catalog_manifest, site_manifest, site_action_names) =
+            build_catalog_manifests(manifest.clone(), &[], Some(root.path()))
+                .await
+                .unwrap();
+        let state = state_from_catalog(
+            ActionCatalog {
+                base_manifest: manifest,
+                map_paths: Vec::new(),
+                manifest: catalog_manifest,
+                site_manifest,
+                site_action_names,
+            },
+            Vec::new(),
+            Some(root.path().to_path_buf()),
+        );
+        let response = mcp_resources_list(&state).await.unwrap();
+        let uris = response["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|resource| resource["uri"].as_str())
+            .collect::<Vec<_>>();
+
+        assert!(uris.contains(
+            &"actions-json://storage/file/scopes/private/sites/example.com/page/SKILL.md"
+        ));
+        assert!(!uris.iter().any(|uri| uri.contains("/proof/")));
+    }
+
+    #[tokio::test]
     async fn storage_site_actions_inherit_host_target_from_path() {
         let root = tempdir().unwrap();
         let trello_dir = root.path().join("scopes/private/sites/trello.com/board");
-        let example_dir = root.path().join("scopes/private/sites/example.org/home");
+        let graphify_dir = root.path().join("scopes/private/sites/graphifymd.com/home");
         std::fs::create_dir_all(&trello_dir).unwrap();
-        std::fs::create_dir_all(&example_dir).unwrap();
+        std::fs::create_dir_all(&graphify_dir).unwrap();
         std::fs::write(
             trello_dir.join("actions.json"),
             r#"{
@@ -3084,14 +3317,14 @@ mod tests {
         )
         .unwrap();
         std::fs::write(
-            example_dir.join("actions.json"),
+            graphify_dir.join("actions.json"),
             r#"{
               "protocol": "actions.json",
               "tools": [{
-                "name": "exampleorg.site.map",
-                "description": "Example site action without explicit binding.",
+                "name": "graphifymd.site.map",
+                "description": "Graphify site action without explicit binding.",
                 "input_schema": { "type": "object" },
-                "x_actions": { "static_output": { "ok": true, "site": "example" } }
+                "x_actions": { "static_output": { "ok": true, "site": "graphify" } }
               }]
             }"#,
         )
@@ -3114,7 +3347,32 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(names.contains(&"trello.site.map"));
-        assert!(!names.contains(&"exampleorg.site.map"));
+        assert!(!names.contains(&"graphifymd.site.map"));
+    }
+
+    #[tokio::test]
+    async fn storage_map_discovery_ignores_pipeline_proof_packages() {
+        let root = tempdir().unwrap();
+        let site_dir = root.path().join("scopes/private/sites/example.com/page");
+        let proof_dir = site_dir.join("proof/validated-2026-07-14");
+        std::fs::create_dir_all(&proof_dir).unwrap();
+        std::fs::write(
+            site_dir.join("actions.json"),
+            r#"{
+              "protocol": "actions.json",
+              "tools": [{
+                "name": "example.site.map",
+                "input_schema": { "type": "object" },
+                "x_actions": { "static_output": { "ok": true } }
+              }]
+            }"#,
+        )
+        .unwrap();
+        std::fs::copy(site_dir.join("actions.json"), proof_dir.join("actions.json")).unwrap();
+
+        let maps = discover_storage_action_maps(root.path()).await.unwrap();
+
+        assert_eq!(maps, vec![site_dir.join("actions.json")]);
     }
 
     #[tokio::test]
@@ -4306,6 +4564,7 @@ async fn discover_storage_action_maps(storage_root: &Path) -> Result<Vec<PathBuf
             if file_type.is_file()
                 && path.file_name() == Some(OsStr::new("actions.json"))
                 && path_has_sites_component(&path)
+                && !path_has_proof_component(&path)
             {
                 maps.push(path);
             }
@@ -4321,6 +4580,15 @@ fn path_has_sites_component(path: &Path) -> bool {
         matches!(
             component,
             Component::Normal(name) if name == OsStr::new("sites")
+        )
+    })
+}
+
+fn path_has_proof_component(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            Component::Normal(name) if name == OsStr::new("proof")
         )
     })
 }
@@ -4442,6 +4710,7 @@ fn state_from_catalog(
         )),
         runtimes: Arc::new(Mutex::new(seeded_runtimes)),
         pending: Arc::new(Mutex::new(HashMap::new())),
+        action_progress: Arc::new(Mutex::new(HashMap::new())),
         pending_probes: Arc::new(Mutex::new(HashMap::new())),
         last_replay_summary: Arc::new(Mutex::new(None)),
         last_credential_hydration: Arc::new(Mutex::new(None)),
@@ -5137,6 +5406,7 @@ async fn tools_call_inner(
     if request.name == "browser.active_tab.set" {
         return browser_active_tab_set_call(state, request).await;
     }
+    validate_owner_qualified_lifecycle_target(&request)?;
     if request.name == "runtime.agent.await_event" {
         return runtime_agent_await_event_call(state, request).await;
     }
@@ -5225,6 +5495,35 @@ async fn tools_call_inner(
     dispatch_resolved_tool_call(&state, resolved).await
 }
 
+fn validate_owner_qualified_lifecycle_target(
+    request: &ToolCallRequest,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let owner_bound_tool = matches!(
+        request.name.as_str(),
+        "browser.claimed_tabs.activate"
+            | "browser.navigate"
+            | "browser.close_tab"
+            | "browser.dismiss_dialog"
+    );
+    let explicit_tab_id = request.arguments.get("tab_id").and_then(Value::as_i64);
+    if owner_bound_tool && explicit_tab_id.is_some() && request.target_runtime_id.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "owner_runtime_required",
+                "A browser-local tab_id is not globally unique. Pass the owning runtime_id from browser.claimed_tabs.list as target_runtime_id.",
+                json!({
+                    "tool": request.name,
+                    "tab_id": explicit_tab_id,
+                    "required": "target_runtime_id",
+                    "next_step": "Call browser.claimed_tabs.list and copy runtime_id and tab_id from the same row."
+                }),
+            ),
+        ));
+    }
+    Ok(())
+}
+
 async fn dispatch_resolved_tool_call(
     state: &AppState,
     resolved: ResolvedToolCall,
@@ -5263,6 +5562,7 @@ async fn dispatch_resolved_tool_call(
 
     if runtime.tx.send(Message::Text(item.to_string())).is_err() {
         state.pending.lock().await.remove(&call_id);
+        state.action_progress.lock().await.remove(&call_id);
         return Err((
             StatusCode::CONFLICT,
             Json(json!({
@@ -5272,38 +5572,33 @@ async fn dispatch_resolved_tool_call(
         ));
     }
 
-    let result = tokio::time::timeout(Duration::from_millis(resolved.timeout_ms), response_rx)
-        .await
-        .map_err(|_| {
-            let call_id_for_cleanup = call_id.clone();
-            let state_for_cleanup = state.clone();
-            tokio::spawn(async move {
-                let removed = state_for_cleanup
-                    .pending
-                    .lock()
-                    .await
-                    .remove(&call_id_for_cleanup)
-                    .is_some();
-                eprintln!(
-                    "actions-json-mcp pending timeout name=action_call call_id={} removed_pending={}",
-                    call_id_for_cleanup, removed
-                );
-            });
-            (
-                StatusCode::GATEWAY_TIMEOUT,
-                route_error(
-                    "dispatch_timeout",
-                    "The action was dispatched to the tab but no response arrived in time.",
-                    json!({ "call_id": call_id, "pending_cleanup": "scheduled" }),
-                ),
-            )
-        })?
-        .map_err(|_| {
+    let result = match tokio::time::timeout(Duration::from_millis(resolved.timeout_ms), response_rx).await {
+        Ok(result) => result.map_err(|_| {
             (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({ "error": "extension runtime dropped response", "call_id": call_id })),
             )
-        })?;
+        })?,
+        Err(_) => {
+            let removed = state.pending.lock().await.remove(&call_id).is_some();
+            let timeout_context = take_action_timeout_context(state, &call_id, removed).await;
+            eprintln!(
+                "actions-json-mcp pending timeout name=action_call call_id={} removed_pending={} context={}",
+                call_id,
+                removed,
+                timeout_context
+            );
+            return Err((
+                StatusCode::GATEWAY_TIMEOUT,
+                route_error(
+                    "dispatch_timeout",
+                    "The action was dispatched to the tab but no response arrived in time.",
+                    timeout_context,
+                ),
+            ));
+        }
+    };
+    state.action_progress.lock().await.remove(&call_id);
 
     let is_error = result.get("type").and_then(Value::as_str) == Some("action_error");
     Ok(Json(ToolCallResponse {
@@ -5313,6 +5608,17 @@ async fn dispatch_resolved_tool_call(
         output: result.get("output").cloned(),
         error: result.get("error").cloned(),
     }))
+}
+
+async fn take_action_timeout_context(state: &AppState, call_id: &str, removed: bool) -> Value {
+    let progress = state.action_progress.lock().await.remove(call_id);
+    json!({
+        "call_id": call_id,
+        "pending_cleanup": if removed { "completed" } else { "already_absent" },
+        "last_entered_content_phase": progress.as_ref().and_then(|value| value.get("last_entered_content_phase")).cloned(),
+        "last_completed_content_phase": progress.as_ref().and_then(|value| value.get("last_completed_content_phase")).cloned(),
+        "content_progress": progress,
+    })
 }
 
 fn resolve_tool_call(
@@ -7179,12 +7485,28 @@ fn validate_tool_arguments(
     arguments: &Value,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     let schema = tool.get("input_schema").unwrap_or(&Value::Null);
-    validate_value_against_schema(arguments, schema, "").map_err(|message| {
-        (
-            StatusCode::BAD_REQUEST,
-            structured_error("invalid_input", message, json!({ "tool": tool_name })),
-        )
-    })
+    let errors = validate_value_against_schema(arguments, schema, "");
+    if errors.is_empty() {
+        return Ok(());
+    }
+    let messages = errors.iter().map(|error| error.message.as_str()).collect::<Vec<_>>();
+    let missing_required = errors
+        .iter()
+        .filter(|error| error.keyword == "required")
+        .map(|error| error.path.clone())
+        .collect::<Vec<_>>();
+    Err((
+        StatusCode::BAD_REQUEST,
+        structured_error(
+            "invalid_input",
+            messages.join("; "),
+            json!({
+                "tool": tool_name,
+                "validation_errors": errors,
+                "missing_required": missing_required,
+            }),
+        ),
+    ))
 }
 
 // Routing fields are meta-arguments: an MCP client can only carry them inside
@@ -7306,29 +7628,43 @@ fn validate_policy_exception_report(
     Ok(())
 }
 
-fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> Result<(), String> {
+#[derive(Debug, Serialize)]
+struct ValidationError {
+    path: String,
+    keyword: String,
+    message: String,
+}
+
+fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> Vec<ValidationError> {
     let Some(schema_object) = schema.as_object() else {
-        return Ok(());
+        return Vec::new();
     };
+    let mut errors = Vec::new();
     if let Some(schema_type) = schema_object.get("type").and_then(Value::as_str) {
-        validate_json_type(value, schema_type, path)?;
+        if let Err(message) = validate_json_type(value, schema_type, path) {
+            errors.push(ValidationError {
+                path: if path.is_empty() { "arguments".to_string() } else { path.to_string() },
+                keyword: "type".to_string(),
+                message,
+            });
+            return errors;
+        }
     }
 
     if schema_object.get("type").and_then(Value::as_str) == Some("object") {
         let Some(object) = value.as_object() else {
-            return Err(format!(
-                "{} must be an object",
-                if path.is_empty() { "arguments" } else { path }
-            ));
+            return errors;
         };
 
         if let Some(required) = schema_object.get("required").and_then(Value::as_array) {
             for required_key in required.iter().filter_map(Value::as_str) {
                 if !object.contains_key(required_key) {
-                    return Err(format!(
-                        "{} is required",
-                        schema_path_join(path, required_key)
-                    ));
+                    let required_path = schema_path_join(path, required_key);
+                    errors.push(ValidationError {
+                        path: required_path.clone(),
+                        keyword: "required".to_string(),
+                        message: format!("{required_path} is required"),
+                    });
                 }
             }
         }
@@ -7344,10 +7680,12 @@ fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> R
                     .map(|properties| !properties.contains_key(key))
                     .unwrap_or(true)
                 {
-                    return Err(format!(
-                        "{} is not declared in input_schema",
-                        schema_path_join(path, key)
-                    ));
+                    let property_path = schema_path_join(path, key);
+                    errors.push(ValidationError {
+                        path: property_path.clone(),
+                        keyword: "additionalProperties".to_string(),
+                        message: format!("{property_path} is not declared in input_schema"),
+                    });
                 }
             }
         }
@@ -7355,11 +7693,11 @@ fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> R
         if let Some(properties) = properties {
             for (key, property_schema) in properties {
                 if let Some(child) = object.get(key) {
-                    validate_value_against_schema(
+                    errors.extend(validate_value_against_schema(
                         child,
                         property_schema,
                         &schema_path_join(path, key),
-                    )?;
+                    ));
                 }
             }
         }
@@ -7368,7 +7706,7 @@ fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> R
     if schema_object.get("type").and_then(Value::as_str) == Some("array") {
         if let (Some(items), Some(values)) = (schema_object.get("items"), value.as_array()) {
             for (index, item) in values.iter().enumerate() {
-                validate_value_against_schema(
+                errors.extend(validate_value_against_schema(
                     item,
                     items,
                     &format!(
@@ -7376,12 +7714,12 @@ fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> R
                         if path.is_empty() { "arguments" } else { path },
                         index
                     ),
-                )?;
+                ));
             }
         }
     }
 
-    Ok(())
+    errors
 }
 
 fn validate_json_type(value: &Value, schema_type: &str, path: &str) -> Result<(), String> {
@@ -7727,6 +8065,38 @@ async fn extension_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> im
     ws.on_upgrade(move |socket| handle_extension_socket(socket, state))
 }
 
+async fn ingest_action_progress(state: &AppState, item: &Value) -> bool {
+    let call_id = item.get("call_id").and_then(Value::as_str);
+    let runtime_id = item.get("runtime_id").and_then(Value::as_str);
+    let (Some(call_id), Some(runtime_id)) = (call_id, runtime_id) else {
+        return false;
+    };
+    let pending_runtime_id = state
+        .pending
+        .lock()
+        .await
+        .get(call_id)
+        .map(|pending| pending.runtime_id.clone());
+    if pending_runtime_id.as_deref() != Some(runtime_id) {
+        return false;
+    }
+    state.action_progress.lock().await.insert(
+        call_id.to_string(),
+        json!({
+            "runtime_id": runtime_id,
+            "action": item.get("action").and_then(Value::as_str),
+            "last_entered_content_phase": item.get("last_entered_content_phase").and_then(Value::as_str),
+            "last_completed_content_phase": item.get("last_completed_content_phase").and_then(Value::as_str),
+            "observed_at": item.get("observed_at").and_then(Value::as_str),
+            "received_at_ms": now_ms(),
+        }),
+    );
+    if let Some(runtime) = state.runtimes.lock().await.get_mut(runtime_id) {
+        runtime.last_seen_ms = now_ms();
+    }
+    true
+}
+
 async fn handle_extension_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
@@ -7898,6 +8268,9 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
                     "provider": item.get("provider").and_then(Value::as_str).unwrap_or("openai"),
                     "redacted": item.get("redacted").and_then(Value::as_str)
                 }));
+            }
+            Some("action_progress") => {
+                ingest_action_progress(&state, &item).await;
             }
             Some("action_call_output") | Some("action_error") => {
                 if let Some(call_id) = item.get("call_id").and_then(Value::as_str) {

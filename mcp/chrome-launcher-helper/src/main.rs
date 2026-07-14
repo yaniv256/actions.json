@@ -8,7 +8,9 @@
 //! the manifest name, then runs a WebSocket relay on `127.0.0.1:9222` — clients' CDP frames go
 //! INTO the pipe; the pipe's events/responses fan OUT to clients.
 //!
-//! Usage: `chrome-launcher-helper <chromeExe> <userDataDir> <extPath> [wsPort]`
+//! Preferred usage: `chrome-launcher-helper --request-file <launch-request.json>`.
+//! Legacy positional arguments remain accepted for direct compatibility, but the launcher uses
+//! the request-file boundary so caller-controlled paths are never parsed by `cmd.exe`.
 //! Emits one JSON line when ready: `{"ok":true,"id","name","version","wsPort"}` then stays alive
 //! relaying until Chrome exits or it is killed. On failure: `{"ok":false,"error",...}`.
 //!
@@ -21,6 +23,89 @@ mod identity;
 
 pub use frame::{split_nul_frames, FrameBuffer, SETUP_BASE};
 pub use identity::{read_manifest_identity, EXPECTED_NAME};
+
+#[derive(Debug, serde::Deserialize)]
+struct LaunchRequest {
+    chrome_exe: String,
+    user_data_dir: String,
+    extension_path: String,
+    #[serde(default = "default_ws_port")]
+    ws_port: u16,
+}
+
+fn default_ws_port() -> u16 {
+    9222
+}
+
+fn chrome_argv(chrome_exe: &str, user_data_dir: &str) -> Vec<String> {
+    vec![
+        chrome_exe.to_string(),
+        "--remote-debugging-pipe".to_string(),
+        "--enable-unsafe-extension-debugging".to_string(),
+        format!("--user-data-dir={user_data_dir}"),
+        "--no-first-run".to_string(),
+        "--no-default-browser-check".to_string(),
+        "about:blank".to_string(),
+    ]
+}
+
+fn quote_windows_arg(value: &str) -> String {
+    let mut out = String::from("\"");
+    let mut backslashes = 0;
+    for ch in value.chars() {
+        if ch == '\\' {
+            backslashes += 1;
+            continue;
+        }
+        if ch == '"' {
+            out.extend(std::iter::repeat('\\').take(backslashes * 2 + 1));
+            out.push('"');
+        } else {
+            out.extend(std::iter::repeat('\\').take(backslashes));
+            out.push(ch);
+        }
+        backslashes = 0;
+    }
+    out.extend(std::iter::repeat('\\').take(backslashes * 2));
+    out.push('"');
+    out
+}
+
+fn windows_command_line(argv: &[String]) -> String {
+    argv.iter()
+        .map(|arg| quote_windows_arg(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_launch_request(args: &[String]) -> Result<LaunchRequest, Box<dyn std::error::Error>> {
+    if args.first().map(String::as_str) == Some("--request-file") {
+        if args.len() != 2 {
+            return Err("usage: --request-file <launch-request.json>".into());
+        }
+        let text = std::fs::read_to_string(&args[1])?;
+        let request: LaunchRequest = serde_json::from_str(&text)?;
+        if request.chrome_exe.is_empty()
+            || request.user_data_dir.is_empty()
+            || request.extension_path.is_empty()
+        {
+            return Err("launch request paths must not be empty".into());
+        }
+        return Ok(request);
+    }
+
+    let chrome_exe = args
+        .first()
+        .ok_or("usage: <chromeExe> <userDataDir> <extPath> [wsPort]")?;
+    let user_data_dir = args.get(1).ok_or("missing userDataDir")?;
+    let extension_path = args.get(2).ok_or("missing extPath")?;
+    Ok(LaunchRequest {
+        chrome_exe: chrome_exe.clone(),
+        user_data_dir: user_data_dir.clone(),
+        extension_path: extension_path.clone(),
+        ws_port: args.get(3).and_then(|s| s.parse().ok()).unwrap_or(9222),
+    })
+}
 
 fn main() {
     #[cfg(windows)]
@@ -43,6 +128,116 @@ fn main() {
     }
 }
 
+#[cfg(test)]
+mod launch_request_tests {
+    use super::*;
+
+    #[test]
+    fn request_file_preserves_shell_metacharacters_as_plain_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("request.json");
+        let hostile_profile = r#"C:\safe\" & echo AJ_CMD_INJECTION_SENTINEL & rem \""#;
+        let hostile_extension = "C:\\safe'; Write-Output AJ_PS_INJECTION_SENTINEL; #";
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "chrome_exe": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                "user_data_dir": hostile_profile,
+                "extension_path": hostile_extension,
+                "ws_port": 9222
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let args = vec![
+            "--request-file".to_string(),
+            path.to_string_lossy().to_string(),
+        ];
+        let request = parse_launch_request(&args).expect("parse request file");
+        assert_eq!(request.user_data_dir, hostile_profile);
+        assert_eq!(request.extension_path, hostile_extension);
+        assert_eq!(request.ws_port, 9222);
+    }
+
+    #[test]
+    fn request_file_flag_requires_exactly_one_path() {
+        assert!(parse_launch_request(&["--request-file".into()]).is_err());
+        assert!(parse_launch_request(&[
+            "--request-file".into(),
+            "one.json".into(),
+            "unexpected".into(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn windows_command_line_quotes_profile_as_one_argument() {
+        let hostile_profile = r#"C:\safe\" --load-extension=C:\evil"#;
+        let argv = chrome_argv(
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            hostile_profile,
+        );
+        let cmdline = windows_command_line(&argv);
+        assert!(cmdline.contains(r#"C:\safe\\\" --load-extension=C:\evil"#));
+
+        let parsed = parse_windows_command_line_for_test(&cmdline);
+        assert_eq!(parsed, argv);
+        assert_eq!(
+            parsed
+                .iter()
+                .filter(|arg| arg.starts_with("--load-extension="))
+                .count(),
+            0
+        );
+    }
+
+    fn parse_windows_command_line_for_test(command_line: &str) -> Vec<String> {
+        let mut args = Vec::new();
+        let mut current = String::new();
+        let mut in_quotes = false;
+        let mut chars = command_line.chars().peekable();
+
+        while chars.peek().is_some() {
+            while matches!(chars.peek(), Some(c) if c.is_whitespace() && !in_quotes) {
+                chars.next();
+            }
+            if chars.peek().is_none() {
+                break;
+            }
+
+            current.clear();
+            let mut backslashes = 0;
+            while let Some(ch) = chars.next() {
+                if ch == '\\' {
+                    backslashes += 1;
+                    continue;
+                }
+                if ch == '"' {
+                    current.extend(std::iter::repeat('\\').take(backslashes / 2));
+                    if backslashes % 2 == 0 {
+                        in_quotes = !in_quotes;
+                    } else {
+                        current.push('"');
+                    }
+                    backslashes = 0;
+                    continue;
+                }
+                current.extend(std::iter::repeat('\\').take(backslashes));
+                backslashes = 0;
+                if ch.is_whitespace() && !in_quotes {
+                    break;
+                }
+                current.push(ch);
+            }
+            current.extend(std::iter::repeat('\\').take(backslashes));
+            args.push(current.clone());
+        }
+
+        args
+    }
+}
+
 #[cfg(windows)]
 mod windows_run {
     //! The Windows-only pipe-owner + relay. Ported 1:1 from pipe_session.mjs; compiled only for
@@ -60,7 +255,10 @@ mod windows_run {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async {
             if let Err(e) = run().await {
-                println!("{}", serde_json::json!({ "ok": false, "error": e.to_string() }));
+                println!(
+                    "{}",
+                    serde_json::json!({ "ok": false, "error": e.to_string() })
+                );
                 std::process::exit(1);
             }
         });
@@ -70,7 +268,11 @@ mod windows_run {
     /// LISTENING PID via netstat and taskkill it. Best-effort — errors are non-fatal (the
     /// subsequent bind reports a clear error if the port is still taken).
     async fn free_tcp_port(port: u16) {
-        let out = match tokio::process::Command::new("netstat").args(["-ano"]).output().await {
+        let out = match tokio::process::Command::new("netstat")
+            .args(["-ano"])
+            .output()
+            .await
+        {
             Ok(o) => o,
             Err(_) => return,
         };
@@ -92,10 +294,11 @@ mod windows_run {
 
     async fn run() -> Result<(), Box<dyn std::error::Error>> {
         let args: Vec<String> = std::env::args().skip(1).collect();
-        let chrome_exe = args.first().ok_or("usage: <chromeExe> <userDataDir> <extPath> [wsPort]")?;
-        let user_data_dir = args.get(1).ok_or("missing userDataDir")?;
-        let ext_path = args.get(2).ok_or("missing extPath")?;
-        let ws_port: u16 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(9222);
+        let request = crate::parse_launch_request(&args)?;
+        let chrome_exe = &request.chrome_exe;
+        let user_data_dir = &request.user_data_dir;
+        let ext_path = &request.extension_path;
+        let ws_port = request.ws_port;
 
         // 1) Spawn a headed pipe-Chrome. The pipe handles are wired to fds 3 (write) / 4 (read)
         //    on the child; we own the other ends. windows_spawn returns those owned ends.
@@ -104,7 +307,8 @@ mod windows_run {
 
         // 2) NUL-framed pipe reader: setup responses (id >= SETUP_BASE) resolve our pending
         //    calls; everything else fans out to WS clients.
-        let clients: Arc<Mutex<Vec<mpsc::UnboundedSender<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let clients: Arc<Mutex<Vec<mpsc::UnboundedSender<String>>>> =
+            Arc::new(Mutex::new(Vec::new()));
         let pending: Arc<Mutex<HashMap<i64, tokio::sync::oneshot::Sender<serde_json::Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
@@ -157,7 +361,9 @@ mod windows_run {
         let ext_id = load["result"]["id"].as_str().unwrap_or("").to_string();
         let (name, version) = read_manifest_identity(ext_path);
         if name.as_deref() != Some(EXPECTED_NAME) {
-            return Err(format!("manifest name mismatch: expected {EXPECTED_NAME:?} got {name:?}").into());
+            return Err(
+                format!("manifest name mismatch: expected {EXPECTED_NAME:?} got {name:?}").into(),
+            );
         }
 
         // 4) WS relay on 127.0.0.1:wsPort. Client frames -> pipe; pipe frames -> clients (above).
@@ -284,8 +490,12 @@ mod windows_run {
             fn drop(&mut self) {
                 use windows_sys::Win32::Foundation::CloseHandle;
                 unsafe {
-                    if !self.process.is_null() { CloseHandle(self.process); }
-                    if !self.thread.is_null() { CloseHandle(self.thread); }
+                    if !self.process.is_null() {
+                        CloseHandle(self.process);
+                    }
+                    if !self.thread.is_null() {
+                        CloseHandle(self.thread);
+                    }
                 }
             }
         }
@@ -341,13 +551,16 @@ mod windows_run {
             use std::os::windows::ffi::OsStrExt;
             use windows_sys::Win32::Foundation::{HANDLE, TRUE};
             use windows_sys::Win32::System::Threading::{
-                CreateProcessW, InitializeProcThreadAttributeList, UpdateProcThreadAttribute,
-                DeleteProcThreadAttributeList, PROCESS_INFORMATION, STARTUPINFOEXW,
-                EXTENDED_STARTUPINFO_PRESENT, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+                UpdateProcThreadAttribute, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW,
             };
 
             fn to_wide(s: &str) -> Vec<u16> {
-                OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+                OsStr::new(s)
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect()
             }
 
             /// Build the CRT lpReserved2 inherited-fd block mapping fds 0..=4 for the child.
@@ -392,11 +605,8 @@ mod windows_run {
                     )
                 };
 
-                // Command line: "chrome.exe" --remote-debugging-pipe ... about:blank
-                let cmdline = format!(
-                    "\"{chrome_exe}\" --remote-debugging-pipe --enable-unsafe-extension-debugging \
-                     --user-data-dir=\"{user_data_dir}\" --no-first-run --no-default-browser-check about:blank"
-                );
+                let argv = crate::chrome_argv(chrome_exe, user_data_dir);
+                let cmdline = crate::windows_command_line(&argv);
                 let mut cmdline_w = to_wide(&cmdline);
 
                 // Inherit exactly the two pipe handles via PROC_THREAD_ATTRIBUTE_HANDLE_LIST.
@@ -409,7 +619,11 @@ mod windows_run {
                 let attr_list = attr_buf.as_mut_ptr() as *mut _;
                 unsafe {
                     if InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_size) == 0 {
-                        return Err(format!("InitializeProcThreadAttributeList: {}", std::io::Error::last_os_error()).into());
+                        return Err(format!(
+                            "InitializeProcThreadAttributeList: {}",
+                            std::io::Error::last_os_error()
+                        )
+                        .into());
                     }
                     if UpdateProcThreadAttribute(
                         attr_list,
@@ -419,8 +633,13 @@ mod windows_run {
                         std::mem::size_of_val(&inherit_handles),
                         std::ptr::null_mut(),
                         std::ptr::null_mut(),
-                    ) == 0 {
-                        return Err(format!("UpdateProcThreadAttribute: {}", std::io::Error::last_os_error()).into());
+                    ) == 0
+                    {
+                        return Err(format!(
+                            "UpdateProcThreadAttribute: {}",
+                            std::io::Error::last_os_error()
+                        )
+                        .into());
                     }
                 }
 
@@ -454,11 +673,18 @@ mod windows_run {
                         &mut pi,
                     )
                 };
-                unsafe { DeleteProcThreadAttributeList(attr_list); }
-                if ok == 0 {
-                    return Err(format!("CreateProcessW: {}", std::io::Error::last_os_error()).into());
+                unsafe {
+                    DeleteProcThreadAttributeList(attr_list);
                 }
-                Ok(RawChild { process: pi.hProcess, thread: pi.hThread })
+                if ok == 0 {
+                    return Err(
+                        format!("CreateProcessW: {}", std::io::Error::last_os_error()).into(),
+                    );
+                }
+                Ok(RawChild {
+                    process: pi.hProcess,
+                    thread: pi.hThread,
+                })
             }
         }
     }

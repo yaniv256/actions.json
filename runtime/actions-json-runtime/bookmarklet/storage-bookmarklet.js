@@ -1547,18 +1547,46 @@
     return primitiveSuccess("pointer.double_click", { double_clicked: true, x, y });
   }
 
+  function pointFromViewportPointOrLocator(value, role) {
+    if (!value || typeof value !== "object") {
+      return { error: primitiveError("pointer.drag", "target_not_found", `No ${role} point or locator was provided.`, { [role]: value || null }) };
+    }
+    if (("x" in value || "y" in value) && (value.x == null || value.y == null)) {
+      return { error: primitiveError("pointer.drag", "missing_coordinates", `The ${role} point is missing x or y.`, { [role]: value }) };
+    }
+    const x = Number(value.x);
+    const y = Number(value.y);
+    if (Number.isFinite(x) && Number.isFinite(y)) {
+      const viewportError = validateViewportPoint("pointer.drag", x, y, value);
+      if (viewportError) return { error: viewportError };
+      return { point: { x, y }, element: document.elementFromPoint(x, y), geometry: { source: "coordinates", input: value, point: { x, y } } };
+    }
+    const locator = value.locator && typeof value.locator === "object" ? value.locator : value;
+    const element = resolveSingleVisibleLocator(locator);
+    if (!element) return { error: primitiveError("pointer.drag", "target_not_found", `No visible element matched the ${role} locator.`, { [role]: locator }) };
+    const geometry = visibilityGeometryFor(element);
+    if (!geometry.clickable || !geometry.receives_events || !geometry.action_point) {
+      return { error: primitiveError("pointer.drag", "target_not_actionable", `The ${role} locator resolved, but its visible point does not receive pointer events.`, { [role]: locator, actionability: geometry }) };
+    }
+    return {
+      point: geometry.action_point,
+      element,
+      geometry: { source: "locator", locator, tag_name: element.tagName.toLowerCase(), text: normalizeText(element.textContent), bounding_box: rectDiagnostic(element), point: geometry.action_point, actionability: { clickable: geometry.clickable, receives_events: geometry.receives_events, fully_visible: geometry.fully_visible, occluded_by: geometry.occluded_by } },
+    };
+  }
+
   function pointerDrag(args = {}) {
     const from = args.from || {};
     const to = args.to || {};
-    const startX = Number(from.x);
-    const startY = Number(from.y);
-    const endX = Number(to.x);
-    const endY = Number(to.y);
-    const startError = validateViewportPoint("pointer.drag", startX, startY, from);
-    if (startError) return startError;
-    const endError = validateViewportPoint("pointer.drag", endX, endY, to);
-    if (endError) return endError;
-    const target = document.elementFromPoint(startX, startY);
+    const start = pointFromViewportPointOrLocator(from, "from");
+    if (start.error) return start.error;
+    const end = pointFromViewportPointOrLocator(to, "to");
+    if (end.error) return end.error;
+    const startX = start.point.x;
+    const startY = start.point.y;
+    const endX = end.point.x;
+    const endY = end.point.y;
+    const target = start.element || document.elementFromPoint(startX, startY);
     if (!target) {
       return primitiveError("pointer.drag", "target_not_found", "No element exists at the requested drag start point.", { from, to });
     }
@@ -1575,7 +1603,7 @@
       dispatchPointerEvent(target, "pointerup", { x: endX, y: endY, buttons: 0 });
       dispatchPointerEvent(target, "mouseup", { x: endX, y: endY, buttons: 0, eventCtor: MouseEvent });
     }
-    return primitiveSuccess("pointer.drag", { dragged: true, from: { x: startX, y: startY }, to: { x: endX, y: endY } });
+    return primitiveSuccess("pointer.drag", { dragged: true, from: { x: startX, y: startY }, to: { x: endX, y: endY }, diagnostics: { from: start.geometry, to: end.geometry } });
   }
 
   function validateViewportPoint(primitive, x, y, evidence) {
@@ -1779,6 +1807,15 @@
         rendered: true,
         user_consented: true,
         tab_id: requestId,
+        surface_identity: {
+          kind: "user_selected_display_surface",
+          value: trackSettings.displaySurface || "browser",
+          method: "getDisplayMedia user selection",
+        },
+        freshness: {
+          status: "unverified",
+        },
+        evidence_policy: "positive_only",
       };
       openTab({
         id: `${requestId}-result`,
@@ -1967,7 +2004,13 @@
       .slice(0, Math.max(1, Math.min(Number(args.max_matches ?? args.maxMatches ?? 50), 200)))
       .map((element) => {
         const rect = element.getBoundingClientRect();
-        return {
+        const geometry = visibilityGeometryFor(element);
+        const visibleRect = geometry.visible_rect || rect;
+        const visibleCenter = {
+          x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
+          y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2,
+        };
+        const result = {
           tag_name: element.tagName.toLowerCase(),
           text: normalizeText(element.textContent || element.getAttribute("aria-label")),
           bounding_box: {
@@ -1980,7 +2023,17 @@
             right: rect.right,
             bottom: rect.bottom,
           },
+          visible_center: visibleCenter,
+          clickable: geometry.clickable,
+          receives_events: geometry.receives_events,
+          occluded_by: geometry.occluded_by || null,
+          visible_rect: geometry.visible_rect || visibleRect,
+          visibility: publicVisibility(geometry),
         };
+        if (geometry.clickable && geometry.receives_events !== false) {
+          result.clickable_center = visibleCenter;
+        }
+        return result;
       });
     return primitiveSuccess("dom.observe.visible", { matches, match_count: matches.length });
   }
@@ -2110,7 +2163,10 @@
   function waitForEditableHandlers() {
     return new Promise((resolve) => {
       if (typeof requestAnimationFrame === "function") {
-        requestAnimationFrame(() => resolve());
+        Promise.race([
+          new Promise((done) => requestAnimationFrame(done)),
+          new Promise((done) => setTimeout(done, 50))
+        ]).then(resolve);
         return;
       }
       setTimeout(resolve, 0);

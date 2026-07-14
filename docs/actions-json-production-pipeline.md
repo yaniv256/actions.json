@@ -97,8 +97,40 @@ The package includes:
 - a screenshot manifest when supplied;
 - `manifest.json`, listing every packaged file with purpose and source.
 
-Screenshots are not silently swept in. Each screenshot entry must include a
-path and purpose so reviewers can tell why it matters.
+Screenshots are not silently swept in. Each screenshot entry must include:
+
+- \`path\`, \`purpose\`, \`source\`, and a valid \`captured_at\` timestamp;
+- \`surface_identity: { kind, value, method }\`, identifying what was captured
+  and how that identity was established;
+- \`freshness.status\`, either \`unverified\` or \`independently_verified\`;
+- \`evidence_policy\`, either \`positive_only\` or \`bidirectional\`.
+
+A timestamp is not freshness evidence. An \`unverified\` screenshot must be
+\`positive_only\`: visible pixels may support a positive claim, but missing or
+unchanged pixels cannot prove absence, failure, or current state. Bidirectional
+use requires \`freshness.status: independently_verified\` plus a separate
+\`method\`, \`evidence\` reference, and \`verified_at\` timestamp. The
+independent evidence must not be the screenshot's own capture timestamp.
+
+Example:
+
+~~~json
+{
+  "screenshots": [{
+    "path": "screenshots/card-open.png",
+    "purpose": "Shows the opened card",
+    "source": "browser.screenshot",
+    "captured_at": "2026-07-12T10:00:00Z",
+    "surface_identity": {
+      "kind": "url",
+      "value": "https://trello.com/c/example",
+      "method": "verified active tab"
+    },
+    "freshness": { "status": "unverified" },
+    "evidence_policy": "positive_only"
+  }]
+}
+~~~
 
 ## Promotion Prep
 

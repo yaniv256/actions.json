@@ -7,16 +7,60 @@ const contentScriptPath = path.join(__dirname, "../src/content.js");
 const backgroundScriptPath = path.join(__dirname, "../src/background.js");
 
 function backgroundScriptForBrowserTest() {
-  // Strip the leading module imports generically so adding or reordering an
-  // import in background.js cannot silently break this harness (a byte-exact
-  // regex here once turned a new import into an inline-script SyntaxError and
-  // the background listener never registered).
-  return fs.readFileSync(backgroundScriptPath, "utf8")
-    .replace(/^(?:import \{[^}]*\} from "\.\/agent\/[a-zA-Z-]+\.mjs";\n)+\n?/, "");
+  // Browser tests inject the service worker as a classic inline script, so
+  // remove every static import regardless of module path or formatting. Keep
+  // explicit guards here: a stale loader must fail at the boundary instead of
+  // surfacing later as dozens of unrelated listener timeouts.
+  const source = fs.readFileSync(backgroundScriptPath, "utf8");
+  let inImport = false;
+  let removed = 0;
+  const body = source
+    .split("\n")
+    .filter((line) => {
+      if (!inImport && /^import\b/.test(line)) {
+        removed += 1;
+        inImport = !/;\s*$/.test(line);
+        return false;
+      }
+      if (inImport) {
+        inImport = !/;\s*$/.test(line);
+        return false;
+      }
+      return true;
+    })
+    .join("\n");
+
+  if (removed === 0) {
+    throw new Error("Browser VM loader did not remove any production ESM imports");
+  }
+  if (/^import\b/m.test(body)) {
+    throw new Error("Browser VM loader leaked a production ESM import");
+  }
+  const importedBindings = Array.from(
+    source.matchAll(/(?:^|\n)import\s+([\s\S]*?)\s+from\s+["'][^"']+["'];/g),
+  ).flatMap((match) => {
+    const clause = match[1].trim();
+    if (clause.startsWith("{")) {
+      return clause
+        .slice(1, -1)
+        .split(",")
+        .map((name) => name.trim().split(/\s+as\s+/).at(-1))
+        .filter(Boolean);
+    }
+    if (clause.startsWith("* as ")) return [clause.slice(5).trim()];
+    return [clause.split(",", 1)[0].trim()].filter(Boolean);
+  });
+  return { body, importedBindings };
 }
 
 async function addBackgroundScript(page) {
+  const { body, importedBindings } = backgroundScriptForBrowserTest();
   await page.evaluate(() => {
+    window.chrome.debugger = {
+      onDetach: { addListener() {} },
+      onEvent: { addListener() {} },
+      ...window.chrome.debugger,
+    };
     window.normalizeSiteActionCallArgs = window.normalizeSiteActionCallArgs || ((args = {}) => {
       const rest = args.arguments && typeof args.arguments === "object" ? args.arguments : {};
       const top = args.action || args.action_name || args.name;
@@ -60,6 +104,90 @@ async function addBackgroundScript(page) {
     }));
     window.siteBlockedPrimitiveNamesFromBundle = window.siteBlockedPrimitiveNamesFromBundle || (() => []);
     window.filterRealtimeToolsForBlockedPrimitives = window.filterRealtimeToolsForBlockedPrimitives || ((tools) => tools);
+    window.BridgeOutputDeliveryQueue = window.BridgeOutputDeliveryQueue || class BridgeOutputDeliveryQueue {
+      constructor() {
+        this.pending = [];
+      }
+      deliver(item, send) {
+        if (send(item)) return true;
+        this.pending.push(item);
+        return false;
+      }
+      flush(send) {
+        const remaining = [];
+        let sent = 0;
+        for (const item of this.pending) {
+          if (send(item)) sent += 1;
+          else remaining.push(item);
+        }
+        this.pending = remaining;
+        return { sent, remaining: remaining.length, expired: 0 };
+      }
+    };
+    window.ShimTree = window.ShimTree || class ShimTree {};
+    window.Announcer = window.Announcer || class Announcer {
+      async start() {}
+      async stop() {}
+    };
+    window.normalizeGatedRepeatArgs = window.normalizeGatedRepeatArgs || ((args) => args);
+    window.runGatedRepeat = window.runGatedRepeat || (async () => ({ ok: true }));
+    window.createChromeScreenshotBrowser = window.createChromeScreenshotBrowser || ((chromeApi) => ({
+      focusWindow: (windowId) => new Promise((resolve, reject) => {
+        chromeApi.windows.update(windowId, { focused: true }, (value) => {
+          if (chromeApi.runtime.lastError) reject(new Error(chromeApi.runtime.lastError.message));
+          else resolve(value);
+        });
+      }),
+      activateTab: (tabId) => new Promise((resolve, reject) => {
+        chromeApi.tabs.update(tabId, { active: true }, (value) => {
+          if (chromeApi.runtime.lastError) reject(new Error(chromeApi.runtime.lastError.message));
+          else resolve(value);
+        });
+      }),
+      readActiveTab: (windowId) => new Promise((resolve, reject) => {
+        chromeApi.tabs.query({ active: true, windowId }, (tabs) => {
+          if (chromeApi.runtime.lastError) reject(new Error(chromeApi.runtime.lastError.message));
+          else resolve(tabs?.[0] || null);
+        });
+      }),
+      delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      captureVisibleTab: (windowId, options) => new Promise((resolve, reject) => {
+        chromeApi.tabs.captureVisibleTab(windowId, options, (value) => {
+          if (chromeApi.runtime.lastError) reject(new Error(chromeApi.runtime.lastError.message));
+          else resolve(value);
+        });
+      }),
+    }));
+    window.captureTabSurface = window.captureTabSurface || (async (browser, tab, options = {}) => {
+      const tabId = Number(tab?.id);
+      const windowId = Number(tab?.windowId);
+      await browser.focusWindow(windowId);
+      await browser.activateTab(tabId);
+      const activeTab = await browser.readActiveTab(windowId);
+      if (Number(activeTab?.id) !== tabId) {
+        return { ok: false, error: { code: "screenshot_target_not_active" } };
+      }
+      const delayMs = Number.isFinite(options.delayMs) ? Math.max(0, options.delayMs) : 0;
+      if (delayMs > 0) await browser.delay(delayMs);
+      const dataUrl = await browser.captureVisibleTab(windowId, {
+        format: options.format === "jpeg" ? "jpeg" : "png",
+        quality: Number.isInteger(options.quality) ? options.quality : undefined,
+      });
+      return {
+        ok: true,
+        dataUrl,
+        surface_identity: "verified_active_tab",
+        freshness: "unverified",
+        delay_ms_applied: delayMs,
+      };
+    });
+    window.createCloudStore = window.createCloudStore || (() => ({
+      appendLine: async () => ({ ok: true }),
+      flush: async () => ({ ok: true }),
+    }));
+    window.reconcileDay = window.reconcileDay || (async () => ({ ok: true }));
+    window.agentEventFromSessionEvent = window.agentEventFromSessionEvent || ((event) => event);
+    window.DEFAULT_MODEL = window.DEFAULT_MODEL || "test-model";
     window.executeWorkflowAction = window.executeWorkflowAction || (async () => ({
       ok: false,
       error: { code: "workflow_unavailable_in_harness", message: "Workflow executor is not loaded in this harness." },
@@ -70,6 +198,10 @@ async function addBackgroundScript(page) {
         this.code = code;
       }
     };
+    window.transferInsertValue = window.transferInsertValue || ((rendered) => {
+      const text = typeof rendered === "string" ? rendered : String(rendered ?? "");
+      return { rendered_text: text, text };
+    });
     window.TransferBuffer = window.TransferBuffer || class TransferBuffer {
       write(args) {
         return { id: "test-transfer", label: args.label, format: args.format, value: args.value };
@@ -106,7 +238,13 @@ async function addBackgroundScript(page) {
       },
     }));
   });
-  await page.addScriptTag({ content: backgroundScriptForBrowserTest() });
+  await page.evaluate((names) => {
+    const missing = names.filter((name) => !(name in window));
+    if (missing.length > 0) {
+      throw new Error(`Browser VM loader is missing imported bindings: ${missing.join(", ")}`);
+    }
+  }, importedBindings);
+  await page.addScriptTag({ content: body });
 }
 
 async function installRuntime(page, manifestOverride, options = {}) {
@@ -331,9 +469,9 @@ test("browser.claimed_tabs.list forwards to the extension tab registry", async (
     ],
     active_tab_id: 101,
   });
-  await expect(page.evaluate(() => window.__actionsJsonMessages.at(-2).message.type)).resolves.toBe(
-    "actions-json:claimed-tabs-list"
-  );
+  await expect(page.evaluate(() => window.__actionsJsonMessages.some(
+    (item) => item?.message?.type === "actions-json:claimed-tabs-list"
+  ))).resolves.toBe(true);
 });
 
 test("browser.claimed_tabs.activate schedules a claimed tab reconnect through background", async ({ page }) => {
@@ -378,7 +516,9 @@ test("browser.claimed_tabs.activate schedules a claimed tab reconnect through ba
       active: true,
     },
   });
-  await expect(page.evaluate(() => window.__actionsJsonMessages.at(-2).message)).resolves.toEqual({
+  await expect(page.evaluate(() => window.__actionsJsonMessages.find(
+    (item) => item?.message?.type === "actions-json:claimed-tabs-activate"
+  )?.message)).resolves.toEqual({
     type: "actions-json:claimed-tabs-activate",
     tabId: 202,
     reconnectDelayMs: 300,
@@ -2024,6 +2164,10 @@ test("background screenshot focuses the sender window before visible-tab capture
           return 42;
         },
         async sendMessage() {},
+        query(queryInfo, callback) {
+          window.__actionsJsonBackgroundCalls.push({ method: "tabs.query", queryInfo });
+          callback([{ id: 123, windowId: 77 }]);
+        },
         update(tabId, props, callback) {
           window.__actionsJsonBackgroundCalls.push({ method: "tabs.update", tabId, props });
           callback?.();
@@ -2071,7 +2215,12 @@ test("background screenshot focuses the sender window before visible-tab capture
   await expect(page.evaluate(() => window.__actionsJsonBackgroundCalls)).resolves.toEqual([
     { method: "windows.update", windowId: 77, props: { focused: true } },
     { method: "tabs.update", tabId: 123, props: { active: true } },
-    { method: "tabs.captureVisibleTab", windowId: 77, options: { format: "png" } },
+    { method: "tabs.query", queryInfo: { active: true, windowId: 77 } },
+    {
+      method: "tabs.captureVisibleTab",
+      windowId: 77,
+      options: { format: "png", quality: undefined },
+    },
   ]);
 });
 
@@ -2423,13 +2572,15 @@ test("background lists and activates extension-claimed tabs", async ({ page }) =
     tabs: [
       expect.objectContaining({
         tab_id: 101,
-        runtime_key: "chrome-tab:101",
+        runtime_id: null,
+        _runtime_key: "chrome-tab:101",
         title: "LinkedIn Messaging",
         url: "https://www.linkedin.com/messaging/",
       }),
       expect.objectContaining({
         tab_id: 202,
-        runtime_key: "chrome-tab:202",
+        runtime_id: null,
+        _runtime_key: "chrome-tab:202",
         title: "Amazon Prime Video",
         url: "https://www.amazon.com/gp/video/storefront/",
       }),
@@ -2457,7 +2608,8 @@ test("background lists and activates extension-claimed tabs", async ({ page }) =
     reconnect_delay_ms: 1,
     tab: expect.objectContaining({
       tab_id: 202,
-      runtime_key: "chrome-tab:202",
+      runtime_id: null,
+      _runtime_key: "chrome-tab:202",
       active: true,
     }),
   });
@@ -3834,7 +3986,7 @@ test("browser.extract_elements uses actions.json field rules for image-backed it
     });
 });
 
-test("browser.run_javascript executes declared JavaScript with arguments", async ({ page }) => {
+test("browser.run_javascript delegates through the CSP-safe debugger evaluator", async ({ page }) => {
   await installRuntime(page, {
     tools: [
       { name: "browser.run_javascript", input_schema: { type: "object" } },
@@ -3842,6 +3994,7 @@ test("browser.run_javascript executes declared JavaScript with arguments", async
   });
 
   await page.setContent(`
+    <meta http-equiv="Content-Security-Policy" content="script-src 'self'">
     <main>
       <h2>Outstanding dramas</h2>
       <div class="strip" style="display:flex; gap:12px; width:320px; overflow-x:auto;">
@@ -3851,6 +4004,34 @@ test("browser.run_javascript executes declared JavaScript with arguments", async
       </div>
     </main>
   `);
+
+  await page.evaluate(() => {
+    const nativeSetTimeout = window.setTimeout.bind(window);
+    window.setTimeout = (callback, delay, ...args) =>
+      nativeSetTimeout(callback, delay === 10_000 ? 10 : delay, ...args);
+    window.__actionsJsonRuntimeMessageHandler = async (message) => {
+      if (message.type !== "actions-json:debug-evaluate") {
+        return { ok: false, error: `unexpected message ${message.type}` };
+      }
+      // A response that arrives after the old 10-second content-message budget
+      // (scaled to 10ms above) must still succeed.
+      await new Promise((resolve) => nativeSetTimeout(resolve, 30));
+      const target = document.querySelector(message.args.selector);
+      const before = { left: target.scrollLeft, top: target.scrollTop };
+      target.scrollBy({ left: message.args.left, top: 0, behavior: "instant" });
+      const after = { left: target.scrollLeft, top: target.scrollTop };
+      return {
+        ok: true,
+        result: { before, after, moved: after.left !== before.left },
+        url: location.href,
+        execution: {
+          adapter: "extension",
+          capability_class: "debug",
+          transport: "chrome.debugger",
+        },
+      };
+    };
+  });
 
   await page.evaluate(async () => {
     const listener = window.__actionsJsonRuntimeListeners[0];
@@ -3915,12 +4096,30 @@ test("browser.run_javascript executes declared JavaScript with arguments", async
           after: { left: expect.any(Number) },
           moved: true,
         },
+        execution: {
+          adapter: "extension",
+          capability_class: "debug",
+          transport: "chrome.debugger",
+        },
       },
     });
 
   await expect(
     page.evaluate(() => document.querySelector(".strip").scrollLeft)
   ).resolves.toBeGreaterThan(0);
+
+  await expect(
+    page.evaluate(() =>
+      window.__actionsJsonMessages.find(
+        (item) => item.type === "chrome_runtime_message"
+          && item.message?.type === "actions-json:debug-evaluate"
+      )?.message
+    )
+  ).resolves.toMatchObject({
+    type: "actions-json:debug-evaluate",
+    primitive: "browser.run_javascript",
+    args: { selector: ".strip", left: 260 },
+  });
 
 });
 
@@ -4348,6 +4547,49 @@ test("extension pointer.drag resolves source and destination locators", async ({
   await expect(page.evaluate(() => document.body.dataset.dragLocatorEnded)).resolves.toBe("yes");
 });
 
+test("extension pointer.drag rejects an occluded locator instead of dispatching a blind drag", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "pointer.drag", input_schema: { type: "object" } },
+    ],
+  });
+
+  await page.setContent(`
+    <div data-testid="source-card"
+      style="position:absolute;left:120px;top:140px;width:160px;height:56px;background:#dbeafe"
+      onpointerdown="document.body.dataset.dragOcclusionStarted = 'yes'">Move me</div>
+    <div data-testid="target-list"
+      style="position:absolute;left:420px;top:220px;width:180px;height:96px;background:#dcfce7">Done</div>
+    <div data-testid="occluder"
+      style="position:absolute;left:120px;top:140px;width:160px;height:56px;background:#111827;z-index:10">Overlay</div>
+  `);
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "extension-pointer-drag-occluded", "pointer.drag", {
+    from: { selector: "[data-testid='source-card']" },
+    to: { selector: "[data-testid='target-list']" },
+    duration_ms: 0,
+  });
+
+  await expect.poll(() => actionOutput(page, "extension-pointer-drag-occluded")).toMatchObject({
+    output: {
+      ok: false,
+      primitive: "pointer.drag",
+      adapter: "extension",
+      error: {
+        code: "target_not_actionable",
+        evidence: {
+          actionability: {
+            receives_events: false,
+            clickable: false,
+          },
+        },
+      },
+    },
+  });
+  await expect(page.evaluate(() => document.body.dataset.dragOcclusionStarted || "")).resolves.toBe("");
+});
+
 test("extension transfer buffer writes, reads, and inserts rendered data through the action path", async ({ page }) => {
   await installRuntime(page, {
     tools: [
@@ -4686,7 +4928,7 @@ test("extension implements page, DOM, locator text, wait, and keyboard primitive
       ok: true,
       primitive: "keyboard.press",
       adapter: "extension",
-      value: { pressed: true, key: "Enter", fidelity: "page_level" },
+      value: { pressed: true, key: "Enter", fidelity: "synthetic" },
     },
   });
   await expect(page.evaluate(() => document.body.dataset.key)).resolves.toBe("Enter");
@@ -4697,10 +4939,30 @@ test("extension implements page, DOM, locator text, wait, and keyboard primitive
       ok: true,
       primitive: "keyboard.press",
       adapter: "extension",
-      value: { pressed: true, key: "a", modifiers: ["meta"], fidelity: "page_level" },
+      value: { pressed: true, key: "a", modifiers: ["meta"], fidelity: "synthetic" },
     },
   });
   await expect(page.evaluate(() => document.body.dataset.modifierChord)).resolves.toBe("yes");
+});
+
+test("dom.observe.visible omits clickable_center for an occluded match", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [{ name: "dom.observe.visible", input_schema: { type: "object" } }],
+  });
+  await page.setContent(`
+    <button id="covered" style="position:absolute;left:20px;top:20px;width:220px;height:48px">Covered action</button>
+    <div id="sticky-cover" style="position:fixed;left:0;top:0;width:320px;height:120px;background:#fff;z-index:10000">Sticky cover</div>
+  `);
+  await connectRuntime(page);
+  await callRuntimeAction(page, "occluded-dom-observe", "dom.observe.visible", { selector: "#covered" });
+  const output = (await actionOutput(page, "occluded-dom-observe")).output.value;
+  expect(output.match_count).toBe(1);
+  const match = output.matches[0];
+  expect(match.clickable).toBe(false);
+  expect(match.receives_events).toBe(false);
+  expect(match.clickable_center).toBeUndefined();
+  expect(match.visible_center).toEqual(expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }));
+  expect(match.occluded_by).toEqual(expect.objectContaining({ tag_name: "div" }));
 });
 
 test("dom.observe.visible refuses oversized broad payloads with narrowing hints", async ({ page }) => {
@@ -5263,6 +5525,7 @@ test("debug.run_javascript delegates arbitrary evaluation to the privileged back
     )
   ).resolves.toMatchObject({
     type: "actions-json:debug-evaluate",
+    primitive: "debug.run_javascript",
     args: { heading: "Continue watching" },
   });
 });

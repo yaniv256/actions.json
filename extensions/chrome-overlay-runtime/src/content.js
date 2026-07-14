@@ -1387,7 +1387,11 @@
       isHidden: () => host.dataset.hidden === "true",
       geometry: () => {
         const rect = host.getBoundingClientRect();
-        return {
+        const visibleCenter = {
+          x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
+          y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2
+        };
+        const result = {
           left: Math.round(rect.left),
           top: Math.round(rect.top),
           width: Math.round(rect.width),
@@ -2496,28 +2500,22 @@
     };
   };
 
-  const runJavascript = async (args = {}) => {
+  const runJavascriptWithDebugger = async (args = {}, primitive = "debug.run_javascript") => {
     const source = args.source || args.javascript;
     if (typeof source !== "string" || !source.trim()) {
-      throw new Error("browser.run_javascript requires source");
+      throw new Error(`${primitive} requires source`);
     }
-    const actionArgs = args.args && typeof args.args === "object" ? args.args : {};
-    const helpers = {
-      normalizeText,
-      isElementVisible,
-      queryRelative
-    };
-    const action = new Function(
-      "args",
-      "helpers",
-      `"use strict"; return (async () => {\n${source}\n})()`
-    );
-    return {
-      ok: true,
-      result: await action(actionArgs, helpers),
-      url: location.href
-    };
+    return sendRuntimeMessage({
+      type: "actions-json:debug-evaluate",
+      primitive,
+      source,
+      javascript: args.javascript,
+      args: args.args && typeof args.args === "object" ? args.args : {}
+    }, 60_000);
   };
+
+  const runJavascript = async (args = {}) =>
+    runJavascriptWithDebugger(args, "browser.run_javascript");
 
   const pageInfo = () => primitiveSuccess("page.info", {
     url: location.href,
@@ -2552,7 +2550,11 @@
         const rect = element.getBoundingClientRect();
         const geometry = visibilityGeometryFor(element);
         const visibleRect = geometry.visible_rect || rect;
-        return {
+        const visibleCenter = {
+          x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
+          y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2
+        };
+        const result = {
           tag_name: element.tagName.toLowerCase(),
           text: normalizeText(element.textContent || element.getAttribute("aria-label")),
           bounding_box: {
@@ -2565,12 +2567,16 @@
             right: rect.right,
             bottom: rect.bottom
           },
-          clickable_center: {
-            x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
-            y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2
-          },
-          clickable: geometry.clickable
+          visible_center: visibleCenter,
+          clickable: geometry.clickable,
+          receives_events: geometry.receives_events,
+          occluded_by: geometry.occluded_by || null,
+          visible_rect: geometry.visible_rect || visibleRect
         };
+        if (geometry.clickable && geometry.receives_events !== false) {
+          result.clickable_center = visibleCenter;
+        }
+        return result;
       });
     const payload = { matches, match_count: matches.length };
     const approximateBytes = new Blob([JSON.stringify(payload)]).size;
@@ -2808,18 +2814,8 @@
     });
   };
 
-  const debugRunJavascript = async (args = {}) => {
-    const source = args.source || args.javascript;
-    if (typeof source !== "string" || !source.trim()) {
-      throw new Error("debug.run_javascript requires source");
-    }
-    return sendRuntimeMessage({
-      type: "actions-json:debug-evaluate",
-      source,
-      javascript: args.javascript,
-      args: args.args && typeof args.args === "object" ? args.args : {}
-    });
-  };
+  const debugRunJavascript = async (args = {}) =>
+    runJavascriptWithDebugger(args, "debug.run_javascript");
 
   const runtimeSessionLog = async (args = {}) => {
     const response = await sendRuntimeMessage({
@@ -3455,10 +3451,25 @@
       };
     }
     const visibleRect = visibleRectFor(element) || element.getBoundingClientRect();
-    const point = {
-      x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
-      y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2,
-    };
+    const actionability = visibilityGeometryFor(element);
+    if (!actionability.clickable || !actionability.receives_events || !actionability.action_point) {
+      return {
+        error: primitiveError(primitive, "target_not_actionable", `The ${role} locator resolved, but its visible point does not receive pointer events.`, {
+          [role]: locator,
+          actionability: {
+            state: actionability.state,
+            visible: actionability.visible,
+            fully_visible: actionability.fully_visible,
+            clickable: actionability.clickable,
+            receives_events: actionability.receives_events,
+            visible_rect: actionability.visible_rect,
+            occluded_by: actionability.occluded_by,
+            scroll_operation: actionability.scroll_operation,
+          },
+        }),
+      };
+    }
+    const point = actionability.action_point;
     const viewportError = validateViewportPoint(primitive, point.x, point.y, point);
     if (viewportError) return { error: viewportError };
     return {
@@ -3471,6 +3482,12 @@
         text: normalizeText(element.textContent),
         bounding_box: rectDiagnostic(element),
         point,
+        actionability: {
+          clickable: actionability.clickable,
+          receives_events: actionability.receives_events,
+          fully_visible: actionability.fully_visible,
+          occluded_by: actionability.occluded_by,
+        },
       },
     };
   };
@@ -3667,7 +3684,10 @@
 
   const waitForEditableHandlers = () => new Promise((resolve) => {
     if (typeof requestAnimationFrame === "function") {
-      requestAnimationFrame(() => resolve());
+      Promise.race([
+        new Promise((done) => requestAnimationFrame(done)),
+        new Promise((done) => setTimeout(done, 50))
+      ]).then(resolve);
       return;
     }
     setTimeout(resolve, 0);
@@ -3768,7 +3788,7 @@
     return { target: activeElement, target_kind: "activeElement" };
   };
 
-  const insertTextIntoEditable = async (primitive, args = {}) => {
+  const insertTextIntoEditable = async (primitive, args = {}, reportProgress) => {
     const text = String(args.text ?? "");
     const target = resolveEditableTarget(args.target);
     if (!isEditableElement(target)) {
@@ -3807,12 +3827,18 @@
       target.setSelectionRange?.(cursor, cursor);
     } else {
       const beforePasteText = target.textContent || "";
+      reportProgress?.("editable_selection_settled", "entered");
       const selectedText = selectEditableContents(target, mode);
       document.dispatchEvent(new Event("selectionchange", { bubbles: false }));
       await waitForEditableHandlers();
+      reportProgress?.("editable_selection_settled", "completed");
       const pasteEvent = syntheticClipboardEvent(text);
+      reportProgress?.("synthetic_paste_dispatched", "entered");
       const dispatched = target.dispatchEvent(pasteEvent);
+      reportProgress?.("synthetic_paste_dispatched", "completed");
+      reportProgress?.("editable_handlers_settled", "entered");
       await waitForEditableHandlers();
+      reportProgress?.("editable_handlers_settled", "completed");
       const afterPasteText = target.textContent || "";
       if (!dispatched || pasteEvent.defaultPrevented || afterPasteText !== beforePasteText) {
         target.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
@@ -3837,16 +3863,16 @@
     });
   };
 
-  const textInsert = (args = {}) => {
-    return insertTextIntoEditable("text.insert", args);
+  const textInsert = (args = {}, reportProgress) => {
+    return insertTextIntoEditable("text.insert", args, reportProgress);
   };
 
   // text.type — type a string into the focused element as keystrokes. Synthetic by
   // default (portable). With { trusted:true } it relays to the background CDP
-  // Input.insertText, which REPLACES the active selection and reaches canvas editors
-  // (Docs/Slides/Sheets) — the overtype path for a keyboard-made selection, where
-  // clipboard.paste does not route to the live selection.
-  const textType = async (args = {}) => {
+  // per-character Input.dispatchKeyEvent path, which REPLACES the active selection
+  // and reaches canvas editors (Docs/Slides/Sheets) — the overtype path for a
+  // keyboard-made selection, where clipboard.paste does not route to the live selection.
+  const textType = async (args = {}, reportProgress) => {
     const text = String(args.text ?? "");
     if (args.trusted === true) {
       const relayed = await chrome.runtime.sendMessage({
@@ -3860,7 +3886,7 @@
       return primitiveSuccess("text.type", { typed: true, length: text.length, selected_back: relayed.selected_back ?? 0, fidelity: "trusted" });
     }
     // Synthetic: insert at the focused editable (same path as text.insert, no target).
-    const result = insertTextIntoEditable("text.type", { text, mode: args.mode || "insert" });
+    const result = insertTextIntoEditable("text.type", { text, mode: args.mode || "insert" }, reportProgress);
     return result;
   };
 
@@ -4019,14 +4045,14 @@
     return result;
   };
 
-  const transferInsert = async (args = {}) => {
+  const transferInsert = async (args = {}, reportProgress) => {
     const result = await transferBufferAction("transfer.insert", args);
     if (result.ok === false) return result;
     return insertTextIntoEditable("transfer.insert", {
       text: result.value?.text ?? result.value?.rendered_text ?? "",
       target: args.target,
       mode: args.mode,
-    });
+    }, reportProgress);
   };
 
   const storageReadFile = async (args = {}) => {
@@ -4292,7 +4318,7 @@
     return primitive;
   };
 
-  const executeAction = async (message) => {
+  const executeAction = async (message, reportProgress) => {
     const rateLimitWaitMs = await waitForHumanInteractionSlot(message.name);
     const actions = await loadManifest();
     const action = findExecutableAction(actions, message.name);
@@ -4376,9 +4402,9 @@
     } else if (message.name === "pointer.drag") {
       output = pointerDrag(message.arguments || {});
     } else if (message.name === "text.insert") {
-      output = await textInsert(message.arguments || {});
+      output = await textInsert(message.arguments || {}, reportProgress);
     } else if (message.name === "text.type") {
-      output = await textType(message.arguments || {});
+      output = await textType(message.arguments || {}, reportProgress);
     } else if (message.name === "clipboard.paste") {
       output = await clipboardPaste(message.arguments || {});
     } else if (message.name === "clipboard.read") {
@@ -4398,7 +4424,7 @@
     } else if (message.name === "transfer.clear") {
       output = await transferBufferAction("transfer.clear", message.arguments || {});
     } else if (message.name === "transfer.insert") {
-      output = await transferInsert(message.arguments || {});
+      output = await transferInsert(message.arguments || {}, reportProgress);
     } else if (message.name === "storage.read_file") {
       output = await storageReadFile(message.arguments || {});
     } else if (message.name === "keyboard.press") {
@@ -4445,8 +4471,25 @@
 
   const handleActionCall = async (message) => {
     const callId = message.call_id || newActionCallId();
+    let lastEnteredContentPhase = null;
+    let lastCompletedContentPhase = null;
+    const reportProgress = (phase, status = "completed") => {
+      if (status === "entered") lastEnteredContentPhase = phase;
+      if (status === "completed") lastCompletedContentPhase = phase;
+      protocolSend({
+        type: "action_progress",
+        call_id: callId,
+        runtime_id: RUNTIME_ID,
+        action: message.name || null,
+        last_entered_content_phase: lastEnteredContentPhase,
+        last_completed_content_phase: lastCompletedContentPhase,
+        observed_at: new Date().toISOString(),
+      });
+    };
     try {
-      const output = await executeAction(message);
+      reportProgress("action_handler", "entered");
+      const output = await executeAction(message, reportProgress);
+      reportProgress("action_handler", "completed");
       protocolSend({
         type: "action_call_output",
         call_id: callId,

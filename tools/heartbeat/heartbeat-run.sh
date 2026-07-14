@@ -28,9 +28,9 @@ mkdir -p "$LOG_DIR"
 STAMP="$(date -Iseconds)"
 
 # The heartbeat prompt fired on each wake. Mirrors the manual heartbeat: sync + enforce the
-# list-discipline invariants (agent-task-os rule 12), then continue the In-Progress task.
+# list-discipline invariants (Agent Kanban rule 12), then continue the In-Progress task.
 read -r -d '' HEARTBEAT_PROMPT <<'PROMPT'
-HEARTBEAT (autonomous fire): Sync my Trello board to reality and keep walking. (1) Route to the Trello runtime (target_url_contains=trello.com; re-discover via bridge/runtimes). (2) Read the board by MODEL (never screenshot). (3) ENFORCE the list-discipline invariants (agent-task-os rule 12), do not just observe: In Progress = EXACTLY ONE card; Done = only cards with a fully-complete checklist (use trello.card.checklist.read); Blocked = every card states its blocker. (4) Then CONTINUE working the In Progress task — do the next step, do not just report. Trello WRITES via the hosted agent (runtime.agent.start if no session); verify by board model. Never stall — keep walking. This is an unattended autonomous fire: work independently, only surface for irreversible/public/expensive actions.
+HEARTBEAT (autonomous fire): Sync my Trello board to reality and keep walking. (1) Route to the Trello runtime (target_url_contains=trello.com; re-discover via bridge/runtimes). (2) Read the board by MODEL (never screenshot). (3) ENFORCE Agent Kanban rule 12, do not just observe: In Progress = EXACTLY ONE card; Done = verified completion plus required CE Compound closure; Blocked = every card links an active blocker in Next, In Progress, or Blocked and the graph is acyclic; Next = executor classes with High/Normal/Low LIFO buckets. (4) Then CONTINUE the In Progress task, or move the topmost Agent runnable Next card to In Progress and execute it. Trello WRITES via the hosted agent (runtime.agent.start if no session); verify by board model. Never stall — keep walking. This is an unattended autonomous fire: work independently, only surface for irreversible/public/expensive actions.
 PROMPT
 
 # Resume the pinned session if we have one; else start fresh and pin the new id.
