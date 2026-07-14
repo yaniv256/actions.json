@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -6,6 +7,15 @@ import {
   executeWorkflowAction,
   validateWorkflow,
 } from "../src/agent/workflow-actions.mjs";
+
+function trelloTool(name) {
+  const map = JSON.parse(
+    readFileSync(new URL("../../../examples/actions.json.storage/scopes/public/sites/trello.com/board/actions.json", import.meta.url), "utf8"),
+  );
+  const tool = map.tools.find((candidate) => candidate.name === name);
+  assert.ok(tool, `missing Trello tool ${name}`);
+  return tool;
+}
 
 test("workflow evaluator replaces raw JSONata expression slots with typed values", async () => {
   const context = {
@@ -86,6 +96,149 @@ test("workflow validation rejects unsupported language, duplicate ids, and unbou
       steps: [{ id: "read", primitive: "locator.element_info", for_each: "{% input.items %}", args: {} }],
     }).error.message,
     /max_items/i,
+  );
+});
+
+test("Trello label candidates are scoped to the labels popover", () => {
+  const tool = trelloTool("trello.card.label_options.candidates");
+
+  assert.equal(tool.x_actions.handler, "locator.element_info");
+  assert.equal(
+    tool.x_actions.binding.arguments.locator.selector,
+    "[data-testid='labels-popover-labels-screen'] [data-testid='clickable-checkbox'], [data-testid='labels-popover-labels-screen'] [data-testid='card-label'], [data-testid='labels-popover-labels-screen'] input[type='checkbox']",
+  );
+  assert.doesNotMatch(tool.x_actions.binding.arguments.locator.selector, /\[role='dialog'\] button/);
+  assert.doesNotMatch(tool.x_actions.binding.arguments.locator.selector, /\.window button/);
+});
+
+test("Trello label apply is idempotent when the label already exists on the card", async () => {
+  const tool = trelloTool("trello.card.label.apply");
+  const primitiveCalls = [];
+
+  const result = await executeWorkflowAction({
+    actionName: tool.name,
+    input: { label: "Agent runnable" },
+    workflow: tool.workflow,
+    async executePrimitive(call) {
+      primitiveCalls.push(call);
+      if (call.name === "overlay.menu.hide") return { ok: true, output: { hidden: true } };
+      if (call.name === "viewport.scroll") return { ok: true, output: { scrolled: true } };
+      if (call.name === "locator.element_info" && call.arguments.locator.selector.includes("card-back-labels-container")) {
+        return {
+          ok: true,
+          output: {
+            clickable_center: { x: 311, y: 244 },
+            text: "Agent runnable",
+          },
+        };
+      }
+      if (call.name === "locator.element_info" && call.arguments.locator.text_contains === "Close popover") {
+        return { ok: false, error: { code: "target_not_found", message: "No popover", recoverable: true } };
+      }
+      throw new Error(`unexpected primitive call ${JSON.stringify(call)}`);
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output.value.already_present, true);
+  assert.equal(result.output.value.verified, true);
+  assert.equal(result.output.value.clicked, false);
+  assert.deepEqual(
+    primitiveCalls.map((call) => call.name),
+    ["overlay.menu.hide", "locator.element_info", "locator.element_info", "locator.element_info"],
+  );
+  assert.equal(
+    primitiveCalls.some((call) => call.name === "pointer.click"),
+    false,
+    "already-present labels must not be clicked and toggled off",
+  );
+});
+
+test("Trello label apply opens Add a label and clicks only the scoped matching row", async () => {
+  const tool = trelloTool("trello.card.label.apply");
+  const primitiveCalls = [];
+
+  const result = await executeWorkflowAction({
+    actionName: tool.name,
+    input: { label: "Human required" },
+    workflow: tool.workflow,
+    async executePrimitive(call) {
+      primitiveCalls.push(call);
+      if (call.name === "overlay.menu.hide") return { ok: true, output: { hidden: true } };
+      if (call.name === "viewport.scroll") return { ok: true, output: { scrolled: true } };
+      if (call.name === "locator.wait_for") return { ok: true, output: { visible: true } };
+      if (call.name === "pointer.click") return { ok: true, output: { clicked: true } };
+      if (call.name === "locator.element_info" && call.arguments.locator.selector.includes("card-back-labels-container")) {
+        if (call.arguments.locator.text_contains === "Human required" && primitiveCalls.filter((c) => c.name === "pointer.click").length > 1) {
+          return {
+            ok: true,
+            output: {
+              clickable_center: { x: 315, y: 244 },
+              text: "Human required",
+            },
+          };
+        }
+        return { ok: false, error: { code: "target_not_found", message: "missing before apply", recoverable: true } };
+      }
+      if (call.name === "locator.element_info" && call.arguments.locator.text_contains === "Add a label") {
+        return {
+          ok: true,
+          output: {
+            clickable_center: { x: 326, y: 353 },
+            text: "Add a label",
+          },
+        };
+      }
+      if (call.name === "locator.element_info" && call.arguments.locator.text_contains === "Human required") {
+        assert.equal(
+          call.arguments.locator.selector,
+          "[data-testid='labels-popover-labels-screen'] [data-testid='clickable-checkbox']",
+        );
+        if (primitiveCalls.filter((candidate) => candidate.name === "pointer.click").length === 0) {
+          return { ok: false, error: { code: "target_not_found", message: "popover not open", recoverable: true } };
+        }
+        return {
+          ok: true,
+          output: {
+            clickable_center: { x: 414, y: 469 },
+            text: "Human required",
+          },
+        };
+      }
+      if (call.name === "locator.element_info" && call.arguments.locator.text_contains === "Close popover") {
+        return {
+          ok: true,
+          output: {
+            clickable_center: { x: 580, y: 280 },
+            text: "Close popover",
+          },
+        };
+      }
+      throw new Error(`unexpected primitive call ${JSON.stringify(call)}`);
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.output.value.already_present, false);
+  assert.equal(result.output.value.clicked, true);
+  assert.equal(result.output.value.verified, true);
+  assert.deepEqual(
+    primitiveCalls.filter((call) => call.name === "viewport.scroll").map((call) => call.arguments.delta_y),
+    [],
+    "visible label controls must be resolved before any viewport mutation",
+  );
+  assert.deepEqual(
+    primitiveCalls.filter((call) => call.name === "pointer.click").map((call) => call.arguments),
+    [
+      { x: 326, y: 353 },
+      { x: 414, y: 469 },
+      { x: 580, y: 280 },
+    ],
+  );
+  assert.equal(
+    primitiveCalls.some((call) => call.arguments?.locator?.text_contains === "Labels"),
+    false,
+    "current Add a label control should avoid the legacy Labels fallback",
   );
 });
 

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   TransferBuffer,
   TransferBufferError,
+  transferInsertValue,
 } from "../src/agent/transfer-buffer.mjs";
 
 const source = {
@@ -143,5 +144,42 @@ test("transfer buffer renders simple templates and clears entries", () => {
   assert.throws(
     () => buffer.read({ label: "linear-active-issues" }),
     (error) => error instanceof TransferBufferError && error.code === "transfer_label_not_found",
+  );
+});
+
+test("transfer insert adapter preserves rendered strings as insertable text", () => {
+  assert.deepEqual(transferInsertValue("rendered payload"), {
+    rendered_text: "rendered payload",
+    text: "rendered payload",
+  });
+});
+
+test("cross-app transfer preserves Sheets provenance and renders a row for Docs", () => {
+  const buffer = new TransferBuffer({ idFactory: () => "transfer_sheets_to_docs" });
+  const sheetsSource = {
+    runtime_id: "actions-json-runtime-sheets",
+    tab_id: 202,
+    url: "https://docs.google.com/spreadsheets/d/sheet-id/edit",
+    origin: "https://docs.google.com",
+    site_surface: "google.sheets.grid",
+  };
+  buffer.write({
+    label: "quarterly-summary",
+    format: "application/json",
+    value: [{ quarter: "Q2", revenue: "$125,000", margin: "41%" }],
+    source: sheetsSource,
+    metadata: { destination: "google.docs", record_count: 1 },
+  });
+
+  const staged = buffer.read({ label: "quarterly-summary", include_value: true });
+  assert.deepEqual(staged.source, sheetsSource);
+  assert.equal(staged.metadata.destination, "google.docs");
+  assert.equal(
+    buffer.render({
+      label: "quarterly-summary",
+      item_selector: { index: 0 },
+      render: { template: "{{quarter}} revenue {{revenue}} at {{margin}} margin" },
+    }),
+    "Q2 revenue $125,000 at 41% margin",
   );
 });

@@ -7,7 +7,8 @@ import test from "node:test";
 // bridgeRuntimeRoutes maps runtime_id/runtime_key -> tabId; resolveBridgeItemTabId
 // uses it to deliver bridge->content messages (heartbeat pings AND primitive
 // action_calls). Every path that (re)connects a claimed tab MUST populate this
-// map (rememberRuntimeRoute), and every path that closes/removes a tab MUST
+// map (directly through rememberRuntimeRoute or through the stronger
+// rememberRuntimeRegistration wrapper), and every path that closes/removes a tab MUST
 // clear it (forgetRuntimeRoutesForTab) — else fresh tabs go deaf to content
 // primitives (create/reconnect miss) or /runtimes leaks stale entries (close miss).
 
@@ -33,8 +34,8 @@ test("connectClaimedTab records the local route (covers claim/navigate/activate/
 test("openClaimedTab records the local route (does not funnel through connectClaimedTab)", () => {
   const body = bodyOf("const openClaimedTab = async (message = {}) =>", 2600);
   assert.ok(
-    /rememberRuntimeRoute\(/.test(body),
-    "openClaimedTab must call rememberRuntimeRoute after registering with the bridge",
+    /rememberRuntimeRegistration\(/.test(body),
+    "openClaimedTab must remember the complete runtime registration after sending it to the bridge",
   );
 });
 
@@ -84,6 +85,47 @@ test("closeClaimedTab emits runtime_removed BEFORE forgetting the routes", () =>
   );
 });
 
+// LIVE-CAUGHT REGRESSION (2026-07-13, ext 0.1.206): browser.navigate
+// reconnected three tabs but returned each tab's pre-navigation runtime_id.
+// The very next bridge inventory had already removed those ids and registered
+// replacements. A successful navigate must retire the invalid document runtime
+// and attest the replacement identity before serializing its result.
+test("navigateClaimedTab retires the old runtime and attests its replacement before success", () => {
+  const body = bodyOf("const navigateClaimedTab = async (message = {}) =>", 4200);
+  const snapshotIdx = body.indexOf("previousRuntimeIds");
+  const removedIdx = body.indexOf("runtime_removed");
+  const forgetIdx = body.indexOf("forgetRuntimeRoutesForTab(");
+  const connectIdx = body.indexOf("await connectClaimedTab(");
+  const replacementIdx = body.indexOf("replacementRuntimeIds");
+  const serializeIdx = body.lastIndexOf("serializeClaimedTab(");
+
+  assert.ok(snapshotIdx >= 0, "navigate must snapshot the pre-navigation runtime ids");
+  assert.ok(removedIdx >= 0, "navigate must reap the invalidated document runtime on the bridge");
+  assert.ok(forgetIdx >= 0, "navigate must remove stale local runtime routes");
+  assert.ok(connectIdx >= 0, "navigate must reconnect the new document runtime");
+  assert.ok(replacementIdx >= 0, "navigate must identify the replacement runtime id");
+  assert.ok(
+    removedIdx < forgetIdx && forgetIdx < connectIdx && connectIdx < replacementIdx,
+    "old runtime retirement must precede reconnect, and replacement attestation must follow reconnect",
+  );
+  assert.ok(
+    body.includes("runtime_identity_unattested"),
+    "navigate must fail explicitly instead of returning success with an old or missing runtime id",
+  );
+  assert.ok(
+    replacementIdx < serializeIdx,
+    "replacement identity must be attested before the success payload is serialized",
+  );
+  assert.ok(
+    body.includes("const sameDocument") && body.includes("withoutHash("),
+    "navigate must distinguish hash-only same-document navigation from a replaced document",
+  );
+  assert.ok(
+    /if \(!sameDocument\)[\s\S]*runtime_removed/.test(body),
+    "only a replaced document should reap its prior runtime identity",
+  );
+});
+
 // U8 (R6-for-real): the bridge's `host` is the SITE host, so two browsers on the
 // same page are indistinguishable. The extension must report a machine/browser
 // label on runtime_ready. Live-caught 2026-07-09 (ext on Windows AND Mac).
@@ -92,6 +134,19 @@ test("runtime_ready carries a device label (machine/browser, not the site host)"
   assert.ok(
     /device:\s*readyItem\.device \|\| \(await getDeviceLabel\(\)\)/.test(body),
     "decorateReadyItemForReplay must include a `device` label so the agent can tell two browsers apart",
+  );
+});
+
+test("initial bridge registration decorates runtime_ready with complete tab identity", () => {
+  const body = bodyOf("const connectBackgroundBridge = async (state, options = {}) =>", 7000);
+  const fallback = body.slice(body.indexOf("registered_count === 0"));
+  assert.ok(
+    fallback.includes("decorateReadyItemForReplay("),
+    "the zero-replay fallback must decorate initial runtime_ready instead of sending an ownerless row",
+  );
+  assert.ok(
+    fallback.includes("sendBridgeItem(decorated)"),
+    "the bridge must receive the decorated runtime_ready item",
   );
 });
 
@@ -120,7 +175,7 @@ test("the relayed-ready loop also records routes (not just bridge registration)"
   assert.ok(idx >= 0, "relayed-ready loop must exist");
   const body = source.slice(idx, idx + 300);
   assert.ok(
-    /rememberRuntimeRoute\(/.test(body),
-    "relayed runtimes must also get a local route, matching the single-readyItem path",
+    /rememberRuntimeRegistration\(/.test(body),
+    "relayed runtimes must remember the complete registration, matching the single-readyItem path",
   );
 });

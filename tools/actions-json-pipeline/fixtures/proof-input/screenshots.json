@@ -3,7 +3,17 @@
     {
       "path": "screenshots/card-open.png",
       "purpose": "Shows the opened card after the workflow completed.",
-      "source": "manual validation"
+      "source": "manual validation",
+      "captured_at": "2026-07-12T10:00:00Z",
+      "surface_identity": {
+        "kind": "url",
+        "value": "https://trello.com/c/example",
+        "method": "operator-confirmed active tab"
+      },
+      "freshness": {
+        "status": "unverified"
+      },
+      "evidence_policy": "positive_only"
     }
   ]
 }

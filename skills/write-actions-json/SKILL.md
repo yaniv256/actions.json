@@ -339,8 +339,9 @@ into the browser runtime — it does **not** reload the bridge's own `--actions`
 overlay manifest. To pick up a new generic primitive you must relaunch the
 bridge process pointed at the updated manifest.
 
-When the bridge is spawned by an MCP client config (e.g. `.claude.json`
-`mcpServers.actions-json` with `command` + `--actions` args), updating the
+When the bridge is spawned by an MCP client, identify the active MCP launcher config
+for that session first: `~/.codex/config.toml` `[mcp_servers.actions_json]` for
+Codex, or `~/.claude.json` `mcpServers.actions-json` for Claude Code. Updating the
 staged manifest file is not enough: repoint both `command` and the `--actions`
 path at the new staged build directory, then restart the client/session so it
 respawns the bridge. Staged builds follow

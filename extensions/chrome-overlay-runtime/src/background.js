@@ -31,6 +31,7 @@ import {
 import {
   TransferBuffer,
   TransferBufferError,
+  transferInsertValue,
 } from "./agent/transfer-buffer.mjs";
 import {
   executeWorkflowAction,
@@ -65,7 +66,7 @@ const EXTENSION_STORAGE_BUNDLE_KEY = "actionsJsonStorageBundle";
 const MAX_AGENT_LOG_EVENTS = 500;
 const DEFAULT_SESSION_ID = "actions-json-default";
 const DEFAULT_SESSION_GROUP_TITLE = "actions.json";
-const DEFAULT_BRIDGE_URL = "ws://100.99.150.49:17345/extension";
+const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:17345/extension";
 const AGENT_OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
 const AGENT_OFFSCREEN_TARGET = "actions-json-agent-offscreen";
 const EXTENSION_ACTIONS_URL = "actions/overlay.actions.json";
@@ -896,8 +897,29 @@ const connectBackgroundBridge = async (state, options = {}) => {
         };
       }
       if ((!replayResult || replayResult.summary.registered_count === 0) && bridgeState.readyItem) {
-        sendBridgeItem(bridgeState.readyItem);
-        rememberRuntimeRegistration(bridgeState.readyItem, bridgeState.tabId);
+        let tab;
+        try {
+          tab = await chrome.tabs.get(bridgeState.tabId);
+        } catch (_error) {
+          tab = {
+            id: bridgeState.tabId,
+            url: bridgeState.readyItem.url || null,
+          };
+        }
+        const decorated = await decorateReadyItemForReplay({
+          readyItem: bridgeState.readyItem,
+          tab,
+          claim: {
+            runtimeKey: bridgeState.readyItem.runtime_key,
+            authorizationId: bridgeState.readyItem.authorization_id,
+            url: bridgeState.readyItem.url,
+          },
+          bridgeSessionId: bridgeState.bridgeSessionId || null,
+          reason: "bridge_initial",
+          attempt: 1,
+        });
+        sendBridgeItem(decorated);
+        rememberRuntimeRegistration(decorated, bridgeState.tabId);
       }
       for (const item of bridgeState.relayedReadyItems || []) {
         sendBridgeItem(item);
@@ -1440,6 +1462,11 @@ const navigateClaimedTab = async (message = {}) => {
   const { session, tabId, claim } = await resolveClaimedTarget(
     Number(message.tab_id ?? message.tabId)
   );
+  // A navigation creates a new document runtime_id. Snapshot the current ids
+  // before invalidating the page so the success response can prove it is not
+  // handing the caller an identity from the previous document.
+  const previousRuntimeIds = runtimeIdsForTab(tabId);
+  const previousUrl = claim.url || null;
 
   if (reload) {
     await chrome.tabs.reload(tabId);
@@ -1448,9 +1475,26 @@ const navigateClaimedTab = async (message = {}) => {
   }
   await waitForTabComplete(tabId);
   const tab = await chrome.tabs.get(tabId);
+  const sameDocument = Boolean(
+    !reload &&
+    previousUrl &&
+    tab.url &&
+    withoutHash(previousUrl) === withoutHash(tab.url) &&
+    previousUrl !== tab.url
+  );
   claim.url = tab.url || claim.url || null;
   session.activeTabId = tabId;
   await sessionStore.save();
+  // The old content document is gone. Reap its bridge rows and local routes
+  // before reconnecting, otherwise runtimeIdsForTab keeps the stale id first
+  // and serializeClaimedTab returns a runtime that the bridge is already
+  // replacing asynchronously.
+  if (!sameDocument) {
+    for (const runtimeId of previousRuntimeIds) {
+      sendBridgeItem({ type: "runtime_removed", runtime_id: runtimeId });
+    }
+    forgetRuntimeRoutesForTab(tabId);
+  }
   // Re-establish the content runtime on the freshly loaded document.
   // connectClaimedTab now also refreshes the local route (rememberRuntimeRoute),
   // so the reconnected runtime stays reachable across the navigation.
@@ -1484,12 +1528,42 @@ const navigateClaimedTab = async (message = {}) => {
     };
   }
 
+  const currentRuntimeIds = runtimeIdsForTab(tabId);
+  const replacementRuntimeIds = sameDocument
+    ? currentRuntimeIds
+    : currentRuntimeIds.filter((runtimeId) => !previousRuntimeIds.includes(runtimeId));
+  if (replacementRuntimeIds.length === 0) {
+    return {
+      ok: false,
+      navigated: true,
+      connected,
+      reloaded: message.reload === true,
+      tab: serializeClaimedTab(session, tab, claim),
+      error: {
+        code: "runtime_identity_unattested",
+        message:
+          "The tab navigated and reconnected, but the replacement document runtime_id was not registered before the response boundary.",
+        recoverable: true,
+        next_step:
+          "Refresh actions-json://bridge/runtimes and route by the new runtime_id for this tab URL; do not reuse the pre-navigation runtime_id.",
+        previous_runtime_ids: previousRuntimeIds,
+      },
+    };
+  }
+
+  const replacementRuntimeId = replacementRuntimeIds[0];
+
   return {
     ok: true,
     navigated: true,
     connected,
     reloaded: message.reload === true,
-    tab: serializeClaimedTab(session, tab, claim),
+    runtime_identity_attested: true,
+    runtime_replaced: !sameDocument,
+    tab: {
+      ...serializeClaimedTab(session, tab, claim),
+      runtime_id: replacementRuntimeId,
+    },
   };
 };
 
@@ -2403,12 +2477,43 @@ const debugExpressionFor = (source, args) => {
   return `
     (async () => {
       const args = ${serializedArgs};
+      const __actionsJsonNormalizeText = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const __actionsJsonIsElementVisible = (element) => {
+        if (!element || !(element instanceof Element)) return false;
+        const rect = element.getBoundingClientRect();
+        const style = window.getComputedStyle(element);
+        return rect.width > 0 && rect.height > 0
+          && rect.bottom > 0 && rect.right > 0
+          && rect.top < window.innerHeight && rect.left < window.innerWidth
+          && style.visibility !== "hidden"
+          && style.display !== "none";
+      };
+      const __actionsJsonQueryRelative = (root, selector, options = {}) => {
+        const visibleOnly = options.visible_only ?? options.visibleOnly ?? true;
+        const matches = [];
+        for (const part of String(selector || "").split(",")) {
+          const trimmed = part.trim();
+          if (!trimmed) continue;
+          if (trimmed === ":scope") {
+            matches.push(root);
+            continue;
+          }
+          try {
+            if (root.matches?.(trimmed)) matches.push(root);
+          } catch (_error) {}
+          try {
+            matches.push(...Array.from(root.querySelectorAll(trimmed)));
+          } catch (_error) {}
+        }
+        const uniqueMatches = Array.from(new Set(matches));
+        return visibleOnly ? uniqueMatches.filter(__actionsJsonIsElementVisible) : uniqueMatches;
+      };
       const helpers = {
-        normalizeText(value) {
-          return String(value || "").replace(/\\s+/g, " ").trim();
-        },
+        normalizeText: __actionsJsonNormalizeText,
+        isElementVisible: __actionsJsonIsElementVisible,
+        queryRelative: __actionsJsonQueryRelative,
         visibleText(element) {
-          return element ? this.normalizeText(element.textContent || element.getAttribute("aria-label")) : "";
+          return element ? __actionsJsonNormalizeText(element.textContent || element.getAttribute("aria-label")) : "";
         }
       };
       ${source}
@@ -2417,13 +2522,16 @@ const debugExpressionFor = (source, args) => {
 };
 
 const evaluateWithDebugger = async (message, sender) => {
+  const primitive = message.primitive === "browser.run_javascript"
+    ? "browser.run_javascript"
+    : "debug.run_javascript";
   const tabId = sender.tab?.id;
   if (!tabId) {
-    throw new Error("debug.run_javascript requires an authorized browser tab");
+    throw new Error(`${primitive} requires an authorized browser tab`);
   }
   const source = message.source || message.javascript;
   if (typeof source !== "string" || !source.trim()) {
-    throw new Error("debug.run_javascript requires source");
+    throw new Error(`${primitive} requires source`);
   }
 
   const target = { tabId };
@@ -3400,10 +3508,7 @@ const handleTransferBufferMessage = async (message = {}, sender = {}) => {
           ok: true,
           primitive,
           adapter: "extension",
-          value: {
-            ...rendered,
-            text: rendered.rendered_text,
-          },
+          value: transferInsertValue(rendered),
         },
       };
     }
@@ -4506,6 +4611,7 @@ self.__inputTest = {
 // self-install/iterate loop). Surfaces the full result/error rather than a bare
 // message ack, so a failed bridge connect is VISIBLE, not a silent count:0.
 self.__claimTest = {
+  inject: (tabId) => injectContent(Number(tabId)),
   claim: async (tabId, bridgeUrl) => {
     try {
       const url = bridgeUrl || (await loadBridgeUrl().catch(() => DEFAULT_BRIDGE_URL));

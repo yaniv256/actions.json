@@ -87,8 +87,8 @@ Do NOT skip any line under momentum — each is a failure that actually happened
    covering your change) and confirm it passes on the code you're about to ship —
    BEFORE asking a human to install. Give yourself eyes; don't make a human your oracle.
 2. [ ] **Package + publish the extension prerelease TO THE DEV REPO** — `scripts/package-extension.sh`
-   then `gh release create extension-v<v> --repo ActionsJson/actions.json.dev --target main --prerelease`
-   with the zip + `SHA256SUMS.txt`. **The `--repo` MUST be `ActionsJson/actions.json.dev` (the private
+   then create a prerelease in the private development repository, targeting `main`,
+   with the zip + `SHA256SUMS.txt`. **The release target MUST be the private
    dev repo) — NEVER `yaniv256/actions.json` (public).** Prereleases are dev-repo-only; the public repo
    receives NOTHING except through the reviewed sync PR (see the repo-targeting rule below). Staging the
    bridge is NOT releasing the extension.
@@ -98,7 +98,7 @@ Do NOT skip any line under momentum — each is a failure that actually happened
    `scripts/package-extension.sh` or the zip ships broken.
 5. [ ] **The human ask MUST contain the GitHub release URL** with verified assets
    (`gh release view <tag> --json assets`). No URL = step 2 wasn't done. **Verify the URL is the
-   DEV repo** (`github.com/ActionsJson/actions.json.dev/releases/...`), not the public one.
+   development release page**, not the public one.
 
 The full rationale for each is below. Read it; then act on the checklist.
 
@@ -111,9 +111,9 @@ leaked (a GitHub release is a tag + notes + an uploaded asset, NOT a code push �
 an already-public commit), but the public repo should never carry a version that hasn't been synced.
 The fix is this rule; internalize it.
 
-- **Every prerelease / dev test build → `--repo ActionsJson/actions.json.dev` (the PRIVATE dev repo).**
+- **Every prerelease / dev test build → the private development repository.**
   This is where the human installs test builds from. `gh` defaults to the cwd's remote, but ALWAYS
-  pass `--repo ActionsJson/actions.json.dev` explicitly so a wrong cwd can't misfire.
+  select the private development repository explicitly so a wrong cwd can't misfire.
 - **The PUBLIC repo `yaniv256/actions.json` receives NOTHING by a bare `gh release create`.** Public
   releases are produced ONLY by the reviewed dev→public **sync PR** flow (analyze → PR text → Yaniv
   approves → sync + open PR → Yaniv merges) and, for the binaries, by `scripts/release-binaries.sh`
@@ -123,7 +123,7 @@ The fix is this rule; internalize it.
   tag+release the public repo shouldn't have. If it happens: `gh release delete <tag> --repo
   yaniv256/actions.json --cleanup-tag --yes` to remove both the release and its tag, then re-cut on
   the dev repo. Verify public is back to its last real version with `gh release list --repo yaniv256/actions.json`.
-- **Sanity check before EVERY `gh release create`:** the `--repo` value is `ActionsJson/actions.json.dev`.
+- **Sanity check before EVERY prerelease:** the target is the private development repository.
   If you typed `yaniv256/actions.json`, stop — that is the public surface and needs the sync PR, not a
   bare release.
 
@@ -136,7 +136,7 @@ A release reaches users through three independently-loaded surfaces. Updating on
    **Ordering constraint (learned the hard way, 2026-07-09):** `release-binaries.sh` builds `win-x64` **on the Windows host**, by cloning `$GIT_URL` (= `$repo`, default the **public** repo) and checking out `$tag`. **A tag that exists only on the dev repo cannot resolve there.** So the bridge binaries can only be cut **after the tag is pushed to `$repo`** — i.e. after the public sync lands, not before. Pass `--repo`/`--tag` if you mean a different pair.
 
    The script now **verifies its own output**: after building, it asserts a non-empty tarball for every requested platform and aborts non-zero, naming what is missing. It used to exit 0 with `win-x64` silently absent, because a platform build runs inside `collect < <(build_x)` and a process substitution's exit status is not propagated — `set -euo pipefail` cannot see it. A release cut that way ships with no Windows bridge binary. Guarded by `npm run test:release-scripts`. **Never read "the loop ran" as "the artifacts exist."**
-2. **The staged local bridge** (`~/.local/share/actions-json-mcp/<ver>-<slug>/`) that a session restart reloads from `~/.claude.json`.
+2. **The staged local bridge** (`~/.local/share/actions-json-mcp/<ver>-<slug>/`) that a session restart reloads from the active MCP launcher config (`~/.codex/config.toml` for Codex or `~/.claude.json` for Claude Code).
 3. **The npm wrapper `@actions-json/bridge`** (`adapters/npm-bridge/`) — how `npx @actions-json/bridge mcp` users get the bridge. It is **published separately to npm** and does NOT auto-track a GitHub release. It fell 66+ versions behind exactly because the release cycle ignored it. When a release changes the bridge binary or the tool catalog, you MUST:
    - bump `bridgeBinaryVersion` in `adapters/npm-bridge/package.json` to the release version (it downloads `actions-json-mcp-<bridgeBinaryVersion>-<slug>.tar.gz` from the `extension-v<...>` release — verify those binaries exist, or the pin 404s on first `npx`);
    - re-copy the bundled dictionary so it is byte-identical to canonical: `cp extensions/chrome-overlay-runtime/actions/overlay.actions.json adapters/npm-bridge/dictionary/overlay.actions.json` — the `dictionary-freshness.test.js` guard fails loudly on drift (a fresh binary + stale catalog = npx users missing headline primitives);
@@ -191,8 +191,9 @@ one human action makes everything live at once.**
    installs.)
 
 3. **Stage the bridge and repoint the config — DO THIS BEFORE ASKING FOR A
-   RESTART.** The running bridge is spawned by `~/.claude.json`
-   `mcpServers.actions-json` from a STAGED dir
+   RESTART.** The running bridge is spawned by the current harness's active MCP
+   launcher config: `~/.codex/config.toml` `[mcp_servers.actions_json]` for
+   Codex, or `~/.claude.json` `mcpServers.actions-json` for Claude Code. It loads from a STAGED dir
    `~/.local/share/actions-json-mcp/<ver>/`; a session restart reloads the bridge
    FROM THAT CONFIG. A working-tree `cargo build` does NOT reach it. So a restart
    only tests your new code if you have already staged it:
@@ -202,9 +203,18 @@ one human action makes everything live at once.**
    cp mcp/target/debug/actions-json-mcp "$STAGE/actions-json-mcp"
    cp extensions/chrome-overlay-runtime/actions/overlay.actions.json "$STAGE/overlay.actions.json"
    chmod +x "$STAGE/actions-json-mcp"
-   # then repoint BOTH command and --actions in ~/.claude.json mcpServers.actions-json to $STAGE
+   # then repoint BOTH command and --actions in the active harness entry to $STAGE
    ```
-   Sanity-check the staged artifacts before the restart:
+   Do not select the config merely because it exists; both files can coexist.
+   Identify the harness that owns the current session, then prove its exact entry
+   points at the staged package before asking for a restart:
+   ```bash
+   node scripts/verify-actions-json-launcher-config.mjs \
+     --harness codex \
+     --stage-dir "$STAGE"
+   # Use --harness claude for Claude Code.
+   ```
+   The checker must return `ok: true`. Sanity-check the staged artifacts too:
    `strings "$STAGE/actions-json-mcp" | grep <primitive>` and
    `grep <primitive> "$STAGE/overlay.actions.json"`.
 

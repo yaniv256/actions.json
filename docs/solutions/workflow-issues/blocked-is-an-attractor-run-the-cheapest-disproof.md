@@ -2,7 +2,7 @@
 title: '"I''m blocked" is a hypothesis-space attractor — run the cheapest disproof before you ask a human'
 date: 2026-07-09
 category: workflow-issues
-module: agent-task-os
+module: agent-kanban
 problem_type: workflow_issue
 component: development_workflow
 severity: high
@@ -13,7 +13,7 @@ applies_when:
   - "an autonomous loop under produce-pressure reaches a stopping point that feels responsible"
   - "declaring a task blocked on a board or in a tracker"
   - "relief accompanies a conclusion"
-tags: [agent-task-os, autonomous-loop, blocked, attractor, disproof, measurement, false-negative, self-verification, instrumentation, incident-investigation]
+tags: [agent-kanban, autonomous-loop, blocked, attractor, disproof, measurement, false-negative, self-verification, instrumentation, incident-investigation]
 ---
 
 # "I'm blocked" is a hypothesis-space attractor — run the cheapest disproof before you ask a human
@@ -50,7 +50,7 @@ is precisely the direction that licenses stopping.
 **Before declaring a block — or asking a human to do something for you — write the
 self-implicating alternative explicitly, and disprove that first.**
 
-`agent-task-os` rule 12 states the mechanism:
+Agent Kanban rule 12 states the mechanism:
 
 > "'I'm blocked' is a HYPOTHESIS-SPACE ATTRACTOR — treat it with suspicion, not
 > relief. In a debugging investigation, 'it's the platform's fault' is an

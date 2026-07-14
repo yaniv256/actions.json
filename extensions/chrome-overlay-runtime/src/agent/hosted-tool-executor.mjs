@@ -1,4 +1,4 @@
-const DEFAULT_BRIDGE_URL = "ws://100.99.150.49:17345/extension";
+const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:17345/extension";
 const HOSTED_SCREENSHOT_DEFAULTS = {
   format: "jpeg",
   quality: 60,

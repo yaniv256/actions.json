@@ -53,6 +53,22 @@ For Google Docs the reliable instruments are:
 - `docs.read` — a `page.fetch` of the document model, which returns the true paragraph/structure array.
 - A live authenticated fetch of the doc's `/mobilebasic` export — the real DOM HTML of the document.
 
+For Google Sheets, the same principle applies at a stricter identity boundary:
+
+- select the requested A1 identity through the Name Box without a later grid
+  coordinate click that can replace the selection;
+- read authenticated `/htmlview/sheet` before and after the mutation;
+- compare the exact requested cell or rectangle, not merely the presence of a
+  token somewhere in the workbook;
+- use a separately keyed confirmation fetch because the first post-commit HTML
+  view may be stale;
+- independently confirm with `sheets.read` before claiming success.
+
+This pattern was live accepted for `sheets.cell.set` and
+`sheets.range.paste_tsv_at_anchor` in public-storage PR #6. Clipboard acceptance
+or a green keyboard event is transport evidence, not proof that the named cell
+received the write.
+
 Rules of practice:
 
 1. **Score from the model, never from pixels.** Treat the canvas screenshot as a secondary human artifact only. When the screenshot disagrees with the model, **trust the model** and flag the screenshot as stale.
@@ -107,6 +123,7 @@ Failure: the pixels were a frozen pre-edit frame; the orphan paragraph did not e
 ## Related
 
 - Origin investigation: `investigations/browser-screenshot-stale-frame-on-docs-canvas.md` (same event; full root-cause analysis, blame, and remediation plan).
+- `investigations/google-sheets-workflow-postconditions-2026-07-12.md` — exact-A1 Sheets mutation and server-model verification closure.
 - `investigations/agent-spellfix-undercomplete-and-hallucinated-claim.md` — the hallucinated "edit landed" claim that motivated model-read-back scoring + the completion barrier.
 - `docs/solutions/runtime-behavior/docs-canvas-coalesces-rapid-trusted-arrow-keys.md` — a sibling Docs-canvas verification learning; shares the rule "never trust a green tool signal; only a document read-back proves an edit landed," but its problem (rapid trusted arrow keys coalesce → caret under-travel) and fix differ.
 - `docs/solutions/best-practices/run-a-real-experiment-before-concluding-root-cause.md` — the marker test here is an instance of "run a real experiment before concluding."

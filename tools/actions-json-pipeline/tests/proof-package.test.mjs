@@ -73,6 +73,152 @@ test("screenshot entries require explicit proof metadata", async () => {
   );
 });
 
+test("screenshot entries require surface identity and a freshness classification", async () => {
+  const site = await copyFixtureSite("good-map");
+  const context = await loadPipelineTarget(site);
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "actions-proof-"));
+  const screenshotsPath = path.join(temp, "screenshots.json");
+  await fs.writeFile(
+    screenshotsPath,
+    JSON.stringify({
+      screenshots: [{
+        path: "card.png",
+        purpose: "Visible card",
+        source: "browser.screenshot",
+        captured_at: "2026-07-12T10:00:00Z",
+      }],
+    }),
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => writeProofPackage(context, { packageName: "missing-identity", screenshotsPath }),
+    /surface_identity/,
+  );
+});
+
+test("unverified screenshots are accepted only as positive-only evidence", async () => {
+  const site = await copyFixtureSite("good-map");
+  const context = await loadPipelineTarget(site);
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "actions-proof-"));
+  const screenshotsPath = path.join(temp, "screenshots.json");
+  const base = {
+    path: "card.png",
+    purpose: "Visible card",
+    source: "browser.screenshot",
+    captured_at: "2026-07-12T10:00:00Z",
+    surface_identity: {
+      kind: "url",
+      value: "https://trello.com/c/example",
+      method: "verified active tab",
+    },
+    freshness: { status: "unverified" },
+  };
+  await fs.writeFile(
+    screenshotsPath,
+    JSON.stringify({ screenshots: [{ ...base, evidence_policy: "bidirectional" }] }),
+    "utf8",
+  );
+  await assert.rejects(
+    () => writeProofPackage(context, { packageName: "unsafe-negative-proof", screenshotsPath }),
+    /positive_only/,
+  );
+
+  await fs.writeFile(
+    screenshotsPath,
+    JSON.stringify({ screenshots: [{ ...base, evidence_policy: "positive_only" }] }),
+    "utf8",
+  );
+  const report = await writeProofPackage(context, {
+    packageName: "positive-only-proof",
+    screenshotsPath,
+  });
+  const manifest = JSON.parse(
+    await fs.readFile(path.join(report.package_dir, "screenshots.json"), "utf8"),
+  );
+  assert.equal(manifest.screenshots[0].freshness.status, "unverified");
+  assert.equal(manifest.screenshots[0].evidence_policy, "positive_only");
+});
+
+test("bidirectional screenshot evidence requires independent freshness proof", async () => {
+  const site = await copyFixtureSite("good-map");
+  const context = await loadPipelineTarget(site);
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "actions-proof-"));
+  const screenshotsPath = path.join(temp, "screenshots.json");
+  await fs.writeFile(
+    screenshotsPath,
+    JSON.stringify({
+      screenshots: [{
+        path: "card.png",
+        purpose: "Visible card",
+        source: "browser.screenshot",
+        captured_at: "2026-07-12T10:00:00Z",
+        surface_identity: {
+          kind: "url",
+          value: "https://trello.com/c/example",
+          method: "verified active tab",
+        },
+        freshness: {
+          status: "independently_verified",
+          method: "pixel sentinel changed after semantic state transition",
+          evidence: "action-log.json#call-42",
+          verified_at: "2026-07-12T10:00:01Z",
+        },
+        evidence_policy: "bidirectional",
+      }],
+    }),
+    "utf8",
+  );
+  const report = await writeProofPackage(context, {
+    packageName: "fresh-proof",
+    screenshotsPath,
+  });
+  const manifest = JSON.parse(
+    await fs.readFile(path.join(report.package_dir, "screenshots.json"), "utf8"),
+  );
+  assert.equal(
+    manifest.screenshots[0].freshness.status,
+    "independently_verified",
+  );
+});
+
+test("a capture timestamp cannot serve as independent freshness evidence", async () => {
+  const site = await copyFixtureSite("good-map");
+  const context = await loadPipelineTarget(site);
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "actions-proof-"));
+  const screenshotsPath = path.join(temp, "screenshots.json");
+  const capturedAt = "2026-07-12T10:00:00Z";
+  await fs.writeFile(
+    screenshotsPath,
+    JSON.stringify({
+      screenshots: [{
+        path: "card.png",
+        purpose: "Visible card",
+        source: "browser.screenshot",
+        captured_at: capturedAt,
+        surface_identity: {
+          kind: "url",
+          value: "https://trello.com/c/example",
+          method: "verified active tab",
+        },
+        freshness: {
+          status: "independently_verified",
+          method: "timestamp comparison",
+          evidence: capturedAt,
+          verified_at: "2026-07-12T10:00:01Z",
+        },
+        evidence_policy: "bidirectional",
+      }],
+    }),
+    "utf8",
+  );
+
+  await assert.rejects(
+    () => writeProofPackage(context, { packageName: "self-certified-freshness", screenshotsPath }),
+    /independent of captured_at/,
+  );
+});
+
 test("package CLI writes a manifest with every packaged file", async () => {
   const site = await copyFixtureSite("good-map");
   const cli = path.resolve("tools/actions-json-pipeline/bin/actions-json.js");

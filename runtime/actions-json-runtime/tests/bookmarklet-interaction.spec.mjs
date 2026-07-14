@@ -416,6 +416,13 @@ test("bookmarklet captures screenshots through user-consented screen capture", a
     width: 320,
     height: 180,
     mime_type: "image/png",
+    surface_identity: {
+      kind: "user_selected_display_surface",
+      value: "browser",
+      method: "getDisplayMedia user selection",
+    },
+    freshness: { status: "unverified" },
+    evidence_policy: "positive_only",
   });
   expect(output.data_url).toBe("data:image/png;base64,ZmFrZS1zY3JlZW5zaG90");
   expect(await page.evaluate(() => window.__actionsJsonGetDisplayMediaCalls)).toBe(1);

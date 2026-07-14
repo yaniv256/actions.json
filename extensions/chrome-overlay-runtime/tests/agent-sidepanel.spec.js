@@ -88,7 +88,7 @@ test("side panel saves a redacted key and controls a mocked hosted session", asy
   await expect(page.locator("#startAgent")).toBeDisabled();
 
   await openConfigTab(page);
-  await expect(page.locator("#bridgeUrl")).toHaveValue("ws://100.99.150.49:17345/extension");
+  await expect(page.locator("#bridgeUrl")).toHaveValue("ws://127.0.0.1:17345/extension");
   await expect(page.locator("#configPanel")).toHaveAttribute("aria-label", "Settings");
   await expect(page.locator("#voiceSelect")).toHaveValue("cedar");
   await page.locator("#voiceSelect").selectOption("cedar");

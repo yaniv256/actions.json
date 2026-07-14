@@ -1,14 +1,19 @@
 import { lstat, readdir, readFile, readlink } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import { join } from "node:path";
+import { promisify } from "node:util";
+
+import { parseGitlinkPaths } from "./lib/gitlinks.mjs";
+
+const execFileAsync = promisify(execFile);
 
 const canonicalSkillPath = "skills/write-actions-json/SKILL.md";
 const openAiMetadataPath = "skills/write-actions-json/agents/openai.yaml";
 const gettingStartedPath = "skills/write-actions-json/references/getting-started.md";
 const gettingStartedPagesPath = "docs/getting-started.md";
-// Skills under skills/ that are standalone submodules with their own repo and
-// validation. They are not this repo's canonical inline authoring skill, so the
-// canonical-skill discovery below must ignore them.
-const submoduleSkillDirs = ["skills/actions-json-dev-cycle", "skills/incident-investigation"];
+// Repo-internal operating skills are intentionally present but are not part of
+// the one installable public authoring-skill surface validated by this script.
+const nonInstallableSkillDirs = ["skills/actions-json-dev-cycle"];
 const publicDocReferences = [
   "actions-bridge-protocol.md",
   "actions-json-format.md",
@@ -60,8 +65,11 @@ function parseFrontmatter(path, text) {
   }
 }
 
+const { stdout: stagedEntries } = await execFileAsync("git", ["ls-files", "--stage"]);
+const gitlinkDirs = parseGitlinkPaths(stagedEntries);
 const skillPaths = (await findSkillFiles("skills")).filter(
-  (path) => !submoduleSkillDirs.some((dir) => path.startsWith(`${dir}/`)),
+  (path) => ![...gitlinkDirs, ...nonInstallableSkillDirs]
+    .some((dir) => path.startsWith(`${dir}/`)),
 );
 if (skillPaths.length !== 1 || skillPaths[0] !== canonicalSkillPath) {
   throw new Error(
@@ -135,7 +143,8 @@ for (const phrase of [
   "Prerequisites",
   "Path A: Use The Hosted Browser Agent",
   "Path B: Connect An External Coding Agent",
-  "Install And Verify The Chrome Extension",
+  "Install The Chrome Extension",
+  "Optional: Verify The Download",
   "Verify the complete bridge path",
   "Current Limitations",
   "127.0.0.1:17345",

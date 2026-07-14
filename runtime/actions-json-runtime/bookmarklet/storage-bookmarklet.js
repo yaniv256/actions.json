@@ -1779,6 +1779,15 @@
         rendered: true,
         user_consented: true,
         tab_id: requestId,
+        surface_identity: {
+          kind: "user_selected_display_surface",
+          value: trackSettings.displaySurface || "browser",
+          method: "getDisplayMedia user selection",
+        },
+        freshness: {
+          status: "unverified",
+        },
+        evidence_policy: "positive_only",
       };
       openTab({
         id: `${requestId}-result`,
@@ -2110,7 +2119,10 @@
   function waitForEditableHandlers() {
     return new Promise((resolve) => {
       if (typeof requestAnimationFrame === "function") {
-        requestAnimationFrame(() => resolve());
+        Promise.race([
+          new Promise((done) => requestAnimationFrame(done)),
+          new Promise((done) => setTimeout(done, 50))
+        ]).then(resolve);
         return;
       }
       setTimeout(resolve, 0);

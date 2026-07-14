@@ -24,11 +24,19 @@ The invariant has two directions and they fail differently — see *Asymmetric r
 
 **Claimed tab** — a browser tab the extension has taken ownership of and will drive on the agent's behalf. Tab-lifecycle operations (listing, activating, closing claimed tabs) read and write the extension's persisted session state; operations that only observe or capture a page do not, which is why the two classes can fail independently.
 
+**Owner-qualified runtime address** — the pair of a bridge runtime identity and a browser-local tab identity copied from one global inventory row. The runtime identifies which connected browser owns the tab number; the tab number alone is not globally unique.
+
+The address is generation-sensitive: full-document navigation preserves the tab container but replaces its document runtime, so a successful replacement operation must return a newly attested runtime identity. An operation that targets the already selected runtime without an explicit local tab identity does not need the pair.
+
 **Background service worker** — the extension's always-available background context. Under Manifest V3 it is torn down and re-instantiated on its own schedule rather than running continuously, so any state it holds must survive re-instantiation and any readiness it awaits must be able to recover from a restart mid-initialization — code that assumes a single, permanent startup will wedge when the worker is recycled.
 
-**Primitive** — a named, generic unit of browser capability that an agent invokes directly and that a site map's workflow steps compose. Each primitive is declared once in a shared dictionary, from which both the bridge's tool surface and the extension's workflow gate derive their view of it; being declared there is what makes it invocable from either.
+**Primitive** — a named, generic unit of browser capability that an agent may invoke directly or that a site map's workflow steps may compose. Exposure is surface-specific: portable workflow and hosted-agent exposure derives from the primitive dictionary, while direct bridge-tool exposure derives from the bridge tool declaration and routing layer. Declaration, documentation, implementation, exposure, and live reachability are separate properties; only evidence at each boundary establishes that property.
 
-Primitives divide by the context they run in, and the division is load-bearing. A *portable* primitive executes in the page's content script and is therefore reachable from a workflow step. A *privileged* one executes in the background over the browser debugger, and is reachable only by a direct agent call — a workflow step that names it fails at parse time. Declared, documented, implemented, and reachable are four separate properties: only invoking a primitive establishes the last.
+Primitives divide by the context they run in, and the division is load-bearing. A *portable* primitive executes in the page's content script and is therefore reachable from a workflow step. A *privileged* one executes in the background over the browser debugger, and is reachable only by a direct agent call — a workflow step that names it fails at parse time. That context split does not collapse the boundary distinction above: only invoking a primitive establishes live reachability.
+
+**State projection** — a named read, optionally constrained to a route scope, that turns a website's current rendered state into a logical object an agent or workflow can verify. When a projection declares route scope, applicability is evaluated on the page where the read runs, so a route-changing action must choose one available on its destination route.
+
+**Workflow postcondition** — a logical assertion evaluated after a workflow succeeds, using a State projection and the workflow's original input to decide whether the intended effect actually occurred. Dispatch success alone cannot satisfy it; if the projection is unavailable or the assertion fails, the action reports failure even when earlier interaction steps already changed the page.
 
 **Visible (as a predicate)** — in this codebase *visible* means an element currently intersects the viewport, never that it exists. An element scrolled out of view is present in the DOM and addressable, yet reports as not visible; so any read that filters on visibility answers "what is rendered", not "what is there".
 
@@ -59,6 +67,8 @@ Because its gate reads the accessibility layer, it is a *privileged* primitive i
 **Telescoping boards** — a task-tracking hierarchy where a single card on one board expands into an entire separate board. The parent board tracks the *existence* of a thing (one card, e.g. "Investigation: X"); a dedicated child board holds its full lifecycle (e.g. an Investigations board with lists Bug -> Investigating -> Root Cause -> Remediation -> Done). Fractal/recursive: any large goal can telescope into its own project board while remaining one card on its parent.
 
 **Context-injection card** — a Trello card treated as a ready-made briefing that lets a returning, memory-less agent resume a task cold. It carries an extensive description (symptom/task/status/next-action), a checklist of sub-tasks, and references to fuller files maintained elsewhere (an investigation .md, the map, the commit) so it stays contained but points to depth. The card is the compressed skill; the files are the full text.
+
+**Closure evidence** — direct current-state proof that every deliverable a task or investigation declared is complete, including committed implementation, required tests, distribution or deployment, and affected-boundary live verification. A checklist, status word, source-only fix, accepted limitation, or follow-up task may describe progress but cannot replace the evidence required for a Done transition.
 
 ## Investigation & curiosity
 

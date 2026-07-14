@@ -62,7 +62,7 @@ skills, the GitHub release). Break none of them.
   (extension zip on this host; linux-x64 native; win-x64 over PowerShell; macos-arm64/x64 over SSH to the Mac).
   Verify each artifact + SHA256SUMS before upload. The **`chrome-launcher-helper.exe`** (the native-Windows pipe owner) ships as its **OWN standalone release asset** — `chrome-launcher-helper-<v>-win-x64.tar.gz` — NOT inside the bridge tarball. Why (Yaniv 2026-07-09): the helper must be installed where the **BROWSER** runs, which in the WSL→Windows topology is a DIFFERENT machine than the one that pulls the bridge tarball (the agent host, typically linux-x64). Bundling it in the win-x64 bridge tarball only serves an all-Windows setup and hides it from the split setup it exists for. `release-binaries.sh` builds it natively on the Windows host (`build_windows`) and emits it via `package_helper()` as its own asset. After a release, CONFIRM it's a listed asset on the PUBLIC repo: `gh release view extension-v<v> --repo yaniv256/actions.json --json assets` must include `chrome-launcher-helper-<v>-win-x64.tar.gz`. (0.1.186 shipped the helper only *inside* the win-x64 tarball — the standalone-asset design is the corrected shape for the next release.)
 
-Two artifacts are usually involved and load out of band: **the extension** (installed from a GitHub release — the only way it reaches the browser) and **the bridge** (the Rust MCP bridge: its `--actions` manifest, read once at launch, and its Rust routing allow-list `extension_executor_supports_primitive`). A working-tree `cargo build` does NOT reach the running bridge — it is spawned by `~/.claude.json` from a STAGED dir.
+Two artifacts are usually involved and load out of band: **the extension** (installed from a GitHub release — the only way it reaches the browser) and **the bridge** (the Rust MCP bridge: its `--actions` manifest, read once at launch, and its Rust routing allow-list `extension_executor_supports_primitive`). A working-tree `cargo build` does NOT reach the running bridge — the active agent harness spawns it from the active MCP launcher config. Known locations are `~/.codex/config.toml` for Codex and `~/.claude.json` for Claude Code; neither path is universal truth.
 
 ### Phase 1: Make the change on a branch and pass focused tests
 
@@ -137,6 +137,17 @@ and failed-target cleanup. A happy-path test alone does not make a launcher prim
 
 **Gotchas, each of which has cost a session:**
 
+- **Do not try to authenticate Trello (or another Google-backed login) inside a
+  debugger-launched Chrome.** Chrome/Google can reject sign-in when the browser
+  is launched under remote debugging, even when the page itself loads normally.
+  For authenticated Trello operation, connect the actions.json extension in the
+  user's already signed-in, regularly launched Chrome profile and operate that
+  claimed tab. Use `start_extension_session` only for isolated extension QA that
+  does not require a fresh interactive login, or with authentication that was
+  established through a supported non-debug browser flow beforehand. A redirect
+  to a login page is an authentication-boundary result, not evidence that the
+  extension or Trello map failed. Never replace the user's regular browser with a
+  debugger profile merely to satisfy an end-to-end test.
 - **Pass a Windows path.** Chrome runs on Windows; a WSL `/tmp/...` path fails with
   `loadUnpacked failed: File path cannot be resolved`. Copy the unpacked dir to `/mnt/c/temp/<name>`
   and pass `C:\temp\<name>`.
@@ -188,7 +199,7 @@ gh release create extension-v<v> --target <branch> --prerelease \
 
 Then verify the assets exist: `gh release view extension-v<v> --json assets`. Staging the bridge is NOT releasing the extension — if you cannot produce a release URL with verified assets, the human has nothing to install. Mark it clearly as a pre-release. Dev pre-releases in this private repo are routine and ungated; only promotion to distribution surfaces needs approval.
 
-### Phase 5: Stage the bridge and repoint the config
+### Phase 5: Stage the bridge and repoint the active launcher config
 
 Do this BEFORE asking for a restart — a restart only tests your new code if it is already staged:
 
@@ -198,14 +209,25 @@ mkdir -p "$STAGE"
 cp mcp/target/debug/actions-json-mcp "$STAGE/actions-json-mcp"
 cp extensions/chrome-overlay-runtime/actions/overlay.actions.json "$STAGE/overlay.actions.json"
 chmod +x "$STAGE/actions-json-mcp"
-# then repoint BOTH command and --actions in ~/.claude.json mcpServers.actions-json to $STAGE
+# Discover the harness that owns THIS session, then repoint BOTH command and --actions:
+#   Codex:       ~/.codex/config.toml [mcp_servers.actions_json]
+#   Claude Code: ~/.claude.json       mcpServers.actions-json
 ```
 
-Sanity-check: `strings "$STAGE/actions-json-mcp" | grep <primitive>` and `grep <marker> "$STAGE/overlay.actions.json"`. Skip the binary copy only if `mcp/` did not change (reuse the prior binary, swap the manifest).
+Do not infer the active config from whichever familiar file exists: multiple harness configs may coexist and point at different staged packages. Identify the current harness first, inspect its actions.json server entry, and preserve all unrelated args and environment. Then run the pre-restart gate against that exact config:
+
+```bash
+node scripts/verify-actions-json-launcher-config.mjs \
+  --harness codex \
+  --stage-dir "$STAGE"
+# Use --harness claude for Claude Code. --config PATH is available for non-default locations.
+```
+
+The checker must return `ok: true`; it verifies the configured `command`, the `--actions` path, and that the staged binary/manifest are usable. A missing entry, stale path, or harness selection that conflicts with current session signals is a delivery/config failure to fix **before asking the human to restart**. Sanity-check the package content too: `strings "$STAGE/actions-json-mcp" | grep <primitive>` and `grep <marker> "$STAGE/overlay.actions.json"`. Skip the binary copy only if `mcp/` did not change (reuse the prior binary, swap the manifest).
 
 ### Phase 6: Ask the human for the single combined action
 
-One ask, everything staged: **"install extension-v<v> and restart my session."** The ask MUST contain the GitHub release URL with verified assets (Phase 4). Recurring failure: an agent completes the build + staging, reports "ready for restart," and the release does not exist — do not do that. Do NOT ask for a restart before Phase 5 (that tests stale code and wastes a round-trip).
+One ask, everything staged: **"install extension-v<v> and restart my session."** The ask MUST contain the GitHub release URL with verified assets (Phase 4). Recurring failures: an agent reports "ready for restart" when the release does not exist, or updates a different harness's config while the active launcher still points at the old package. Do NOT ask for a restart before Phase 5's package and active-config checks pass (that tests stale code and wastes a round-trip).
 
 ### Phase 7: Verify by contract before testing
 
@@ -247,15 +269,20 @@ machinery for *this* extension, not private tooling).
 
 ### Two ways to connect (both ship; only the endpoint/cookies are the gitignored secret)
 
-**Mode A — connect to your own logged-in Chrome (recommended, reliable).** Bring a Chrome
-signed into Google, on a screen, with a normal `--remote-debugging-port` reachable over a
-tunnel, and set `EVAL_CDP_ENDPOINT` (gitignored) to its CDP url (`http://<host>:<port>` —
-a real Chrome endpoint that serves `/json/version`, NOT a WS-only relay). The extension
-must be loaded in that Chrome (or let Mode A' deploy it, below). A genuinely authed browser
-sidesteps Google's cookie-transplant flakiness.
+**Mode A — connect to an already authenticated browser (recommended, reliable).** Complete
+Google/Trello sign-in in a regularly launched Chrome first; do not attempt the interactive
+login after relaunching Chrome under remote debugging. For ordinary user-account operation,
+prefer the actions.json extension in that regular Chrome and its claimed tab. When the eval
+harness specifically requires CDP, use an endpoint for a browser whose authentication was
+established through a supported non-debug flow, reachable over a tunnel, and set
+`EVAL_CDP_ENDPOINT` (gitignored) to its CDP url (`http://<host>:<port>` — a real Chrome
+endpoint that serves `/json/version`, NOT a WS-only relay). The extension must be loaded in
+that browser (or let Mode A' deploy it, below). A genuinely authed browser sidesteps Google's
+cookie-transplant flakiness.
 
 **Mode A' — the repo deploys its own build (the "new release → test" loop).** No endpoint;
-set `DEPLOY_CHROME` + `DEPLOY_USER_DATA` (a logged-in profile) and the harness calls
+set `DEPLOY_CHROME` + `DEPLOY_USER_DATA` (a profile whose required authentication was already
+established outside the debugger-launched session) and the harness calls
 `tools/deploy/deployExtensionSession()` to load the unpacked extension into a Chrome and
 returns a CDP endpoint it then connects to. This is why the deployment machinery lives in
 the repo: Chrome 137+ removed `--load-extension` in branded Chrome, so a new build is loaded

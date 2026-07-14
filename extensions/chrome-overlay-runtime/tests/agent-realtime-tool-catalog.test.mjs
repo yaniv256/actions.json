@@ -159,7 +159,10 @@ test("packaged extension does not advertise primitives that lack an action route
     "keyboard.press",
     "page.info",
     "dom.observe.visible",
+    "dom.observe.attributes",
     "dom.snapshot_text",
+    "locator.value",
+    "dom.focus",
     "locator.text_content",
     "locator.wait_for",
     "transfer.write",
@@ -184,6 +187,22 @@ test("packaged extension does not advertise primitives that lack an action route
     .filter((name) => !staticToolNames.has(name) && !dynamicContentRoutes.has(name));
 
   assert.deepEqual(unroutable, []);
+
+  const contentSource = await readFile(
+    new URL("../src/content.js", import.meta.url),
+    "utf8",
+  );
+  for (const name of [
+    "dom.observe.attributes",
+    "locator.value",
+    "dom.focus",
+  ]) {
+    assert.ok(
+      contentSource.includes(`message.name === "${name}"`) ||
+        contentSource.includes(`case "${name}":`),
+      `${name} must have a real content action route, not merely a test whitelist entry`,
+    );
+  }
 });
 
 test("realtime tool catalog fails closed when packaged primitive metadata omits a schema", () => {

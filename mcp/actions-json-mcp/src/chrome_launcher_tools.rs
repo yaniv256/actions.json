@@ -42,13 +42,13 @@ pub fn tool_manifests() -> Vec<Value> {
         }),
         json!({
             "name": "start_extension_session",
-            "description": "Launch a persistent, VISIBLE Chrome that already has our extension loaded and is driveable over CDP — the self-install + drive-same-instance flow, no human clicks. Returns webSocketDebuggerUrl + verified identity.",
+            "description": "Launch a persistent, VISIBLE debugger Chrome that already has our extension loaded and is driveable over CDP — the self-install + drive-same-instance flow, no human clicks. ISOLATED QA ONLY: do not use this session to establish a fresh Trello or Google-backed login; Chrome or the identity provider may reject authentication under remote debugging. For authenticated user-account operation, use the actions.json extension in the user's already signed-in, regularly launched Chrome. Returns webSocketDebuggerUrl + verified identity and repeats this authentication warning in the result.",
             "input_schema": {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
                     "extension_dir": { "type": "string", "description": "Unpacked extension dir (WSL posix or Windows path)." },
-                    "user_data_dir": { "type": "string", "description": "Chrome profile for the session." }
+                    "user_data_dir": { "type": "string", "description": "Dedicated debugger profile for isolated QA. Authentication required by the target must already exist; do not use this session for a fresh Trello/Google login." }
                 },
                 "required": ["extension_dir"]
             }
@@ -122,7 +122,15 @@ pub async fn dispatch(name: &str, args: &Value, helper_win: Option<&str>) -> Val
             let ext = args.get("extension_dir").and_then(Value::as_str).unwrap_or("");
             let udd = user_data_dir.filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SESSION_PROFILE);
             match b.start_extension_session(ext, udd).await {
-                Ok(s) => json!({ "ok": true, "id": s.id, "name": s.name, "version": s.version, "webSocketDebuggerUrl": s.web_socket_debugger_url, "launch": s.launch }),
+                Ok(s) => json!({
+                    "ok": true,
+                    "id": s.id,
+                    "name": s.name,
+                    "version": s.version,
+                    "webSocketDebuggerUrl": s.web_socket_debugger_url,
+                    "launch": s.launch,
+                    "authentication_warning": "Debugger-launched Chrome is for isolated QA. Do not establish a fresh Trello or Google-backed login in this session; use the actions.json extension in the user's already signed-in, regularly launched Chrome for authenticated account operation."
+                }),
                 Err(e) => json!({ "ok": false, "error": e.to_string() }),
             }
         }
@@ -176,6 +184,19 @@ mod tests {
             claim["input_schema"]["properties"]["extension_id"]["type"],
             "string"
         );
+    }
+
+    #[test]
+    fn start_extension_session_warns_against_fresh_google_backed_login() {
+        let start = tool_manifests()
+            .into_iter()
+            .find(|manifest| manifest["name"] == "start_extension_session")
+            .expect("start_extension_session manifest");
+        let description = start["description"].as_str().expect("description");
+
+        assert!(description.contains("ISOLATED QA ONLY"));
+        assert!(description.contains("fresh Trello or Google-backed login"));
+        assert!(description.contains("regularly launched Chrome"));
     }
 
     #[tokio::test]
