@@ -41,7 +41,7 @@ test("trusted recipe keys relay to the background CDP dispatcher on the sender t
     "background must handle the marker trusted-key relay",
   );
   assert.ok(
-    backgroundSource.includes("dispatchTrustedKey(tabId, message.key, message.modifiers || [])"),
+    backgroundSource.includes("dispatchTrustedKey(tabId, message.key, message.modifiers || [], message.repeat)"),
     "the relay must dispatch via the existing CDP path on the sender's tab",
   );
 });

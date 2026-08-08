@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createChromeHostedToolExecutor } from "../src/agent/hosted-tool-executor.mjs";
+import {
+  createChromeHostedToolExecutor,
+  fetchBridgeRealtimeToolCatalog,
+} from "../src/agent/hosted-tool-executor.mjs";
 
 function createChromeApi({
   activeTab = { id: 42, url: "https://example.test/" },
   bridgeUrl = "ws://127.0.0.1:17345/extension",
+  handshakeSecret = "test-handshake-secret",
   sentMessages = [],
 } = {}) {
   return {
@@ -22,6 +26,9 @@ function createChromeApi({
     storage: {
       local: {
         async get(key) {
+          if (key === "bridgeHandshakeSecret") {
+            return handshakeSecret ? { bridgeHandshakeSecret: handshakeSecret } : {};
+          }
           assert.equal(key, "bridgeUrl");
           return bridgeUrl ? { bridgeUrl } : {};
         },
@@ -323,6 +330,78 @@ test("chrome hosted tool executor returns structured errors when no active tab i
       message: "No active browser tab is available for hosted tool execution.",
     },
   });
+});
+
+// U12b. The bridge gates the legacy HTTP tool routes on the per-installation
+// handshake secret. A service-worker `fetch` CAN set headers (unlike the browser
+// WebSocket API, which is why the /extension path uses a query string), so these
+// callers present it as `Authorization: Bearer <secret>` or they get a 401.
+
+test("hosted tool calls present the bridge handshake secret as a bearer token", async () => {
+  const fetchCalls = [];
+  const chromeApi = createChromeApi({ handshakeSecret: "secret-abc123" });
+  const executor = createChromeHostedToolExecutor({
+    chromeApi,
+    fetchImpl: createOkFetch(fetchCalls, { ok: true, call_id: "bridge-call-1", output: {} }),
+  });
+
+  await executor.execute({ name: "page.info", call_id: "call-1", arguments: {} });
+
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0].options.headers.authorization, "Bearer secret-abc123");
+  // The gate must not have cost the existing content type.
+  assert.equal(fetchCalls[0].options.headers["content-type"], "application/json");
+});
+
+test("the realtime tool catalog request presents the bridge handshake secret", async () => {
+  const fetchCalls = [];
+  const chromeApi = createChromeApi({ handshakeSecret: "secret-catalog-9" });
+
+  const tools = await fetchBridgeRealtimeToolCatalog({
+    chromeApi,
+    fetchImpl: createOkFetch(fetchCalls, {
+      tools: [{ name: "page.info", description: "Read the page.", input_schema: { type: "object" } }],
+    }),
+  });
+
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0].url, "http://127.0.0.1:17345/mcp/tools/list");
+  assert.equal(fetchCalls[0].options.headers.authorization, "Bearer secret-catalog-9");
+  assert.deepEqual(tools.map((tool) => tool.name), ["page.info"]);
+});
+
+// An unpaired installation still makes the call. The bridge then answers
+// `bridge_secret_missing` — a named cause the operator can act on, which beats a
+// request the extension silently declined to make and cannot explain.
+test("an unpaired installation still calls the bridge rather than refusing locally", async () => {
+  const fetchCalls = [];
+  const chromeApi = createChromeApi({ handshakeSecret: null });
+  const executor = createChromeHostedToolExecutor({
+    chromeApi,
+    fetchImpl: createOkFetch(fetchCalls, { ok: true, call_id: "bridge-call-1", output: {} }),
+  });
+
+  await executor.execute({ name: "page.info", call_id: "call-1", arguments: {} });
+
+  assert.equal(fetchCalls.length, 1, "the request must be attempted, not skipped");
+  assert.equal(
+    fetchCalls[0].options.headers.authorization,
+    undefined,
+    "an empty secret must not be sent as an empty bearer token",
+  );
+});
+
+test("an unpaired installation still requests the tool catalog", async () => {
+  const fetchCalls = [];
+  const chromeApi = createChromeApi({ handshakeSecret: null });
+
+  await fetchBridgeRealtimeToolCatalog({
+    chromeApi,
+    fetchImpl: createOkFetch(fetchCalls, { tools: [] }),
+  });
+
+  assert.equal(fetchCalls.length, 1, "the request must be attempted, not skipped");
+  assert.equal(fetchCalls[0].options?.headers?.authorization, undefined);
 });
 
 test("deprecated content-runtime bypass is not used for hosted tool execution", async () => {

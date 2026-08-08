@@ -13,21 +13,23 @@ use axum::{
     body::Body,
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Query, State,
     },
     http::{
         header::{self, HeaderValue},
-        Request, StatusCode,
+        Method, Request, StatusCode,
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::{
     fs,
     io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -105,6 +107,9 @@ enum Command {
 struct AppState {
     catalog: Arc<Mutex<ActionCatalog>>,
     storage_root: Option<PathBuf>,
+    // U12: who may open /extension, and with what proof. Resolved once at
+    // startup so every upgrade attempt is checked against the same policy.
+    extension_auth: Arc<ExtensionAuthConfig>,
     runtimes: Arc<Mutex<HashMap<String, RuntimeClient>>>,
     // The agent-manageable default tab. When more than one runtime is connected
     // and a call carries no explicit target, routing falls back to this runtime
@@ -112,6 +117,14 @@ struct AppState {
     // browser.claimed_tabs.activate; defaulted to the first runtime to connect.
     active_runtime_id: Arc<Mutex<Option<String>>>,
     pending: Arc<Mutex<HashMap<String, PendingCall>>>,
+    // Runtime ids that have gone away, mapped to the runtime_key (the TAB) they
+    // lived on. Ids rotate on every cross-document navigation — eleven for one
+    // tab in two hours, measured 2026-07-27 — so a caller's id is stale within a
+    // turn. runtime_key is "chrome-tab:<tabId>" and survives the navigation, so
+    // a refusal can name the successor rather than sending the caller back to
+    // enumerate. Bounded by remember_stale_runtime; a miss here just means a
+    // plainer refusal, never a guess.
+    stale_runtime_keys: Arc<Mutex<HashMap<String, String>>>,
     // Latest content-script phase for direct action calls. A handler can mutate
     // the page and then wedge; retain this side-channel until the caller-side
     // deadline so dispatch_timeout identifies the last safe retry boundary.
@@ -137,6 +150,8 @@ struct AppState {
 }
 
 const AGENT_EVENT_QUEUE_CAP: usize = 1000;
+const FILE_TRANSFER_MAX_BYTES: usize = 25 * 1024 * 1024;
+const FILE_TRANSFER_CHUNK_BYTES: usize = 192 * 1024;
 
 // --- a11y announcement store (U6) ---------------------------------------
 // Policy per the phase-1 plan: default profile `normal` maps the site's own
@@ -192,7 +207,11 @@ impl A11yStore {
     fn mode_for(&self, subscriber: &str, tab: Option<i64>, politeness: &str) -> String {
         let lookup = |key: &str| -> Option<String> {
             self.config.get(key).and_then(|c| {
-                if politeness == "assertive" { c.assertive.clone() } else { c.polite.clone() }
+                if politeness == "assertive" {
+                    c.assertive.clone()
+                } else {
+                    c.polite.clone()
+                }
             })
         };
         let tab_key = tab.map(|t| format!("{subscriber}|{t}"));
@@ -201,18 +220,32 @@ impl A11yStore {
             .and_then(lookup)
             .or_else(|| lookup(subscriber))
             .unwrap_or_else(|| {
-                if politeness == "assertive" { "inject".to_string() } else { "buffer".to_string() }
+                if politeness == "assertive" {
+                    "inject".to_string()
+                } else {
+                    "buffer".to_string()
+                }
             })
     }
 
-    fn configure(&mut self, subscriber: &str, tab: Option<i64>, assertive: Option<String>, polite: Option<String>) {
+    fn configure(
+        &mut self,
+        subscriber: &str,
+        tab: Option<i64>,
+        assertive: Option<String>,
+        polite: Option<String>,
+    ) {
         let key = match tab {
             Some(t) => format!("{subscriber}|{t}"),
             None => subscriber.to_string(),
         };
         let entry = self.config.entry(key).or_default();
-        if assertive.is_some() { entry.assertive = assertive; }
-        if polite.is_some() { entry.polite = polite; }
+        if assertive.is_some() {
+            entry.assertive = assertive;
+        }
+        if polite.is_some() {
+            entry.polite = polite;
+        }
     }
 
     /// Ingest one announcement record (already parsed). Applies dedupe,
@@ -266,7 +299,8 @@ impl A11yStore {
                 continue;
             };
             if !out.is_empty()
-                && (out.len() >= A11Y_PIGGYBACK_MAX_RECORDS || chars + rec.text.len() > A11Y_PIGGYBACK_MAX_CHARS)
+                && (out.len() >= A11Y_PIGGYBACK_MAX_RECORDS
+                    || chars + rec.text.len() > A11Y_PIGGYBACK_MAX_CHARS)
             {
                 break;
             }
@@ -285,7 +319,10 @@ impl A11yStore {
         let items: Vec<A11yAnnouncement> = self
             .history
             .iter()
-            .filter(|r| match since { Some(c) => r.seq > c, None => true })
+            .filter(|r| match since {
+                Some(c) => r.seq > c,
+                None => true,
+            })
             .take(limit)
             .cloned()
             .collect();
@@ -296,8 +333,14 @@ impl A11yStore {
 
 /// Parse + ingest an inbound `a11y_announcement` WebSocket item.
 async fn ingest_a11y_announcement(state: &AppState, item: &Value) {
-    let Some(record) = item.get("record") else { return };
-    let text = record.get("text").and_then(Value::as_str).unwrap_or("").to_string();
+    let Some(record) = item.get("record") else {
+        return;
+    };
+    let text = record
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     if text.is_empty() {
         return;
     }
@@ -310,16 +353,30 @@ async fn ingest_a11y_announcement(state: &AppState, item: &Value) {
             .and_then(Value::as_str)
             .unwrap_or("polite")
             .to_string(),
-        region: record.get("region").and_then(Value::as_str).map(str::to_string),
-        region_role: record.get("region_role").and_then(Value::as_str).map(str::to_string),
-        relevant: record.get("relevant").and_then(Value::as_str).map(str::to_string),
-        interrupt: record.get("interrupt").and_then(Value::as_bool).unwrap_or(false),
+        region: record
+            .get("region")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        region_role: record
+            .get("region_role")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        relevant: record
+            .get("relevant")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        interrupt: record
+            .get("interrupt")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         tab: record.get("tab").and_then(Value::as_i64),
-        runtime_key: item.get("runtime_key").and_then(Value::as_str).map(str::to_string),
+        runtime_key: item
+            .get("runtime_key")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     };
     state.a11y.lock().await.ingest(rec);
 }
-
 
 #[derive(Clone)]
 struct AgentEvent {
@@ -353,7 +410,12 @@ impl AppState {
             let queue = map.entry(runtime_id.to_string()).or_default();
             let seq = queue.next_seq;
             queue.next_seq += 1;
-            queue.events.push_back(AgentEvent { seq, ts, kind, payload });
+            queue.events.push_back(AgentEvent {
+                seq,
+                ts,
+                kind,
+                payload,
+            });
             // Evict oldest to fit the cap, then record ONE marker summarizing
             // how many were dropped. (The marker itself is bounded by the cap:
             // we reserve a slot for it, so a full queue keeps CAP-1 real events
@@ -414,7 +476,10 @@ async fn await_agent_event(
     // Grab the notify handle once up front; the Notify is stable per runtime.
     let notify = {
         let mut map = state.agent_event_queues.lock().await;
-        map.entry(runtime_id.to_string()).or_default().notify.clone()
+        map.entry(runtime_id.to_string())
+            .or_default()
+            .notify
+            .clone()
     };
     loop {
         // Register the wait future BEFORE the ready-check, so a push that fires
@@ -480,14 +545,22 @@ struct PayloadSpillConfig {
     payload_dir: PathBuf,
 }
 
+fn process_scoped_payload_dir(temp_root: &Path, process_id: u32, instance_id: Uuid) -> PathBuf {
+    temp_root
+        .join(format!("actions-json-mcp-{process_id}-{instance_id}"))
+        .join("payloads")
+}
+
 impl Default for PayloadSpillConfig {
     fn default() -> Self {
         PayloadSpillConfig {
             inline_limit_bytes: DEFAULT_PAYLOAD_INLINE_LIMIT_BYTES,
             default_inline_limit_bytes: DEFAULT_PAYLOAD_INLINE_LIMIT_BYTES,
-            payload_dir: std::env::temp_dir()
-                .join("actions-json-mcp")
-                .join("payloads"),
+            payload_dir: process_scoped_payload_dir(
+                &std::env::temp_dir(),
+                std::process::id(),
+                Uuid::new_v4(),
+            ),
         }
     }
 }
@@ -573,6 +646,15 @@ struct PendingCall {
 
 struct LocalOpenAiCredential {
     api_key: String,
+    redacted: String,
+    source: &'static str,
+}
+
+struct LocalProtofaceCredentials {
+    protoface_api_key: String,
+    livekit_url: String,
+    livekit_api_key: String,
+    livekit_api_secret: String,
     redacted: String,
     source: &'static str,
 }
@@ -685,11 +767,25 @@ fn action_call_message(
 
 struct StateProjectionDispatch {
     mode: String,
-    projection_name: String,
+    projection_name: Option<String>,
     summary_name: Option<String>,
+    summary_arguments: Value,
     max_bytes: Option<u64>,
-    map_path: String,
-    projection: Value,
+    map_path: Option<String>,
+    projection: Option<Value>,
+    snapshot_id: Option<String>,
+    node_ref: Option<String>,
+    operation: Option<String>,
+    direction: Option<String>,
+    edge_types: Option<Value>,
+    max_depth: Option<u64>,
+    measure_filter: Option<Value>,
+    measure_order: Option<Value>,
+    query: Option<String>,
+    scope: Option<Value>,
+    cursor: Option<String>,
+    page_size: Option<u64>,
+    search_mode: Option<String>,
 }
 
 fn state_projection_call_message(
@@ -704,9 +800,23 @@ fn state_projection_call_message(
         "mode": dispatch.mode,
         "projection_name": dispatch.projection_name,
         "summary_name": dispatch.summary_name,
+        "summary_arguments": dispatch.summary_arguments,
         "max_bytes": dispatch.max_bytes,
         "map_path": dispatch.map_path,
-        "projection": dispatch.projection
+        "projection": dispatch.projection,
+        "snapshot_id": dispatch.snapshot_id,
+        "node_ref": dispatch.node_ref,
+        "operation": dispatch.operation,
+        "direction": dispatch.direction,
+        "edge_types": dispatch.edge_types,
+        "max_depth": dispatch.max_depth,
+        "measure_filter": dispatch.measure_filter,
+        "measure_order": dispatch.measure_order,
+        "query": dispatch.query,
+        "scope": dispatch.scope,
+        "cursor": dispatch.cursor,
+        "page_size": dispatch.page_size,
+        "search_mode": dispatch.search_mode
     })
 }
 
@@ -849,6 +959,46 @@ fn openai_credential_from_local_config_file(path: &Path) -> Option<LocalOpenAiCr
     })
 }
 
+fn local_config_string(value: &Value, canonical: &str, alias: &str) -> Option<String> {
+    [canonical, alias].into_iter().find_map(|key| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn local_protoface_credentials_from_config_file(path: &Path) -> Option<LocalProtofaceCredentials> {
+    let text = std_fs::read_to_string(path).ok()?;
+    let value = serde_json::from_str::<Value>(&text).ok()?;
+    let protoface_api_key = local_config_string(
+        &value,
+        "protoface_api_key",
+        "ACTIONS_JSON_PROTOFACE_API_KEY",
+    )?;
+    let livekit_url = local_config_string(&value, "livekit_url", "ACTIONS_JSON_LIVEKIT_URL")?;
+    if !(livekit_url.starts_with("wss://") || livekit_url.starts_with("https://")) {
+        return None;
+    }
+    let livekit_api_key =
+        local_config_string(&value, "livekit_api_key", "ACTIONS_JSON_LIVEKIT_API_KEY")?;
+    let livekit_api_secret = local_config_string(
+        &value,
+        "livekit_api_secret",
+        "ACTIONS_JSON_LIVEKIT_API_SECRET",
+    )?;
+    Some(LocalProtofaceCredentials {
+        protoface_api_key,
+        livekit_url,
+        livekit_api_key,
+        livekit_api_secret,
+        redacted: "configured".to_string(),
+        source: "local_config_file",
+    })
+}
+
 fn find_local_config_file_with_home(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
     let home_candidate = home.map(|home| home.join(".actions-json.local.json"));
     if let Some(path) = home_candidate.filter(|path| path.exists()) {
@@ -872,6 +1022,393 @@ fn find_local_config_file_with_home(start: &Path, home: Option<&Path>) -> Option
 fn find_local_config_file(start: &Path) -> Option<PathBuf> {
     let home = std::env::var("HOME").ok().map(PathBuf::from);
     find_local_config_file_with_home(start, home.as_deref())
+}
+
+/// The extension id Chrome assigns a PACKED install of this extension. An
+/// unpacked dev load gets a different, machine-derived id, which is exactly why
+/// `extension_ids` in `.actions-json.local.json` overrides this — see
+/// `ExtensionAuthConfig::load`.
+/// The extension's stable id, derived from the `key` pinned in
+/// `extensions/chrome-overlay-runtime/manifest.json`.
+///
+/// An unpacked extension's id is normally derived from its INSTALL PATH, so it
+/// differs per machine — which made the origin allow-list unusable in practice:
+/// every user would have had to find their own id and hand-edit
+/// `.actions-json.local.json` before the extension could connect at all. Chrome
+/// derives the id deterministically from a manifest `key` instead, so pinning
+/// one makes this constant true for every install. `extension_ids` in the local
+/// config still overrides, for a fork or a differently-keyed build.
+const DEFAULT_EXTENSION_ID: &str = "hpfhjegmjhbagbabohjemenfnnjdmhdl";
+
+/// Why the `/extension` socket refused an upgrade. One DISTINCT string per
+/// cause, deliberately: this machine runs five agents on five bridge versions,
+/// and a mismatched bridge/extension pair must fail LOUDLY and SPECIFICALLY.
+/// A generic close would put every one of them on the same wrong trail
+/// Keep distinct failure causes explicit; one error string over many causes routes callers wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExtensionAuthRejection {
+    OriginRejected,
+    HandshakeSecretMissing,
+    HandshakeSecretMismatch,
+}
+
+impl ExtensionAuthRejection {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::OriginRejected => "origin_rejected",
+            Self::HandshakeSecretMissing => "handshake_secret_missing",
+            Self::HandshakeSecretMismatch => "handshake_secret_mismatch",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::OriginRejected => {
+                "The browser Origin is not an allowed actions.json extension."
+            }
+            Self::HandshakeSecretMissing => {
+                "No bridge handshake secret was provided by the extension."
+            }
+            Self::HandshakeSecretMismatch => {
+                "The extension's saved bridge handshake secret does not match this bridge."
+            }
+        }
+    }
+}
+
+/// U12b. Why the legacy HTTP tool routes refused a request.
+///
+/// DELIBERATELY NOT the `/extension` vocabulary. The semantics differ: the
+/// WebSocket names an `Origin` the browser attests and a page cannot forge,
+/// while an HTTP caller here is typically a LOCAL PROCESS with no meaningful
+/// origin at all — which is exactly why the origin check is not part of this
+/// gate. Reusing `handshake_secret_missing` on both surfaces would make
+/// "your extension is not paired" and "your local script forgot the header"
+/// read identically, and this machine's five agents would chase the wrong one
+/// Keep distinct failure causes explicit; one error string over many causes routes callers wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BridgeHttpAuthRejection {
+    SecretMissing,
+    SecretMismatch,
+}
+
+impl BridgeHttpAuthRejection {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::SecretMissing => "bridge_secret_missing",
+            Self::SecretMismatch => "bridge_secret_mismatch",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::SecretMissing => {
+                "This bridge route requires the per-installation handshake secret. \
+                 Send it as `Authorization: Bearer <secret>` or `?secret=<secret>`. \
+                 The bridge prints the secret at startup and stores it as \
+                 `bridge_handshake_secret` in .actions-json.local.json."
+            }
+            Self::SecretMismatch => {
+                "The presented handshake secret does not match this installation's. \
+                 It is per-installation, not per-process: re-read \
+                 `bridge_handshake_secret` from .actions-json.local.json, or the value \
+                 the bridge printed at startup."
+            }
+        }
+    }
+}
+
+/// Who may open `/extension`, and with what proof.
+///
+/// The bridge binds loopback, but loopback is NOT a boundary for WebSockets:
+/// unlike XHR, a `new WebSocket("ws://127.0.0.1:17345/extension")` from any page
+/// the user has open is not blocked by the same-origin policy, and the bridge
+/// used to answer it with raw OpenAI and Protoface keys. Two independent checks
+/// close that: the browser-attested `Origin` header (Chrome sets
+/// `chrome-extension://<id>` for extension-originated sockets and a page cannot
+/// forge it), and a per-installation secret a page has no way to read.
+#[derive(Clone, Debug)]
+pub struct ExtensionAuthConfig {
+    extension_ids: Vec<String>,
+    handshake_secret: String,
+}
+
+impl ExtensionAuthConfig {
+    /// Read the allowed extension ids and the handshake secret from the same
+    /// `.actions-json.local.json` the bridge already reads credentials from.
+    /// `config_start` is the directory to start the upward search in; `None`
+    /// means the process cwd, matching `load_local_openai_credential`.
+    ///
+    /// The secret is generated on first run and PERSISTED, so it is stable
+    /// across bridge restarts — an extension paired once stays paired.
+    pub fn load(config_start: Option<&Path>) -> Self {
+        // An EXPLICIT root names one installation's config file directly. It
+        // must not fall through to `find_local_config_file`, which prefers
+        // `$HOME/.actions-json.local.json` over the start directory — that
+        // preference would silently read the ambient machine config instead of
+        // the installation the caller named.
+        let config_path = match config_start {
+            Some(root) => {
+                let candidate = root.join(".actions-json.local.json");
+                candidate.exists().then_some(candidate)
+            }
+            None => std::env::current_dir()
+                .ok()
+                .as_deref()
+                .and_then(find_local_config_file),
+        };
+        let start = config_start
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok());
+        // Narrow permissions on EVERY load, not only on the write that
+        // generates a secret. A caller-review of an earlier version caught this:
+        // the chmod hung off `persist_handshake_secret`, which runs only when
+        // the secret is ABSENT — so steady state (every run after the first)
+        // never narrowed anything. The dangerous case is a user who edits an
+        // already-paired config to add their OpenAI key: `$EDITOR` or a `>`
+        // redirect resets the mode to the umask default and nothing would ever
+        // narrow it again. This file holds the OpenAI key, the Protoface
+        // credentials, and the handshake secret whose entire purpose is to stop
+        // a local process — a world-readable copy does not need to be guessed.
+        if let Some(path) = config_path.as_deref() {
+            restrict_local_config_permissions(path);
+        }
+        let value = config_path
+            .as_deref()
+            .and_then(|path| std_fs::read_to_string(path).ok())
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+
+        let extension_ids = value
+            .as_ref()
+            .and_then(|value| value.get("extension_ids"))
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|ids| !ids.is_empty())
+            .unwrap_or_else(|| vec![DEFAULT_EXTENSION_ID.to_string()]);
+
+        let existing_secret = value
+            .as_ref()
+            .and_then(|value| value.get("bridge_handshake_secret"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|secret| !secret.is_empty())
+            .map(str::to_string);
+
+        let handshake_secret = match existing_secret {
+            Some(secret) => secret,
+            None => {
+                // First run for this installation. Generate once, write it back
+                // beside the credentials, and reuse it forever after. Writing
+                // where the config already lives (or, if there is none yet, in
+                // the start directory) keeps this inside the existing local-config
+                // system rather than inventing a second one.
+                let secret = generate_handshake_secret();
+                let target = config_path
+                    .clone()
+                    .or_else(|| start.map(|start| start.join(".actions-json.local.json")));
+                if let Some(target) = target {
+                    persist_handshake_secret(&target, &secret);
+                }
+                secret
+            }
+        };
+
+        Self {
+            extension_ids,
+            handshake_secret,
+        }
+    }
+
+    pub fn handshake_secret(&self) -> &str {
+        &self.handshake_secret
+    }
+
+    /// The single origin CORS may name. `Access-Control-Allow-Origin` takes one
+    /// value, not a list, so the first configured id wins; the WebSocket origin
+    /// check below still accepts every configured id.
+    pub fn primary_origin(&self) -> String {
+        let id = self
+            .extension_ids
+            .first()
+            .map(String::as_str)
+            .unwrap_or(DEFAULT_EXTENSION_ID);
+        format!("chrome-extension://{id}")
+    }
+
+    fn origin_allowed(&self, origin: &str) -> bool {
+        self.extension_ids
+            .iter()
+            .any(|id| origin == format!("chrome-extension://{id}"))
+    }
+
+    /// Origin first, then secret — so a hostile page is refused on the header it
+    /// cannot forge, and never gets to probe the secret at all.
+    fn authorize(
+        &self,
+        origin: Option<&str>,
+        presented_secret: Option<&str>,
+    ) -> Result<(), ExtensionAuthRejection> {
+        let Some(origin) = origin.map(str::trim).filter(|origin| !origin.is_empty()) else {
+            return Err(ExtensionAuthRejection::OriginRejected);
+        };
+        if !self.origin_allowed(origin) {
+            return Err(ExtensionAuthRejection::OriginRejected);
+        }
+        let Some(presented) = presented_secret
+            .map(str::trim)
+            .filter(|secret| !secret.is_empty())
+        else {
+            return Err(ExtensionAuthRejection::HandshakeSecretMissing);
+        };
+        if !constant_time_eq(presented.as_bytes(), self.handshake_secret.as_bytes()) {
+            return Err(ExtensionAuthRejection::HandshakeSecretMismatch);
+        }
+        Ok(())
+    }
+
+    /// Validate the diagnostic HTTP preflight used by the extension service
+    /// worker before it opens the WebSocket.
+    ///
+    /// Chrome omits `Origin` from extension service-worker `fetch()` requests,
+    /// so this endpoint can attest only possession of the installation secret.
+    /// The subsequent `/extension` WebSocket upgrade still calls `authorize`
+    /// and requires both the browser-attested extension origin and this secret
+    /// before any runtime or credential hydration is available.
+    fn authorize_preflight(
+        &self,
+        presented_secret: Option<&str>,
+    ) -> Result<(), ExtensionAuthRejection> {
+        let Some(presented) = presented_secret
+            .map(str::trim)
+            .filter(|secret| !secret.is_empty())
+        else {
+            return Err(ExtensionAuthRejection::HandshakeSecretMissing);
+        };
+        if !constant_time_eq(presented.as_bytes(), self.handshake_secret.as_bytes()) {
+            return Err(ExtensionAuthRejection::HandshakeSecretMismatch);
+        }
+        Ok(())
+    }
+
+    /// U12b. The secret half alone, for the HTTP tool routes.
+    ///
+    /// No origin check here, and that is a decision rather than an omission: the
+    /// intended callers are LOCAL PROCESSES (the eval harness, curl, the
+    /// extension's service worker `fetch`), which either send no `Origin` or
+    /// send one the caller controls. Requiring an unforgeable origin would lock
+    /// out every legitimate caller while stopping nobody, since an attacker who
+    /// can open a socket can also write any header it likes. What an attacker
+    /// CANNOT do is read a 256-bit secret out of the user's config file, so the
+    /// secret is the whole boundary on this surface.
+    fn authorize_http(
+        &self,
+        presented_secret: Option<&str>,
+    ) -> Result<(), BridgeHttpAuthRejection> {
+        let Some(presented) = presented_secret
+            .map(str::trim)
+            .filter(|secret| !secret.is_empty())
+        else {
+            return Err(BridgeHttpAuthRejection::SecretMissing);
+        };
+        if !constant_time_eq(presented.as_bytes(), self.handshake_secret.as_bytes()) {
+            return Err(BridgeHttpAuthRejection::SecretMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// 256 bits of v4 UUID randomness, hex, no dashes — long enough that guessing is
+/// not a strategy and printable enough to paste into extension storage.
+fn generate_handshake_secret() -> String {
+    format!(
+        "{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    )
+}
+
+/// Merge the secret into the existing local config rather than rewriting it.
+/// The same file holds the OpenAI and Protoface credentials; clobbering it to
+/// store a secret would break the very hydration this guard protects.
+fn persist_handshake_secret(path: &Path, secret: &str) {
+    let mut root = std_fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    root.insert("bridge_handshake_secret".to_string(), json!(secret));
+    let Ok(text) = serde_json::to_string_pretty(&Value::Object(root)) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std_fs::create_dir_all(parent);
+    }
+    if let Err(error) = std_fs::write(path, format!("{text}\n")) {
+        eprintln!(
+            "actions-json bridge could not persist the handshake secret to {}: {error}",
+            path.display()
+        );
+        // Nothing was written, so there is nothing to narrow. Returning here
+        // also keeps the chmod warning below honest: it can only ever describe
+        // a file that really exists.
+        return;
+    }
+    restrict_local_config_permissions(path);
+}
+
+/// Make the local config readable only by its owner.
+///
+/// The handshake secret's entire purpose is to stop a LOCAL process — another
+/// account on a shared machine, a hostile postinstall script. A secret written
+/// world-readable therefore defeats the gate outright: the attacker does not
+/// need to guess it, it just opens the file. The same file has always held the
+/// OpenAI and Protoface keys, so this predates the handshake secret and is a
+/// fix for all three.
+///
+/// Applied on EVERY write, not only on create, because the file that matters
+/// most is the one an earlier release already left at 0644.
+///
+/// A chmod failure is reported but never fatal: the write is what preserves the
+/// installation's pairing and credentials, and losing that to a permissions
+/// quirk (an exotic filesystem, a mount without ownership semantics) would be a
+/// worse outcome than a warning the operator can act on.
+#[cfg(unix)]
+fn restrict_local_config_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Err(error) = std_fs::set_permissions(path, std_fs::Permissions::from_mode(0o600)) {
+        eprintln!(
+            "actions-json bridge could not restrict permissions on {} ({error}); \
+             it may be readable by other accounts on this machine.",
+            path.display()
+        );
+    }
+}
+
+/// Windows has no POSIX mode bits. The file inherits the parent directory's ACL,
+/// which for a user profile directory is already owner-scoped, so there is no
+/// equivalent narrowing to perform here.
+#[cfg(not(unix))]
+fn restrict_local_config_permissions(_path: &Path) {}
+
+/// Compare without leaking the matching-prefix length through timing. The secret
+/// is long and local, so this is belt-and-braces, but a secret comparison that
+/// short-circuits is the kind of detail a security review flags.
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right.iter())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
 }
 
 fn load_local_openai_credential_from_sources(
@@ -924,39 +1461,139 @@ fn load_local_openai_credential() -> Option<LocalOpenAiCredential> {
     load_local_openai_credential_from_sources(env_value, cwd.as_deref())
 }
 
-async fn send_credential_hydration_to_extension(
+fn load_local_protoface_credentials() -> Option<LocalProtofaceCredentials> {
+    let cwd = std::env::current_dir().ok()?;
+    let config_path = find_local_config_file(&cwd)?;
+    local_protoface_credentials_from_config_file(&config_path)
+}
+
+fn record_credential_hydration_status(
+    status: &mut Option<Value>,
+    provider: &str,
+    provider_status: Value,
+) {
+    let mut root = status
+        .take()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    {
+        let providers = root
+            .entry("providers".to_string())
+            .or_insert_with(|| json!({}));
+        if !providers.is_object() {
+            *providers = json!({});
+        }
+        providers
+            .as_object_mut()
+            .expect("providers was normalized to an object")
+            .insert(provider.to_string(), provider_status.clone());
+    }
+
+    // Keep the historical top-level OpenAI summary stable for existing
+    // consumers while exposing every provider under `providers`.
+    if provider == "openai" || !root.contains_key("provider") {
+        if let Some(fields) = provider_status.as_object() {
+            for (key, value) in fields {
+                root.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    *status = Some(Value::Object(root));
+}
+
+async fn send_protoface_credential_hydration(
     state: AppState,
     tx: mpsc::UnboundedSender<Message>,
+    credentials: Option<LocalProtofaceCredentials>,
 ) {
-    let Some(credential) = load_local_openai_credential() else {
+    let Some(credentials) = credentials else {
         let mut status = state.last_credential_hydration.lock().await;
-        *status = Some(json!({
-            "configured": false,
-            "sent": false,
-            "status": "not_configured"
-        }));
+        record_credential_hydration_status(
+            &mut status,
+            "protoface",
+            json!({
+                "configured": false,
+                "sent": false,
+                "status": "not_configured",
+                "provider": "protoface"
+            }),
+        );
         return;
     };
     {
         let mut status = state.last_credential_hydration.lock().await;
-        *status = Some(json!({
-            "configured": true,
-            "sent": true,
-            "status": "sent",
-            "source": credential.source,
-            "redacted": credential.redacted.clone()
-        }));
+        record_credential_hydration_status(
+            &mut status,
+            "protoface",
+            json!({
+                "configured": true,
+                "sent": true,
+                "status": "sent",
+                "provider": "protoface",
+                "source": credentials.source,
+                "redacted": credentials.redacted.clone()
+            }),
+        );
     }
     let item = json!({
         "type": "credential_hydration",
-        "provider": "openai",
+        "provider": "protoface",
         "source": "mcp_bridge_local",
         "credential": {
-            "api_key": credential.api_key
+            "protoface_api_key": credentials.protoface_api_key,
+            "livekit_url": credentials.livekit_url,
+            "livekit_api_key": credentials.livekit_api_key,
+            "livekit_api_secret": credentials.livekit_api_secret
         },
-        "redacted": credential.redacted
+        "redacted": credentials.redacted
     });
     let _ = tx.send(Message::Text(item.to_string()));
+}
+
+async fn send_credential_hydration_to_extension(
+    state: AppState,
+    tx: mpsc::UnboundedSender<Message>,
+) {
+    if let Some(credential) = load_local_openai_credential() {
+        {
+            let mut status = state.last_credential_hydration.lock().await;
+            record_credential_hydration_status(
+                &mut status,
+                "openai",
+                json!({
+                    "configured": true,
+                    "sent": true,
+                    "status": "sent",
+                    "provider": "openai",
+                    "source": credential.source,
+                    "redacted": credential.redacted.clone()
+                }),
+            );
+        }
+        let item = json!({
+            "type": "credential_hydration",
+            "provider": "openai",
+            "source": "mcp_bridge_local",
+            "credential": {
+                "api_key": credential.api_key
+            },
+            "redacted": credential.redacted
+        });
+        let _ = tx.send(Message::Text(item.to_string()));
+    } else {
+        let mut status = state.last_credential_hydration.lock().await;
+        record_credential_hydration_status(
+            &mut status,
+            "openai",
+            json!({
+                "configured": false,
+                "sent": false,
+                "status": "not_configured",
+                "provider": "openai"
+            }),
+        );
+    }
+    send_protoface_credential_hydration(state, tx, load_local_protoface_credentials()).await;
 }
 
 #[cfg(test)]
@@ -1033,17 +1670,28 @@ mod tests {
     fn state_projection_call_message_carries_definition_and_routing() {
         let dispatch = StateProjectionDispatch {
             mode: "state_read".to_string(),
-            projection_name: "trello.board".to_string(),
+            projection_name: Some("trello.board".to_string()),
             summary_name: Some("agent_context".to_string()),
+            summary_arguments: json!({ "list_name": "Next", "offset": 10, "limit": 10 }),
             max_bytes: Some(12_000),
-            map_path: "scopes/private/sites/trello.com/board/actions.json".to_string(),
-            projection: json!({ "name": "trello.board", "snapshot": { "version": 1 } }),
+            map_path: Some("scopes/private/sites/trello.com/board/actions.json".to_string()),
+            projection: Some(json!({ "name": "trello.board", "snapshot": { "version": 1 } })),
+            snapshot_id: None,
+            node_ref: None,
+            operation: None,
+            direction: None,
+            edge_types: None,
+            max_depth: None,
+            measure_filter: None,
+            measure_order: None,
+            query: None,
+            scope: None,
+            cursor: None,
+            page_size: None,
+            search_mode: None,
         };
-        let item = state_projection_call_message(
-            "call-2".to_string(),
-            "runtime-b".to_string(),
-            &dispatch,
-        );
+        let item =
+            state_projection_call_message("call-2".to_string(), "runtime-b".to_string(), &dispatch);
 
         assert_eq!(item["type"].as_str(), Some("state_projection_call"));
         assert_eq!(item["call_id"].as_str(), Some("call-2"));
@@ -1051,12 +1699,59 @@ mod tests {
         assert_eq!(item["mode"].as_str(), Some("state_read"));
         assert_eq!(item["projection_name"].as_str(), Some("trello.board"));
         assert_eq!(item["summary_name"].as_str(), Some("agent_context"));
+        assert_eq!(
+            item["summary_arguments"]["list_name"].as_str(),
+            Some("Next")
+        );
+        assert_eq!(item["summary_arguments"]["offset"].as_u64(), Some(10));
         assert_eq!(item["max_bytes"].as_u64(), Some(12_000));
         assert_eq!(
             item["map_path"].as_str(),
             Some("scopes/private/sites/trello.com/board/actions.json")
         );
         assert_eq!(item["projection"]["name"].as_str(), Some("trello.board"));
+    }
+
+    #[test]
+    fn graph_query_call_message_carries_only_bounded_snapshot_arguments() {
+        let dispatch = StateProjectionDispatch {
+            mode: "search".to_string(),
+            projection_name: None,
+            summary_name: None,
+            summary_arguments: json!({}),
+            max_bytes: Some(4_096),
+            map_path: None,
+            projection: None,
+            snapshot_id: Some("snapshot-opaque-1".to_string()),
+            node_ref: None,
+            operation: None,
+            direction: None,
+            edge_types: None,
+            max_depth: None,
+            measure_filter: None,
+            measure_order: None,
+            query: Some("brainstorm".to_string()),
+            scope: Some(json!({ "node_ref": "node-list-next", "edge_types": ["contains"] })),
+            cursor: Some("cursor-opaque-2".to_string()),
+            page_size: Some(5),
+            search_mode: Some("lexical".to_string()),
+        };
+        let item = state_projection_call_message(
+            "call-search".to_string(),
+            "runtime-trello".to_string(),
+            &dispatch,
+        );
+
+        assert_eq!(item["type"], "state_projection_call");
+        assert_eq!(item["mode"], "search");
+        assert_eq!(item["snapshot_id"], "snapshot-opaque-1");
+        assert_eq!(item["query"], "brainstorm");
+        assert_eq!(item["scope"]["node_ref"], "node-list-next");
+        assert_eq!(item["cursor"], "cursor-opaque-2");
+        assert_eq!(item["page_size"], 5);
+        assert_eq!(item["search_mode"], "lexical");
+        assert!(item["projection"].is_null());
+        assert!(item["map_path"].is_null());
     }
 
     #[test]
@@ -1158,6 +1853,203 @@ mod tests {
         assert_eq!(credential.redacted, "sk...7890");
     }
 
+    #[test]
+    fn local_protoface_credentials_load_complete_lowercase_bundle() {
+        let root = tempdir().unwrap();
+        std::fs::write(
+            root.path().join(".actions-json.local.json"),
+            r#"{
+                "protoface_api_key": "pf-secret-value",
+                "livekit_url": "wss://livekit.example",
+                "livekit_api_key": "lk-key",
+                "livekit_api_secret": "lk-secret"
+            }"#,
+        )
+        .unwrap();
+
+        let credentials = local_protoface_credentials_from_config_file(
+            &root.path().join(".actions-json.local.json"),
+        )
+        .unwrap();
+
+        assert_eq!(credentials.protoface_api_key, "pf-secret-value");
+        assert_eq!(credentials.livekit_url, "wss://livekit.example");
+        assert_eq!(credentials.livekit_api_key, "lk-key");
+        assert_eq!(credentials.livekit_api_secret, "lk-secret");
+        assert_eq!(credentials.source, "local_config_file");
+        assert_eq!(credentials.redacted, "configured");
+    }
+
+    #[test]
+    fn local_protoface_credentials_accept_uppercase_aliases() {
+        let root = tempdir().unwrap();
+        std::fs::write(
+            root.path().join(".actions-json.local.json"),
+            r#"{
+                "ACTIONS_JSON_PROTOFACE_API_KEY": "pf-alias",
+                "ACTIONS_JSON_LIVEKIT_URL": "https://livekit.example",
+                "ACTIONS_JSON_LIVEKIT_API_KEY": "lk-alias",
+                "ACTIONS_JSON_LIVEKIT_API_SECRET": "lk-alias-secret"
+            }"#,
+        )
+        .unwrap();
+
+        let credentials = local_protoface_credentials_from_config_file(
+            &root.path().join(".actions-json.local.json"),
+        )
+        .unwrap();
+
+        assert_eq!(credentials.protoface_api_key, "pf-alias");
+        assert_eq!(credentials.livekit_url, "https://livekit.example");
+    }
+
+    #[test]
+    fn local_protoface_credentials_reject_partial_bundle() {
+        let root = tempdir().unwrap();
+        std::fs::write(
+            root.path().join(".actions-json.local.json"),
+            r#"{
+                "protoface_api_key": "pf-secret-value",
+                "livekit_url": "wss://livekit.example"
+            }"#,
+        )
+        .unwrap();
+
+        assert!(local_protoface_credentials_from_config_file(
+            &root.path().join(".actions-json.local.json"),
+        )
+        .is_none());
+    }
+
+    /// The handshake secret exists to stop a LOCAL process, so a world-readable
+    /// config file defeats the gate entirely: any other account on the machine
+    /// just reads the secret and presents it. The same file also carries the
+    /// OpenAI and Protoface keys, so this is the narrowest place to fix all three.
+    #[cfg(unix)]
+    #[test]
+    fn persisted_handshake_secret_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempdir().unwrap();
+        let path = root.path().join(".actions-json.local.json");
+
+        persist_handshake_secret(&path, "secret-value");
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a freshly created local config must not be readable by other accounts"
+        );
+        // The narrowing must not cost the write: the secret is still there.
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["bridge_handshake_secret"], "secret-value");
+    }
+
+    /// A config file that ALREADY exists — carrying the OpenAI key from an
+    /// earlier release, created before this fix with default permissions — must
+    /// be narrowed too, not merely left as found. This is the case that actually
+    /// occurs on upgrade, and the one a create-only chmod would silently miss.
+    #[cfg(unix)]
+    #[test]
+    fn persisting_narrows_an_existing_world_readable_config() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempdir().unwrap();
+        let path = root.path().join(".actions-json.local.json");
+        std::fs::write(&path, r#"{ "openai_api_key": "sk-pre-existing-000" }"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        persist_handshake_secret(&path, "secret-value");
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "an existing config must be narrowed on write");
+        // Merging, not clobbering: the pre-existing credential survives.
+        let value: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["openai_api_key"], "sk-pre-existing-000");
+        assert_eq!(value["bridge_handshake_secret"], "secret-value");
+    }
+
+    // The steady-state case, and the one the two tests above could NOT catch:
+    // both drive `persist_handshake_secret`, which only runs when the secret is
+    // ABSENT. A config that ALREADY has a secret never reached the chmod, so
+    // every run after the first left the file exactly as it found it — while
+    // SECURITY.md claimed narrowing happened "on every write." A security
+    // reviewer caught the gap by counting call sites; these tests could not,
+    // because they exercised the one path that was already correct.
+    #[cfg(unix)]
+    #[test]
+    fn loading_an_already_paired_config_still_narrows_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempdir().unwrap();
+        let path = root.path().join(".actions-json.local.json");
+        // Already paired: `persist_handshake_secret` will NOT fire.
+        std::fs::write(
+            &path,
+            r#"{ "openai_api_key": "sk-pre-existing-000", "bridge_handshake_secret": "already-set" }"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let config = ExtensionAuthConfig::load(Some(root.path()));
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "loading an already-paired config must narrow it; the chmod cannot \
+             hang off the generate path alone"
+        );
+        // And the load still did its actual job.
+        assert_eq!(config.handshake_secret, "already-set");
+    }
+
+    #[tokio::test]
+    async fn local_protoface_credentials_hydration_is_provider_scoped_and_redacted() {
+        let root = tempdir().unwrap();
+        std::fs::write(
+            root.path().join(".actions-json.local.json"),
+            r#"{
+                "protoface_api_key": "pf-secret-value",
+                "livekit_url": "wss://livekit.example",
+                "livekit_api_key": "lk-key",
+                "livekit_api_secret": "lk-secret"
+            }"#,
+        )
+        .unwrap();
+        let credentials = local_protoface_credentials_from_config_file(
+            &root.path().join(".actions-json.local.json"),
+        )
+        .unwrap();
+        let state = state_from_catalog(
+            ActionCatalog {
+                base_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                map_paths: Vec::new(),
+                manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_action_names: HashSet::new(),
+            },
+            Vec::new(),
+            None,
+        );
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        send_protoface_credential_hydration(state.clone(), tx, Some(credentials)).await;
+
+        let message = rx.recv().await.unwrap().into_text().unwrap();
+        let payload: Value = serde_json::from_str(&message).unwrap();
+        assert_eq!(payload["provider"], "protoface");
+        assert_eq!(
+            payload["credential"]["protoface_api_key"],
+            "pf-secret-value"
+        );
+        assert_eq!(payload["credential"]["livekit_api_secret"], "lk-secret");
+        let resource = bridge_runtimes_resource(&state).await;
+        assert_eq!(resource["credential_hydration"]["provider"], "protoface");
+        assert_eq!(resource["credential_hydration"]["redacted"], "configured");
+        assert!(!resource.to_string().contains("pf-secret-value"));
+        assert!(!resource.to_string().contains("lk-secret"));
+    }
+
     #[tokio::test]
     async fn bridge_runtimes_resource_redacts_credential_hydration_status() {
         let state = state_from_catalog(
@@ -1188,6 +2080,39 @@ mod tests {
             Some("sk...7890")
         );
         assert!(!value.to_string().contains("sk-local-file-1234567890"));
+    }
+
+    #[test]
+    fn credential_hydration_status_preserves_each_provider_and_legacy_openai_summary() {
+        let mut status = None;
+        record_credential_hydration_status(
+            &mut status,
+            "openai",
+            json!({
+                "configured": true,
+                "sent": true,
+                "status": "accepted",
+                "provider": "openai",
+                "redacted": "sk...7890"
+            }),
+        );
+        record_credential_hydration_status(
+            &mut status,
+            "protoface",
+            json!({
+                "configured": true,
+                "sent": true,
+                "status": "accepted",
+                "provider": "protoface",
+                "redacted": "configured"
+            }),
+        );
+
+        let status = status.unwrap();
+        assert_eq!(status["provider"], "openai");
+        assert_eq!(status["status"], "accepted");
+        assert_eq!(status["providers"]["openai"]["redacted"], "sk...7890");
+        assert_eq!(status["providers"]["protoface"]["redacted"], "configured");
     }
 
     fn test_launch() -> BridgeLaunchContext {
@@ -1327,6 +2252,42 @@ mod tests {
             .to_string()
     }
 
+    #[test]
+    fn default_payload_directory_is_unique_per_bridge_instance() {
+        let first = PayloadSpillConfig::default().payload_dir;
+        let second = PayloadSpillConfig::default().payload_dir;
+        let legacy = std::env::temp_dir().join("actions-json-mcp");
+
+        assert_ne!(first, second);
+        assert!(!first.starts_with(&legacy));
+        assert!(!second.starts_with(&legacy));
+        assert_eq!(first.file_name(), Some(OsStr::new("payloads")));
+        assert_eq!(second.file_name(), Some(OsStr::new("payloads")));
+        let expected_prefix = format!("actions-json-mcp-{}-", std::process::id());
+        assert!(first
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| name.starts_with(&expected_prefix)));
+    }
+
+    #[tokio::test]
+    async fn process_scoped_spill_ignores_hostile_legacy_shared_path() {
+        let temp_root = tempfile::tempdir().unwrap();
+        let legacy = temp_root.path().join("actions-json-mcp");
+        std_fs::write(&legacy, b"not a directory").unwrap();
+        let scoped =
+            process_scoped_payload_dir(temp_root.path(), std::process::id(), Uuid::new_v4());
+
+        let path = spill_payload_to_disk(&scoped, "test.static_blob", "payload")
+            .await
+            .unwrap();
+
+        assert!(path.starts_with(&scoped));
+        assert_eq!(std_fs::read_to_string(path).unwrap(), "payload");
+        assert!(legacy.is_file());
+    }
+
     #[tokio::test]
     async fn bridge_payloads_configure_reads_sets_and_resets_limit() {
         let state = payload_spill_test_state(10);
@@ -1389,8 +2350,7 @@ mod tests {
 
         state.payload.lock().await.inline_limit_bytes = full_text.len();
         let at_limit = mcp_call_tool(state.clone(), "test.static_blob", json!({})).await;
-        let at_limit_result: Value =
-            serde_json::from_str(&mcp_result_text(&at_limit)).unwrap();
+        let at_limit_result: Value = serde_json::from_str(&mcp_result_text(&at_limit)).unwrap();
         assert!(at_limit_result.get("payload_spilled").is_none());
         assert!(at_limit_result["output"]["blob"].is_string());
 
@@ -1450,6 +2410,31 @@ mod tests {
         assert!(result.get("payload_spilled").is_none());
         assert!(result["payload_spill_error"].is_string());
         assert!(result["output"]["blob"].as_str().unwrap().len() >= 5000);
+    }
+
+    #[test]
+    fn remote_file_tool_manifests_are_bounded_and_metadata_oriented() {
+        let upload = file_upload_tool_manifest();
+        let download = file_download_tool_manifest();
+        let status = file_transfer_status_tool_manifest();
+        let cancel = file_transfer_cancel_tool_manifest();
+
+        assert_eq!(upload["name"], json!("file.upload"));
+        assert_eq!(download["name"], json!("file.download"));
+        assert_eq!(status["name"], json!("file.transfer.status"));
+        assert_eq!(cancel["name"], json!("file.transfer.cancel"));
+        assert_eq!(
+            upload["input_schema"]["properties"]["local_path"]["type"],
+            json!("string")
+        );
+        assert_eq!(
+            download["input_schema"]["properties"]["url"]["type"],
+            json!("string")
+        );
+        assert!(upload.to_string().contains("25 MiB"));
+        assert!(download.to_string().contains("private payload directory"));
+        assert!(!status.to_string().contains("base64"));
+        assert!(!cancel.to_string().contains("base64"));
     }
 
     #[tokio::test]
@@ -1568,10 +2553,7 @@ mod tests {
             .iter()
             .find(|tool| tool["name"].as_str() == Some("runtime.agent.user_message"))
             .unwrap();
-        assert_eq!(
-            user_message["inputSchema"]["required"],
-            json!(["text"])
-        );
+        assert_eq!(user_message["inputSchema"]["required"], json!(["text"]));
         assert!(user_message["inputSchema"]["properties"]
             .get("policy_exception_report")
             .is_none());
@@ -1797,10 +2779,20 @@ mod tests {
     async fn agent_event_push_assigns_monotonic_seq() {
         let state = empty_state();
         state
-            .push_agent_event("rt-1", "t0".into(), "transcript".into(), json!({"text":"a"}))
+            .push_agent_event(
+                "rt-1",
+                "t0".into(),
+                "transcript".into(),
+                json!({"text":"a"}),
+            )
             .await;
         state
-            .push_agent_event("rt-1", "t1".into(), "tool".into(), json!({"name":"x","ok":true}))
+            .push_agent_event(
+                "rt-1",
+                "t1".into(),
+                "tool".into(),
+                json!({"name":"x","ok":true}),
+            )
             .await;
         let map = state.agent_event_queues.lock().await;
         let queue = map.get("rt-1").expect("queue exists");
@@ -1814,7 +2806,12 @@ mod tests {
         let state = empty_state();
         for i in 0..(AGENT_EVENT_QUEUE_CAP + 5) {
             state
-                .push_agent_event("rt-1", format!("t{i}"), "transcript".into(), json!({"i": i}))
+                .push_agent_event(
+                    "rt-1",
+                    format!("t{i}"),
+                    "transcript".into(),
+                    json!({"i": i}),
+                )
                 .await;
         }
         let map = state.agent_event_queues.lock().await;
@@ -1823,7 +2820,14 @@ mod tests {
         assert!(queue.events.iter().any(|e| e.kind == "events_dropped"));
     }
 
-        fn a11y_rec(text: &str, politeness: &str, region: &str, role: Option<&str>, relevant: &str, ts: u64) -> A11yAnnouncement {
+    fn a11y_rec(
+        text: &str,
+        politeness: &str,
+        region: &str,
+        role: Option<&str>,
+        relevant: &str,
+        ts: u64,
+    ) -> A11yAnnouncement {
         A11yAnnouncement {
             seq: 0,
             ts_ms: ts,
@@ -1841,8 +2845,22 @@ mod tests {
     #[test]
     fn a11y_default_policy_maps_site_urgency() {
         let mut store = A11yStore::default();
-        store.ingest(a11y_rec("urgent", "assertive", "#a", None, "additions text", 1000));
-        store.ingest(a11y_rec("calm", "polite", "#b", None, "additions text", 1100));
+        store.ingest(a11y_rec(
+            "urgent",
+            "assertive",
+            "#a",
+            None,
+            "additions text",
+            1000,
+        ));
+        store.ingest(a11y_rec(
+            "calm",
+            "polite",
+            "#b",
+            None,
+            "additions text",
+            1100,
+        ));
         assert_eq!(store.history.len(), 2);
         assert_eq!(store.inject.len(), 1, "assertive injects, polite buffers");
         let drained = store.drain_inject();
@@ -1856,40 +2874,119 @@ mod tests {
         let mut store = A11yStore::default();
         store.configure("mcp", Some(7), Some("off".to_string()), None);
         assert_eq!(store.mode_for("mcp", Some(7), "assertive"), "off");
-        assert_eq!(store.mode_for("mcp", Some(8), "assertive"), "inject", "other tab keeps default");
-        assert_eq!(store.mode_for("hosted", Some(7), "assertive"), "inject", "one agent's configure cannot mutate another's (R4a)");
-        store.ingest(a11y_rec("dropped", "assertive", "#a", None, "additions text", 1000));
+        assert_eq!(
+            store.mode_for("mcp", Some(8), "assertive"),
+            "inject",
+            "other tab keeps default"
+        );
+        assert_eq!(
+            store.mode_for("hosted", Some(7), "assertive"),
+            "inject",
+            "one agent's configure cannot mutate another's (R4a)"
+        );
+        store.ingest(a11y_rec(
+            "dropped",
+            "assertive",
+            "#a",
+            None,
+            "additions text",
+            1000,
+        ));
         assert_eq!(store.history.len(), 0, "off drops cleanly");
     }
 
     #[test]
     fn a11y_dedupes_identical_bursts() {
         let mut store = A11yStore::default();
-        store.ingest(a11y_rec("same", "assertive", "#a", None, "additions text", 1000));
-        store.ingest(a11y_rec("same", "assertive", "#a", None, "additions text", 1200));
+        store.ingest(a11y_rec(
+            "same",
+            "assertive",
+            "#a",
+            None,
+            "additions text",
+            1000,
+        ));
+        store.ingest(a11y_rec(
+            "same",
+            "assertive",
+            "#a",
+            None,
+            "additions text",
+            1200,
+        ));
         assert_eq!(store.history.len(), 1);
     }
 
     #[test]
     fn a11y_last_wins_per_region_but_log_regions_are_additive() {
         let mut store = A11yStore::default();
-        store.ingest(a11y_rec("v1", "polite", "#status", None, "additions text", 1000));
-        store.ingest(a11y_rec("v2", "polite", "#status", None, "additions text", 2000));
-        assert_eq!(store.history.len(), 1, "windowed last-wins replaces the stale entry");
+        store.ingest(a11y_rec(
+            "v1",
+            "polite",
+            "#status",
+            None,
+            "additions text",
+            1000,
+        ));
+        store.ingest(a11y_rec(
+            "v2",
+            "polite",
+            "#status",
+            None,
+            "additions text",
+            2000,
+        ));
+        assert_eq!(
+            store.history.len(),
+            1,
+            "windowed last-wins replaces the stale entry"
+        );
         assert_eq!(store.history.back().unwrap().text, "v2");
 
         let mut log_store = A11yStore::default();
-        log_store.ingest(a11y_rec("m1", "polite", "#log", Some("log"), "additions", 1000));
-        log_store.ingest(a11y_rec("m2", "polite", "#log", Some("log"), "additions", 1500));
-        log_store.ingest(a11y_rec("m3", "polite", "#log", Some("log"), "additions", 2000));
-        assert_eq!(log_store.history.len(), 3, "three distinct log messages yield three history entries");
+        log_store.ingest(a11y_rec(
+            "m1",
+            "polite",
+            "#log",
+            Some("log"),
+            "additions",
+            1000,
+        ));
+        log_store.ingest(a11y_rec(
+            "m2",
+            "polite",
+            "#log",
+            Some("log"),
+            "additions",
+            1500,
+        ));
+        log_store.ingest(a11y_rec(
+            "m3",
+            "polite",
+            "#log",
+            Some("log"),
+            "additions",
+            2000,
+        ));
+        assert_eq!(
+            log_store.history.len(),
+            3,
+            "three distinct log messages yield three history entries"
+        );
     }
 
     #[test]
     fn a11y_drain_respects_budget_and_fifo() {
         let mut store = A11yStore::default();
         for i in 0..8 {
-            store.ingest(a11y_rec(&format!("msg {i}"), "assertive", &format!("#r{i}"), None, "additions text", 1000 + i * 3000));
+            store.ingest(a11y_rec(
+                &format!("msg {i}"),
+                "assertive",
+                &format!("#r{i}"),
+                None,
+                "additions text",
+                1000 + i * 3000,
+            ));
         }
         let first = store.drain_inject();
         assert_eq!(first.len(), A11Y_PIGGYBACK_MAX_RECORDS);
@@ -1902,7 +2999,14 @@ mod tests {
     fn a11y_read_pages_by_cursor() {
         let mut store = A11yStore::default();
         for i in 0..4 {
-            store.ingest(a11y_rec(&format!("m{i}"), "polite", &format!("#r{i}"), None, "additions text", 1000 + i * 3000));
+            store.ingest(a11y_rec(
+                &format!("m{i}"),
+                "polite",
+                &format!("#r{i}"),
+                None,
+                "additions text",
+                1000 + i * 3000,
+            ));
         }
         let (page1, cursor) = store.read(None, 2);
         assert_eq!(page1.len(), 2);
@@ -1939,10 +3043,20 @@ mod tests {
     async fn await_event_returns_backlog_immediately() {
         let state = empty_state();
         state
-            .push_agent_event("rt-1", "t0".into(), "transcript".into(), json!({"text":"a"}))
+            .push_agent_event(
+                "rt-1",
+                "t0".into(),
+                "transcript".into(),
+                json!({"text":"a"}),
+            )
             .await;
         state
-            .push_agent_event("rt-1", "t1".into(), "transcript".into(), json!({"text":"b"}))
+            .push_agent_event(
+                "rt-1",
+                "t1".into(),
+                "transcript".into(),
+                json!({"text":"b"}),
+            )
             .await;
         let out = await_agent_event(&state, "rt-1", -1, 5000).await;
         assert_eq!(out["events"].as_array().unwrap().len(), 2);
@@ -1955,7 +3069,12 @@ mod tests {
         let state = empty_state();
         for i in 0..3 {
             state
-                .push_agent_event("rt-1", format!("t{i}"), "transcript".into(), json!({"i": i}))
+                .push_agent_event(
+                    "rt-1",
+                    format!("t{i}"),
+                    "transcript".into(),
+                    json!({"i": i}),
+                )
                 .await;
         }
         // Already saw seq 0 and 1; only seq 2 should return.
@@ -1974,7 +3093,12 @@ mod tests {
             tokio::spawn(async move { await_agent_event(&waiter_state, "rt-1", -1, 5000).await });
         tokio::time::sleep(Duration::from_millis(20)).await;
         state
-            .push_agent_event("rt-1", "t0".into(), "tool".into(), json!({"name":"x","ok":true}))
+            .push_agent_event(
+                "rt-1",
+                "t0".into(),
+                "tool".into(),
+                json!({"name":"x","ok":true}),
+            )
             .await;
         let out = handle.await.unwrap();
         assert_eq!(out["events"].as_array().unwrap().len(), 1);
@@ -1989,15 +3113,24 @@ mod tests {
         for _ in 0..50 {
             let state = empty_state();
             let waiter_state = state.clone();
-            let handle = tokio::spawn(async move {
-                await_agent_event(&waiter_state, "rt-1", -1, 3000).await
-            });
+            let handle =
+                tokio::spawn(
+                    async move { await_agent_event(&waiter_state, "rt-1", -1, 3000).await },
+                );
             // No sleep — race the push against the waiter's first ready-check.
             state
-                .push_agent_event("rt-1", "t".into(), "tool".into(), json!({"name":"x","ok":true}))
+                .push_agent_event(
+                    "rt-1",
+                    "t".into(),
+                    "tool".into(),
+                    json!({"name":"x","ok":true}),
+                )
                 .await;
             let out = handle.await.unwrap();
-            assert_eq!(out["idle"], false, "waiter must observe the racing push, not time out");
+            assert_eq!(
+                out["idle"], false,
+                "waiter must observe the racing push, not time out"
+            );
             assert_eq!(out["events"].as_array().unwrap().len(), 1);
         }
     }
@@ -2006,7 +3139,12 @@ mod tests {
     async fn await_event_times_out_idle() {
         let state = empty_state();
         state
-            .push_agent_event("rt-1", "t0".into(), "transcript".into(), json!({"text":"a"}))
+            .push_agent_event(
+                "rt-1",
+                "t0".into(),
+                "transcript".into(),
+                json!({"text":"a"}),
+            )
             .await;
         // Caller is caught up (cursor = last seq 0), no new events → idle.
         let out = await_agent_event(&state, "rt-1", 0, 1000).await;
@@ -2055,9 +3193,10 @@ mod tests {
 
         // A blocked waiter wakes on the next event.
         let waiter_state = state.clone();
-        let handle = tokio::spawn(async move {
-            await_agent_event(&waiter_state, "rt-1", cursor, 5000).await
-        });
+        let handle =
+            tokio::spawn(
+                async move { await_agent_event(&waiter_state, "rt-1", cursor, 5000).await },
+            );
         tokio::time::sleep(Duration::from_millis(20)).await;
         ingest_agent_event(
             &state,
@@ -2128,7 +3267,10 @@ mod tests {
         let schema = advertised_input_schema_for_tool(&tool);
         let props = &schema["properties"];
         assert_eq!(props["target_runtime_id"]["type"].as_str(), Some("string"));
-        assert_eq!(props["target_url_contains"]["type"].as_str(), Some("string"));
+        assert_eq!(
+            props["target_url_contains"]["type"].as_str(),
+            Some("string")
+        );
         // The original property is preserved.
         assert_eq!(props["selector"]["type"].as_str(), Some("string"));
     }
@@ -2161,11 +3303,17 @@ mod tests {
             .expect_err("both missing fields must be reported");
         let body = (error.1).0;
         assert_eq!(body["error"]["code"], "invalid_input");
-        assert_eq!(body["error"]["evidence"]["missing_required"], json!([
-            "arguments.item_selector",
-            "arguments.fields"
-        ]));
-        assert_eq!(body["error"]["evidence"]["validation_errors"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            body["error"]["evidence"]["missing_required"],
+            json!(["arguments.item_selector", "arguments.fields"])
+        );
+        assert_eq!(
+            body["error"]["evidence"]["validation_errors"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]
@@ -2188,14 +3336,13 @@ mod tests {
                 }
             }
         });
-        let error = validate_tool_arguments(
-            &tool,
-            "example",
-            &json!({"options": "wrong", "query": 4}),
-        )
-        .expect_err("invalid siblings must be reported");
+        let error =
+            validate_tool_arguments(&tool, "example", &json!({"options": "wrong", "query": 4}))
+                .expect_err("invalid siblings must be reported");
         let body = (error.1).0;
-        let errors = body["error"]["evidence"]["validation_errors"].as_array().unwrap();
+        let errors = body["error"]["evidence"]["validation_errors"]
+            .as_array()
+            .unwrap();
         assert_eq!(errors.len(), 2);
         assert_eq!(errors[0]["keyword"], "type");
         assert_eq!(errors[0]["path"], "arguments.options");
@@ -2207,12 +3354,16 @@ mod tests {
     async fn select_runtime_falls_back_to_active_tab_when_ambiguous() {
         let state = two_runtime_state();
         // Default active tab is the first-seeded runtime.
-        let chosen = select_runtime(&state, &bare_call("storage.list")).await.unwrap();
+        let chosen = select_runtime(&state, &bare_call("storage.list"))
+            .await
+            .unwrap();
         assert!(chosen.runtime_id == "rt-lab" || chosen.runtime_id == "rt-trello");
 
         // Explicitly make Trello active; a bare call now routes there.
         *state.active_runtime_id.lock().await = Some("rt-trello".to_string());
-        let chosen = select_runtime(&state, &bare_call("storage.list")).await.unwrap();
+        let chosen = select_runtime(&state, &bare_call("storage.list"))
+            .await
+            .unwrap();
         assert_eq!(chosen.runtime_id, "rt-trello");
     }
 
@@ -2232,7 +3383,10 @@ mod tests {
         *state.active_runtime_id.lock().await = None;
         let result = select_runtime(&state, &bare_call("storage.list")).await;
         let error = match result {
-            Ok(client) => panic!("expected ambiguity error, got runtime {}", client.runtime_id),
+            Ok(client) => panic!(
+                "expected ambiguity error, got runtime {}",
+                client.runtime_id
+            ),
             Err(error) => error,
         };
         assert_eq!(error.0, StatusCode::CONFLICT);
@@ -2260,7 +3414,7 @@ mod tests {
                     runtime_key: None,
                     authorization_id: None,
                     extension_version: None,
-            device: None,
+                    device: None,
                     url: Some("https://docs.example.com/".to_string()),
                     tab: None,
                     replay: None,
@@ -2320,7 +3474,8 @@ mod tests {
             .clone();
 
         let dropped = Arc::new(Mutex::new(HashSet::from(["rt-trello".to_string()])));
-        remove_runtimes_for_connection(&state, &dropped, &connection_id, "receive_loop_ended").await;
+        remove_runtimes_for_connection(&state, &dropped, &connection_id, "receive_loop_ended")
+            .await;
 
         let log_path = root.path().join("logs").join("bridge-lifecycle.jsonl");
         let contents = std::fs::read_to_string(&log_path)
@@ -2334,8 +3489,7 @@ mod tests {
         assert_eq!(entry["reason"], "receive_loop_ended");
         assert_eq!(entry["remaining_runtimes"], 0);
         assert_eq!(
-            entry["runtimes"][0]["tab_url"],
-            "https://trello.com/b/abc",
+            entry["runtimes"][0]["tab_url"], "https://trello.com/b/abc",
             "the dropped tab's url must be recorded"
         );
     }
@@ -2410,7 +3564,11 @@ mod tests {
             .iter()
             .filter_map(|r| r["runtime_id"].as_str())
             .collect();
-        assert_eq!(ids, vec!["rt-trello"], "only the live runtime is advertised");
+        assert_eq!(
+            ids,
+            vec!["rt-trello"],
+            "only the live runtime is advertised"
+        );
     }
 
     #[tokio::test]
@@ -2482,10 +3640,22 @@ mod tests {
             "https://trello.com/b/abc/quarterly-roadmap",
             "Quarterly Roadmap | Trello",
         );
-        assert!(runtime_matches_intent(&client, "quarterly-roadmap"), "url path");
-        assert!(runtime_matches_intent(&client, "Quarterly Roadmap"), "title");
-        assert!(runtime_matches_intent(&client, "TRELLO.COM"), "host, case-insensitive");
-        assert!(runtime_matches_intent(&client, "roadmap"), "title fragment, case-insensitive");
+        assert!(
+            runtime_matches_intent(&client, "quarterly-roadmap"),
+            "url path"
+        );
+        assert!(
+            runtime_matches_intent(&client, "Quarterly Roadmap"),
+            "title"
+        );
+        assert!(
+            runtime_matches_intent(&client, "TRELLO.COM"),
+            "host, case-insensitive"
+        );
+        assert!(
+            runtime_matches_intent(&client, "roadmap"),
+            "title fragment, case-insensitive"
+        );
         assert!(!runtime_matches_intent(&client, "gmail"), "non-match");
     }
 
@@ -2516,8 +3686,8 @@ mod tests {
         call.target_url_contains = Some("nonexistent-site".to_string());
         let err = select_runtime(&state, &call).await.err().unwrap();
         assert_eq!(err.0, StatusCode::NOT_FOUND);
-        assert_eq!(err.1.0["error"]["code"], "runtime_not_found");
-        assert!(err.1.0["error"]["next_step"].is_string());
+        assert_eq!(err.1 .0["error"]["code"], "runtime_not_found");
+        assert!(err.1 .0["error"]["next_step"].is_string());
     }
 
     #[tokio::test]
@@ -2538,9 +3708,11 @@ mod tests {
         call.target_url_contains = Some("trello.com".to_string()); // matches both
         let err = select_runtime(&state, &call).await.err().unwrap();
         assert_eq!(err.0, StatusCode::CONFLICT);
-        assert_eq!(err.1.0["error"]["code"], "ambiguous_intent");
+        assert_eq!(err.1 .0["error"]["code"], "ambiguous_intent");
         // The candidates are named by the agent-facing shape so the agent can pick.
-        let candidates = err.1.0["error"]["evidence"]["candidates"].as_array().unwrap();
+        let candidates = err.1 .0["error"]["evidence"]["candidates"]
+            .as_array()
+            .unwrap();
         assert_eq!(candidates.len(), 2);
         for c in candidates {
             assert!(c["runtime_id"].is_string() && c["host"].is_string());
@@ -2574,7 +3746,7 @@ mod tests {
 
     // ---- U8: machine/browser label (R6-for-real) ----
     //
-    // LIVE-CAUGHT (2026-07-09, Yaniv ran 0.1.187 on Windows AND Mac): U5's `host`
+    // LIVE-CAUGHT (2026-07-09, the product owner ran 0.1.187 on Windows AND Mac): U5's `host`
     // is the SITE host (host_from_url), so two runtimes on the SAME url across two
     // BROWSERS collapse to the same label and are indistinguishable. R6's real
     // intent is a machine/browser label. The extension reports `device` at
@@ -2620,13 +3792,22 @@ mod tests {
 
     #[test]
     fn host_from_url_extracts_the_site_label() {
-        assert_eq!(host_from_url("https://trello.com/b/abc"), Some("trello.com".into()));
+        assert_eq!(
+            host_from_url("https://trello.com/b/abc"),
+            Some("trello.com".into())
+        );
         assert_eq!(
             host_from_url("https://docs.google.com/document/d/1"),
             Some("docs.google.com".into())
         );
-        assert_eq!(host_from_url("http://localhost:9223/x"), Some("localhost".into()));
-        assert_eq!(host_from_url("https://user@example.com:8080/p"), Some("example.com".into()));
+        assert_eq!(
+            host_from_url("http://localhost:9223/x"),
+            Some("localhost".into())
+        );
+        assert_eq!(
+            host_from_url("https://user@example.com:8080/p"),
+            Some("example.com".into())
+        );
         assert_eq!(host_from_url(""), None);
         assert_eq!(host_from_url("/relative/path"), None);
     }
@@ -2651,7 +3832,10 @@ mod tests {
         assert!(summary.get("tab").is_none(), "no raw chrome tab object");
         // claimed_at_ms is never serialized as a constant null.
         if let Some(claimed) = summary.get("claimed_at_ms") {
-            assert!(!claimed.is_null(), "claimed_at_ms is real or absent, never null");
+            assert!(
+                !claimed.is_null(),
+                "claimed_at_ms is real or absent, never null"
+            );
         }
     }
 
@@ -2687,11 +3871,7 @@ mod tests {
         let state = empty_state();
         {
             let mut runtimes = state.runtimes.lock().await;
-            let mut mac = seed_client_on_device(
-                "rt-mac",
-                "https://trello.com/b/x",
-                "mac · 7c19",
-            );
+            let mut mac = seed_client_on_device("rt-mac", "https://trello.com/b/x", "mac · 7c19");
             mac.tab = Some(json!({
                 "tab_id": 7,
                 "window_id": 11,
@@ -2737,14 +3917,10 @@ mod tests {
         let rows = view["tabs"].as_array().unwrap();
         assert_eq!(rows.iter().filter(|row| row["tab_id"] == 7).count(), 2);
         assert!(rows.iter().any(|row| {
-            row["runtime_id"] == "rt-mac"
-                && row["device"] == "mac · 7c19"
-                && row["active"] == true
+            row["runtime_id"] == "rt-mac" && row["device"] == "mac · 7c19" && row["active"] == true
         }));
         assert!(rows.iter().any(|row| {
-            row["runtime_id"] == "rt-win"
-                && row["device"] == "win · a3f2"
-                && row["active"] == false
+            row["runtime_id"] == "rt-win" && row["device"] == "win · a3f2" && row["active"] == false
         }));
         assert!(rows.iter().all(|row| row.get("bridge_url").is_none()));
 
@@ -2755,12 +3931,10 @@ mod tests {
             target_url_contains: None,
             timeout_ms: default_timeout_ms(),
         };
-        let (status, Json(error)) = tools_call_inner(
-            State(state.clone()),
-            Json(ambiguous_activate),
-        )
-        .await
-        .expect_err("colliding browser-local tab id must not route implicitly");
+        let (status, Json(error)) =
+            tools_call_inner(State(state.clone()), Json(ambiguous_activate))
+                .await
+                .expect_err("colliding browser-local tab id must not route implicitly");
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(error["error"]["code"], "owner_runtime_required");
         assert_eq!(error["error"]["evidence"]["tab_id"], 7);
@@ -2886,7 +4060,8 @@ mod tests {
 
         // Spawn the gated dispatch; feed a DEAD probe result to its oneshot.
         let state_for_probe = state.clone();
-        let gate = tokio::spawn(async move { ensure_dispatchable(&state_for_probe, &client).await });
+        let gate =
+            tokio::spawn(async move { ensure_dispatchable(&state_for_probe, &client).await });
         let probe_id = await_single_probe_id(&state).await;
         resolve_runtime_probe(&state, &probe_id, false).await;
 
@@ -2911,11 +4086,14 @@ mod tests {
         let client = state.runtimes.lock().await.get("rt-lab").unwrap().clone();
 
         let state_for_probe = state.clone();
-        let gate = tokio::spawn(async move { ensure_dispatchable(&state_for_probe, &client).await });
+        let gate =
+            tokio::spawn(async move { ensure_dispatchable(&state_for_probe, &client).await });
         let probe_id = await_single_probe_id(&state).await;
         resolve_runtime_probe(&state, &probe_id, true).await;
 
-        gate.await.unwrap().expect("a live-probe runtime is dispatchable");
+        gate.await
+            .unwrap()
+            .expect("a live-probe runtime is dispatchable");
         assert!(
             state.runtimes.lock().await.contains_key("rt-lab"),
             "a live runtime survives the probe"
@@ -3021,7 +4199,11 @@ mod tests {
         assert!(reaped, "the targeted runtime was present and reaped");
 
         let resource = bridge_runtimes_resource(&state).await;
-        assert_eq!(resource["connected"], json!(true), "sibling keeps it connected");
+        assert_eq!(
+            resource["connected"],
+            json!(true),
+            "sibling keeps it connected"
+        );
         let ids: Vec<&str> = resource["runtimes"]
             .as_array()
             .unwrap()
@@ -3066,7 +4248,11 @@ mod tests {
         *state.active_runtime_id.lock().await = Some("rt-lab".to_string());
         remove_single_runtime(&state, "rt-lab", "tab_closed").await;
         let active = state.active_runtime_id.lock().await.clone();
-        assert_eq!(active.as_deref(), Some("rt-trello"), "active moved to survivor");
+        assert_eq!(
+            active.as_deref(),
+            Some("rt-trello"),
+            "active moved to survivor"
+        );
     }
 
     #[tokio::test]
@@ -3105,6 +4291,156 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stale_runtime_id_refusal_names_its_successor_on_the_same_tab() {
+        // Runtime ids rotate on EVERY cross-document navigation: the content
+        // script is destroyed and a new one registers. a tester measured ELEVEN
+        // distinct ids for ONE tab in under two hours, every rotation on a
+        // browser.navigate, none on reconnect or heartbeat (I9, 2026-07-27).
+        //
+        // The rotation itself is correct — the old runtime genuinely ceased to
+        // exist. But it means any id a caller holds is stale within one turn, so
+        // a bare 404 sends them back to enumerate runtimes on nearly every
+        // navigation. runtime_key is "chrome-tab:<tabId>" and survives the
+        // navigation, so the refusal can name the successor instead of just
+        // reporting the death.
+        let mut state = two_runtime_state();
+        {
+            let mut runtimes = state.runtimes.lock().await;
+            let successor = {
+                let lab = runtimes.get("rt-lab").expect("seeded runtime");
+                let mut successor = lab.clone();
+                successor.runtime_id = "rt-lab-after-navigate".to_string();
+                successor.runtime_key = Some("chrome-tab:77".to_string());
+                successor
+            };
+            // The old runtime is gone; only its successor on the same tab remains.
+            runtimes.remove("rt-lab");
+            runtimes.insert(successor.runtime_id.clone(), successor);
+        }
+        state.stale_runtime_keys = Arc::new(Mutex::new(
+            [("rt-lab".to_string(), "chrome-tab:77".to_string())]
+                .into_iter()
+                .collect(),
+        ));
+
+        let mut call = bare_call("storage.list");
+        call.target_runtime_id = Some("rt-lab".to_string());
+        let error = match select_runtime(&state, &call).await {
+            Ok(client) => panic!("expected a refusal, got {}", client.runtime_id),
+            Err(error) => error,
+        };
+        assert_eq!(error.0, StatusCode::NOT_FOUND, "a dead id must still REFUSE");
+        let body = error.1 .0;
+        assert_eq!(
+            body["successor_runtime_id"].as_str(),
+            Some("rt-lab-after-navigate"),
+            "the refusal must name the live runtime on the same tab, or the caller \
+             re-enumerates on every navigation",
+        );
+        assert_eq!(
+            body["successor_reason"].as_str(),
+            Some("runtime_replaced_by_navigation"),
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_runtime_id_with_no_successor_still_refuses_plainly() {
+        // No successor must NOT become a guess. A tab that is really gone gets a
+        // plain refusal — inventing a neighbour here would be the misroute this
+        // whole change removes.
+        let state = two_runtime_state();
+        let mut call = bare_call("storage.list");
+        call.target_runtime_id = Some("rt-vanished".to_string());
+        let error = match select_runtime(&state, &call).await {
+            Ok(client) => panic!("expected a refusal, got {}", client.runtime_id),
+            Err(error) => error,
+        };
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+        let body = error.1 .0;
+        assert!(
+            body["successor_runtime_id"].is_null(),
+            "no successor must read as null, never as a nearby runtime",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bare_read_never_installs_an_arbitrary_active_tab() {
+        // A READ WAS SILENTLY WRITING. With the stored active stale (or unset)
+        // and several runtimes connected, the no-selector branch used to install
+        // `runtimes.keys().next()` as the new active tab. HashMap order is
+        // arbitrary, so the winner could be any tab — including one on a
+        // DIFFERENT MACHINE.
+        //
+        // Nothing announced it. The read returned ok, and every later BARE call
+        // (no target_runtime_id) then routed to that tab via select_runtime's
+        // active-tab fallback. Observed twice as "the agent navigated the human's
+        // live tab away", and once by a tester as active_runtime_id drifting to a
+        // Gmail tab mid-conversation. One cause, three symptoms, and no call ever
+        // named a wrong target (2026-07-27).
+        let state = two_runtime_state();
+        *state.active_runtime_id.lock().await = Some("rt-vanished".to_string());
+
+        let read = browser_active_tab_set_call(
+            state.clone(),
+            ToolCallRequest {
+                name: "browser.active_tab.set".to_string(),
+                arguments: json!({}),
+                target_runtime_id: None,
+                target_url_contains: None,
+                timeout_ms: default_timeout_ms(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let stored = state.active_runtime_id.lock().await.clone();
+        assert_eq!(
+            stored.as_deref(),
+            Some("rt-vanished"),
+            "a read must not mutate routing state; the stale id is the caller's to resolve",
+        );
+
+        let out = read.0.output.clone().unwrap();
+        assert_eq!(
+            out["active_runtime_id"], Value::Null,
+            "a stale active must READ as null, not as some arbitrary survivor",
+        );
+        assert_eq!(
+            out["active_runtime_stale_id"].as_str(),
+            Some("rt-vanished"),
+            "the response must NAME the id that went away, or the caller cannot tell \
+             'never set' from 'the tab you were using is gone'",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bare_read_with_no_active_set_stays_unset() {
+        // The never-set case must also stay unset. Defaulting here is what made
+        // the first bare call after startup pick a tab at random.
+        let state = two_runtime_state();
+        *state.active_runtime_id.lock().await = None;
+
+        let _ = browser_active_tab_set_call(
+            state.clone(),
+            ToolCallRequest {
+                name: "browser.active_tab.set".to_string(),
+                arguments: json!({}),
+                target_runtime_id: None,
+                target_url_contains: None,
+                timeout_ms: default_timeout_ms(),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            state.active_runtime_id.lock().await.clone(),
+            None,
+            "a read must not choose an active tab on the caller's behalf",
+        );
+    }
+
+    #[tokio::test]
     async fn browser_active_tab_set_rejects_unknown_url() {
         let state = two_runtime_state();
         let error = browser_active_tab_set_call(
@@ -3131,10 +4467,91 @@ mod tests {
         let props = &manifest["input_schema"]["properties"];
         assert_eq!(props["timeout_ms"]["type"].as_str(), Some("integer"));
         assert_eq!(props["timeout_ms"]["minimum"].as_u64(), Some(1));
+        assert_eq!(props["summary_arguments"]["type"].as_str(), Some("object"));
+        assert_eq!(props["snapshot_id"]["type"].as_str(), Some("string"));
+        assert_eq!(props["node_ref"]["type"].as_str(), Some("string"));
+        assert_eq!(
+            props["operation"]["enum"],
+            json!(["roots", "node", "neighbors", "traverse"])
+        );
+        assert_eq!(props["direction"]["enum"], json!(["outgoing", "incoming", "both"]));
+        assert_eq!(props["edge_types"]["type"], "array");
+        assert_eq!(props["max_depth"]["type"], "integer");
+        assert_eq!(props["measure_filter"]["type"], "object");
+        assert_eq!(props["measure_order"]["type"], "object");
+        assert_eq!(props["query"]["type"].as_str(), Some("string"));
+        assert_eq!(props["scope"]["type"].as_str(), Some("object"));
+        assert_eq!(props["cursor"]["type"].as_str(), Some("string"));
+        assert_eq!(props["continuation"]["type"].as_str(), Some("string"));
+        assert_eq!(props["page_size"]["maximum"].as_u64(), Some(5));
+        assert_eq!(props["search_mode"]["enum"], json!(["semantic", "lexical"]));
+        let modes = props["mode"]["enum"].as_array().unwrap();
+        assert!(modes.iter().any(|mode| mode == "navigate"));
+        assert!(modes.iter().any(|mode| mode == "search"));
         assert_eq!(
             manifest["input_schema"]["additionalProperties"].as_bool(),
             Some(false)
         );
+    }
+
+    #[test]
+    fn bounded_site_action_listing_filters_pages_and_rejects_drift() {
+        let actions = (0..7)
+            .map(|index| {
+                json!({
+                    "name": format!("trello.card.{index}"),
+                    "description": if index % 2 == 0 { "card finder" } else { "board reader" }
+                })
+            })
+            .collect::<Vec<_>>();
+        let first = bounded_site_action_listing(actions.clone(), "card", 2, None, 4_096)
+            .expect("first page");
+        assert_eq!(first["actions"].as_array().unwrap().len(), 2);
+        assert_eq!(first["page"]["page_size"], 2);
+        assert_eq!(first["page"]["has_more"], true);
+        let continuation = first["page"]["continuation"].as_str().unwrap();
+        let second = bounded_site_action_listing(
+            actions.clone(),
+            "card",
+            2,
+            Some(continuation),
+            4_096,
+        )
+        .expect("second page");
+        assert_ne!(first["actions"], second["actions"]);
+
+        let mut changed = actions;
+        changed.push(json!({ "name": "trello.card.new", "description": "card finder" }));
+        let error = bounded_site_action_listing(changed, "card", 2, Some(continuation), 4_096)
+            .expect_err("content-bound continuation must reject catalog drift");
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(error.1["error"]["code"], "catalog_continuation_invalid");
+    }
+
+    #[test]
+    fn state_projection_listing_exposes_summary_input_schema() {
+        let projections = vec![(
+            "scopes/public/sites/trello.com/board/actions.json".to_string(),
+            json!({
+                "name": "trello.board",
+                "summaries": [{
+                    "name": "list_page",
+                    "description": "Read one list page.",
+                    "max_bytes": 16000,
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["list_name"],
+                        "properties": { "list_name": { "type": "string" } }
+                    }
+                }]
+            }),
+        )];
+
+        let listed = state_projection_listing(&projections);
+        let summary = &listed[0]["summaries"][0];
+        assert_eq!(summary["name"].as_str(), Some("list_page"));
+        assert_eq!(summary["input_schema"]["type"].as_str(), Some("object"));
+        assert_eq!(summary["input_schema"]["required"], json!(["list_name"]));
     }
 
     #[test]
@@ -3264,7 +4681,11 @@ mod tests {
         )
         .unwrap();
         std::fs::write(site_dir.join("SKILL.md"), "# Example skill\n").unwrap();
-        std::fs::copy(site_dir.join("actions.json"), proof_dir.join("actions.json")).unwrap();
+        std::fs::copy(
+            site_dir.join("actions.json"),
+            proof_dir.join("actions.json"),
+        )
+        .unwrap();
 
         let manifest = json!({ "protocol": "actions.json", "tools": [] });
         let (catalog_manifest, site_manifest, site_action_names) =
@@ -3351,6 +4772,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn actions_site_refreshes_storage_catalog_before_listing() {
+        let root = tempdir().unwrap();
+        let site_dir = root.path().join("scopes/public/sites/actionsjson.com/book");
+        std::fs::create_dir_all(&site_dir).unwrap();
+
+        let manifest = json!({ "protocol": "actions.json", "tools": [] });
+        let (catalog_manifest, site_manifest, site_action_names) =
+            build_catalog_manifests(manifest.clone(), &[], Some(root.path()))
+                .await
+                .unwrap();
+        let state = state_from_catalog(
+            ActionCatalog {
+                base_manifest: manifest,
+                map_paths: Vec::new(),
+                manifest: catalog_manifest,
+                site_manifest,
+                site_action_names,
+            },
+            Vec::new(),
+            Some(root.path().to_path_buf()),
+        );
+
+        let map_path = site_dir.join("actions.json");
+        std::fs::write(
+            &map_path,
+            r#"{
+              "protocol": "actions.json",
+              "tools": [{
+                "name": "book.tutor.session.start",
+                "input_schema": { "type": "object" },
+                "workflow": {
+                  "version": 1,
+                  "steps": [{ "id": "click", "primitive": "pointer.click", "args": { "x": 1, "y": 1 } }]
+                }
+              }],
+              "state_projections": [{
+                "name": "book.tutor",
+                "scope": { "selector": "body" },
+                "schema": { "type": "object" },
+                "fields": { "status": { "selector": "body", "attribute": "text" } }
+              }]
+            }"#,
+        )
+        .unwrap();
+
+        let list = |state: AppState| async move {
+            site_actions_call(
+                state,
+                ToolCallRequest {
+                    name: "actions.site".to_string(),
+                    arguments: json!({ "mode": "list" }),
+                    target_runtime_id: None,
+                    target_url_contains: Some(
+                        "https://actionsjson.com/book/chapters/02-positioning-and-profile/"
+                            .to_string(),
+                    ),
+                    timeout_ms: default_timeout_ms(),
+                },
+            )
+            .await
+            .unwrap()
+            .0
+            .output
+            .unwrap()
+        };
+
+        let after_add = list(state.clone()).await;
+        assert_eq!(
+            after_add["actions"][0]["name"].as_str(),
+            Some("book.tutor.session.start")
+        );
+        assert_eq!(
+            after_add["state_projections"][0]["name"].as_str(),
+            Some("book.tutor")
+        );
+
+        std::fs::remove_file(map_path).unwrap();
+        let after_remove = list(state.clone()).await;
+        assert_eq!(after_remove["actions"], json!([]));
+        assert_eq!(after_remove["state_projections"], json!([]));
+
+        let (status, payload) = site_actions_call(
+            state,
+            ToolCallRequest {
+                name: "actions.site".to_string(),
+                arguments: json!({
+                    "mode": "call",
+                    "action": "book.tutor.session.start",
+                    "arguments": {}
+                }),
+                target_runtime_id: None,
+                target_url_contains: Some("https://actionsjson.com/book/".to_string()),
+                timeout_ms: default_timeout_ms(),
+            },
+        )
+        .await
+        .expect_err("removed storage action must not dispatch from a stale catalog");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(payload["error"]["code"].as_str(), Some("unknown_action"));
+    }
+
+    #[tokio::test]
     async fn storage_map_discovery_ignores_pipeline_proof_packages() {
         let root = tempdir().unwrap();
         let site_dir = root.path().join("scopes/private/sites/example.com/page");
@@ -3368,7 +4891,11 @@ mod tests {
             }"#,
         )
         .unwrap();
-        std::fs::copy(site_dir.join("actions.json"), proof_dir.join("actions.json")).unwrap();
+        std::fs::copy(
+            site_dir.join("actions.json"),
+            proof_dir.join("actions.json"),
+        )
+        .unwrap();
 
         let maps = discover_storage_action_maps(root.path()).await.unwrap();
 
@@ -3446,8 +4973,14 @@ mod tests {
         );
         assert_eq!(row["host"].as_str(), Some("www.linkedin.com"));
         assert_eq!(row["title"].as_str(), Some("LinkedIn Messaging"));
-        assert!(row.get("tab").is_none(), "no raw chrome tab in the agent view");
-        assert!(row.get("replay").is_none(), "no replay internals in the agent view");
+        assert!(
+            row.get("tab").is_none(),
+            "no raw chrome tab in the agent view"
+        );
+        assert!(
+            row.get("replay").is_none(),
+            "no replay internals in the agent view"
+        );
     }
 }
 
@@ -3517,13 +5050,31 @@ async fn serve(
     )
     .await?;
     spawn_liveness_sweep(state.clone());
+    let extension_auth = state.extension_auth.clone();
     let app = app_from_state(state, true);
 
     let listener = TcpListener::bind(bind).await?;
     println!("actions-json bridge listening on http://{bind}");
     println!("extension WebSocket: ws://{bind}/extension");
+    print_extension_pairing_hint(&extension_auth, |line| println!("{line}"));
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// U12. The secret is useless if the operator cannot find it. Print it at
+/// startup, on both `serve` and `mcp`, with the exact storage key the extension
+/// reads — a coordinated cutover across five bridges fails on missing
+/// instructions long before it fails on missing crypto.
+fn print_extension_pairing_hint(auth: &ExtensionAuthConfig, mut emit: impl FnMut(&str)) {
+    emit(&format!(
+        "extension handshake secret: {}",
+        auth.handshake_secret()
+    ));
+    emit(&format!(
+        "  pair with: chrome.storage.local.set({{ bridgeHandshakeSecret: \"{}\" }})",
+        auth.handshake_secret()
+    ));
+    emit(&format!("  allowed extension origin: {}", auth.primary_origin()));
 }
 
 async fn mcp_stdio_server(
@@ -3561,6 +5112,9 @@ async fn mcp_stdio_server(
     };
     eprintln!("actions-json MCP bridge browser listener on http://{actual_bind}");
     eprintln!("extension WebSocket: ws://{actual_bind}/extension");
+    // stderr, not stdout: stdout is the MCP JSON-RPC channel and a stray line
+    // there corrupts the protocol.
+    print_extension_pairing_hint(&state.extension_auth, |line| eprintln!("{line}"));
     tokio::spawn(async move {
         if let Err(error) = axum::serve(listener, app).await {
             eprintln!("actions-json MCP bridge browser listener failed: {error}");
@@ -3658,6 +5212,9 @@ async fn build_catalog_manifests(
             for tool in &mut additional_tools {
                 stamp_default_target_url_contains(tool, &site_host);
             }
+        }
+        for tool in &mut additional_tools {
+            stamp_map_url_matches(tool, &map);
         }
         for tool in &additional_tools {
             if let Some(name) = tool.get("name").and_then(Value::as_str) {
@@ -3828,11 +5385,7 @@ async fn bridge_payloads_configure_call(
     request: ToolCallRequest,
 ) -> Result<Json<ToolCallResponse>, (StatusCode, Json<Value>)> {
     let call_id = Uuid::new_v4().to_string();
-    let arguments = request
-        .arguments
-        .as_object()
-        .cloned()
-        .unwrap_or_default();
+    let arguments = request.arguments.as_object().cloned().unwrap_or_default();
     if let Some(unexpected) = arguments.keys().find(|key| *key != "inline_limit_bytes") {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -4062,11 +5615,26 @@ async fn browser_active_tab_set_call(
     let mut active = state.active_runtime_id.lock().await;
     if let Some(id) = resolved_id {
         *active = Some(id);
-    } else if active.as_deref().is_none_or(|id| !runtimes.contains_key(id)) {
-        // Reading, but the stored active is stale/unset: default to a connected one.
-        *active = runtimes.keys().next().cloned();
     }
-    let active_id = active.clone();
+    // A READ MUST NOT WRITE. This branch used to default a stale/unset active to
+    // `runtimes.keys().next()` — arbitrary HashMap order — which silently
+    // installed some other tab, possibly on another machine, as the routing
+    // target for every later BARE call (select_runtime's active-tab fallback).
+    // Nothing announced it: the read returned ok and the misroute surfaced later
+    // as the agent operating a tab nobody pointed it at. Choosing a tab is the
+    // caller's decision; a read reports state, it does not repair it
+    // (2026-07-27).
+    let stored_active = active.clone();
+    let live_active = stored_active
+        .as_deref()
+        .filter(|id| runtimes.contains_key(*id))
+        .map(str::to_string);
+    // Distinguish "never set" from "the tab you were using is gone" — the same
+    // string for both is what makes a vanished tab look like a fresh session.
+    let stale_active = match (&stored_active, &live_active) {
+        (Some(stored), None) => Some(stored.clone()),
+        _ => None,
+    };
 
     Ok(Json(ToolCallResponse {
         announcements: None,
@@ -4074,11 +5642,12 @@ async fn browser_active_tab_set_call(
         call_id,
         output: Some(json!({
             "ok": true,
-            "active_runtime_id": active_id,
-            "active_runtime": active_id
+            "active_runtime_id": live_active,
+            "active_runtime": live_active
                 .as_deref()
                 .and_then(|id| runtimes.get(id))
                 .map(runtime_summary),
+            "active_runtime_stale_id": stale_active,
             "runtimes": runtime_summaries(&runtimes),
         })),
         error: None,
@@ -4241,7 +5810,13 @@ async fn spill_payload_to_disk(dir: &Path, tool: &str, text: &str) -> Result<Pat
     Ok(path)
 }
 
-fn payload_spill_envelope(tool: &str, result: &Value, text: &str, limit: usize, path: &Path) -> Value {
+fn payload_spill_envelope(
+    tool: &str,
+    result: &Value,
+    text: &str,
+    limit: usize,
+    path: &Path,
+) -> Value {
     let preview: String = text.chars().take(800).collect();
     json!({
         "payload_spilled": true,
@@ -4389,7 +5964,19 @@ fn extension_executor_supports_primitive(name: &str) -> bool {
             | "transfer.read"
             | "transfer.clear"
             | "transfer.insert"
+            | "file.transfer.create"
+            | "file.transfer.chunk"
+            | "file.transfer.finalize"
+            | "file.transfer.status"
+            | "file.transfer.cancel"
+            | "file.transfer.upload.consume"
+            | "file.transfer.upload.complete"
+            | "file.transfer.download.capture"
+            | "file.transfer.download.read_chunk"
+            | "file.transfer.download.complete"
             | "storage.read_file"
+            | "corpus.search"
+            | "corpus.build"
             | "keyboard.press"
             | "keyboard.press_gated"
             | "page.info"
@@ -4416,8 +6003,8 @@ fn site_actions_tool_manifest() -> Value {
             "properties": {
                 "mode": {
                     "type": "string",
-                    "enum": ["list", "call", "state_read", "state_summary", "state_diff"],
-                    "description": "Use list to inspect applicable site actions and state projections, call to invoke a listed action, or state_read/state_summary/state_diff to execute a listed state projection."
+                    "enum": ["list", "call", "state_read", "state_summary", "state_diff", "navigate", "search"],
+                    "description": "Use list for bounded capability discovery, call for a listed action, state_read/state_summary/state_diff for a projection, or navigate/search for an active projection snapshot."
                 },
                 "action": {
                     "type": "string",
@@ -4435,10 +6022,78 @@ fn site_actions_tool_manifest() -> Value {
                     "type": "string",
                     "description": "Optional declared summary name selected by state_summary mode."
                 },
+                "summary_arguments": {
+                    "type": "object",
+                    "description": "Optional inputs for state_summary. Follow the selected summary input_schema returned by actions.site list."
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Case-insensitive catalog filter in list mode, or the text query in search mode."
+                },
+                "snapshot_id": {
+                    "type": "string",
+                    "description": "Opaque active projection snapshot identifier required by navigate and search."
+                },
+                "node_ref": {
+                    "type": "string",
+                    "description": "Optional opaque starting node reference for navigate. Omit to inspect roots."
+                },
+                "operation": {
+                    "type": "string",
+                    "enum": ["roots", "node", "neighbors", "traverse"],
+                    "description": "Navigate operation. Defaults to roots without node_ref and node with node_ref."
+                },
+                "direction": {
+                    "type": "string",
+                    "enum": ["outgoing", "incoming", "both"],
+                    "description": "Optional edge direction for neighbors or traversal."
+                },
+                "edge_types": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional edge-type filter for neighbors or traversal."
+                },
+                "max_depth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional bounded traversal depth."
+                },
+                "measure_filter": {
+                    "type": "object",
+                    "description": "Optional named numeric edge-measure condition."
+                },
+                "measure_order": {
+                    "type": "object",
+                    "description": "Optional named numeric edge-measure ordering."
+                },
+                "scope": {
+                    "type": "object",
+                    "description": "Optional bounded graph scope for navigate or search."
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque continuation returned by navigate or search."
+                },
+                "continuation": {
+                    "type": "string",
+                    "description": "Opaque continuation returned by list."
+                },
+                "page_size": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5,
+                    "description": "Requested bounded result count. Defaults to 5 and never exceeds 5."
+                },
+                "search_mode": {
+                    "type": "string",
+                    "enum": ["semantic", "lexical"],
+                    "description": "Search retrieval mode. Defaults to semantic, which may visibly degrade to lexical when semantic retrieval is unavailable."
+                },
                 "max_bytes": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional response size budget forwarded to the state projection engine."
+                    "maximum": 48000,
+                    "description": "Optional bounded response budget for list, state_read, state_summary, navigate, or search."
                 },
                 "target_url_contains": {
                     "type": "string",
@@ -4481,6 +6136,78 @@ fn storage_read_file_tool_manifest() -> Value {
                     "description": "Optional dispatch budget in milliseconds for the call. Defaults to 30000."
                 }
             }
+        }
+    })
+}
+
+fn file_upload_tool_manifest() -> Value {
+    json!({
+        "name": "file.upload",
+        "description": "Stream one explicitly named coding-agent-local file, up to 25 MiB, in bounded acknowledged chunks to one authorized browser runtime and assign it to one concrete file input. The browser receives only the selected file bytes and metadata; no directory access is exposed. transfer_id is an idempotency key.",
+        "input_schema": {
+            "type": "object",
+            "required": ["local_path", "origin", "file_input"],
+            "additionalProperties": false,
+            "properties": {
+                "local_path": { "type": "string", "description": "Absolute or working-directory-relative path to the one local file to stream." },
+                "filename": { "type": "string", "description": "Optional browser-visible basename; defaults to the local basename." },
+                "mime_type": { "type": "string", "description": "Declared MIME type; defaults to application/octet-stream." },
+                "origin": { "type": "string", "description": "Exact authorized HTTP(S) page origin." },
+                "file_input": {
+                    "type": "object",
+                    "required": ["selector"],
+                    "additionalProperties": false,
+                    "properties": { "selector": { "type": "string", "description": "Concrete CSS selector for the destination input[type=file]." } }
+                },
+                "transfer_id": { "type": "string", "description": "Optional retry-safe idempotency key. Generated when omitted." },
+                "timeout_ms": { "type": "integer", "minimum": 1, "description": "Per-chunk browser acknowledgement timeout." }
+            }
+        }
+    })
+}
+
+fn file_download_tool_manifest() -> Value {
+    json!({
+        "name": "file.download",
+        "description": "Capture one explicitly authorized same-origin browser URL, up to 25 MiB, and stream it back in bounded acknowledged chunks into the MCP bridge's private payload directory. Returns a local path plus verified filename, MIME type, byte size, and SHA-256.",
+        "input_schema": {
+            "type": "object",
+            "required": ["url", "origin"],
+            "additionalProperties": false,
+            "properties": {
+                "url": { "type": "string", "description": "Same-origin browser URL to capture." },
+                "origin": { "type": "string", "description": "Exact authorized HTTP(S) page origin." },
+                "filename": { "type": "string", "description": "Optional safe output basename." },
+                "mime_type": { "type": "string", "description": "Optional expected MIME type." },
+                "transfer_id": { "type": "string", "description": "Optional retry-safe idempotency key. Generated when omitted." },
+                "timeout_ms": { "type": "integer", "minimum": 1, "description": "Per-chunk browser acknowledgement timeout." }
+            }
+        }
+    })
+}
+
+fn file_transfer_status_tool_manifest() -> Value {
+    json!({
+        "name": "file.transfer.status",
+        "description": "Read metadata-only status for one remote file transfer. Never returns file bytes.",
+        "input_schema": {
+            "type": "object",
+            "required": ["transfer_id"],
+            "additionalProperties": false,
+            "properties": { "transfer_id": { "type": "string" } }
+        }
+    })
+}
+
+fn file_transfer_cancel_tool_manifest() -> Value {
+    json!({
+        "name": "file.transfer.cancel",
+        "description": "Cancel one remote file transfer and clear retained bytes. Idempotent after cancellation.",
+        "input_schema": {
+            "type": "object",
+            "required": ["transfer_id"],
+            "additionalProperties": false,
+            "properties": { "transfer_id": { "type": "string" } }
         }
     })
 }
@@ -4643,6 +6370,65 @@ pub fn app_from_manifest_value_with_runtimes(
     )
 }
 
+/// Build an app whose U12 extension-auth policy — allowed extension ids and the
+/// per-installation handshake secret — is read from `auth_root` rather than the
+/// process cwd. Exists so a test can pin a temp-dir installation instead of
+/// racing every other test in the process over one ambient config file.
+pub fn app_from_manifest_value_with_auth_root(
+    manifest: Value,
+    auth_root: Option<PathBuf>,
+) -> Router {
+    app_from_manifest_value_with_auth_root_and_legacy_routes(manifest, auth_root, true)
+}
+
+/// The `mcp` command's router shape: the legacy HTTP tool routes are NOT
+/// mounted. Exists so a test can assert that U12b's HTTP gate is scoped to the
+/// `serve`-mode subtree — in this mode those paths must 404 (absent), never 401
+/// (present but refused), because those are different operator diagnoses.
+pub fn app_from_manifest_value_without_legacy_tool_http_routes(
+    manifest: Value,
+    auth_root: Option<PathBuf>,
+) -> Router {
+    app_from_manifest_value_with_auth_root_and_legacy_routes(manifest, auth_root, false)
+}
+
+fn app_from_manifest_value_with_auth_root_and_legacy_routes(
+    manifest: Value,
+    auth_root: Option<PathBuf>,
+    include_legacy_tool_http_routes: bool,
+) -> Router {
+    app_from_state(
+        state_from_catalog_with_auth_root(
+            ActionCatalog {
+                base_manifest: manifest.clone(),
+                map_paths: Vec::new(),
+                manifest: manifest.clone(),
+                site_manifest: manifest,
+                site_action_names: HashSet::new(),
+            },
+            Vec::new(),
+            None,
+            auth_root,
+        ),
+        include_legacy_tool_http_routes,
+    )
+}
+
+/// Same as `state_from_catalog`, but with the U12 extension-auth policy read
+/// from an explicit directory instead of the process cwd. Tests use this to pin
+/// a temp-dir installation; production goes through `state_from_catalog`, which
+/// resolves the policy from cwd exactly like the credential loaders do.
+fn state_from_catalog_with_auth_root(
+    catalog: ActionCatalog,
+    runtime_seeds: Vec<RuntimeSeed>,
+    storage_root: Option<PathBuf>,
+    auth_root: Option<PathBuf>,
+) -> AppState {
+    let mut state = state_from_catalog(catalog, runtime_seeds, storage_root);
+    state.extension_auth = Arc::new(ExtensionAuthConfig::load(auth_root.as_deref()));
+    state
+}
+
 fn state_from_catalog(
     mut catalog: ActionCatalog,
     runtime_seeds: Vec<RuntimeSeed>,
@@ -4660,6 +6446,15 @@ fn state_from_catalog(
         bridge_payloads_configure_tool_manifest(),
     )
     .expect("bridge.payloads.configure tool must be insertable into advertised manifest");
+    for manifest in [
+        file_upload_tool_manifest(),
+        file_download_tool_manifest(),
+        file_transfer_status_tool_manifest(),
+        file_transfer_cancel_tool_manifest(),
+    ] {
+        ensure_advertised_tool(&mut catalog.manifest, manifest)
+            .expect("file transfer tool must be insertable into advertised manifest");
+    }
     ensure_advertised_tool(
         &mut catalog.manifest,
         browser_active_tab_set_tool_manifest(),
@@ -4690,7 +6485,7 @@ fn state_from_catalog(
                     runtime_key: None,
                     authorization_id: None,
                     extension_version: None,
-            device: None,
+                    device: None,
                     url: seed.url,
                     tab: None,
                     replay: None,
@@ -4705,11 +6500,11 @@ fn state_from_catalog(
     AppState {
         catalog: Arc::new(Mutex::new(catalog)),
         storage_root,
-        active_runtime_id: Arc::new(Mutex::new(
-            seeded_runtimes.keys().next().cloned(),
-        )),
+        extension_auth: Arc::new(ExtensionAuthConfig::load(None)),
+        active_runtime_id: Arc::new(Mutex::new(seeded_runtimes.keys().next().cloned())),
         runtimes: Arc::new(Mutex::new(seeded_runtimes)),
         pending: Arc::new(Mutex::new(HashMap::new())),
+        stale_runtime_keys: Arc::new(Mutex::new(HashMap::new())),
         action_progress: Arc::new(Mutex::new(HashMap::new())),
         pending_probes: Arc::new(Mutex::new(HashMap::new())),
         last_replay_summary: Arc::new(Mutex::new(None)),
@@ -4726,9 +6521,23 @@ fn app_from_state(state: AppState, include_legacy_tool_http_routes: bool) -> Rou
     let mut router = Router::new()
         .route("/health", get(health))
         .route("/runtimes", get(runtimes))
+        .route("/extension/auth-check", get(extension_auth_check))
         .route("/extension", get(extension_ws));
     if include_legacy_tool_http_routes {
-        router = router
+        // U12b. The legacy tool routes are built as their OWN router so the auth
+        // layer can be attached to exactly this subtree and nothing else. Putting
+        // the check inside `add_cors_headers` (which already has state) was the
+        // other option and was rejected: that middleware wraps the WHOLE app, so
+        // the gate would then have to re-derive "is this path gated?" from the
+        // URI — a second, drifting copy of the route list, and the exact shape
+        // that lets a newly added route silently escape the guard. Here the
+        // route list and the gate are the same expression.
+        //
+        // `/health` and `/runtimes` stay on the base router, deliberately: they
+        // are the liveness surface every operator and supervisor script polls,
+        // they expose no credentials and drive nothing, and gating them would
+        // turn "the bridge is up" into a question you need a secret to ask.
+        let gated = Router::new()
             .route("/actions", get(actions))
             .route("/mcp/tools/list", get(tools_list).options(cors_preflight))
             .route(
@@ -4739,11 +6548,114 @@ fn app_from_state(state: AppState, include_legacy_tool_http_routes: bool) -> Rou
                 "/mcp/tools/reload",
                 post(tools_reload).options(cors_preflight),
             )
-            .route("/mcp/tools/call", post(tools_call).options(cors_preflight));
+            .route("/mcp/tools/call", post(tools_call).options(cors_preflight))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                require_bridge_http_secret,
+            ));
+        router = router.merge(gated);
     }
     router
-        .layer(middleware::from_fn(add_cors_headers))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            add_cors_headers,
+        ))
         .with_state(state)
+}
+
+/// U12b. Require the per-installation handshake secret on the legacy HTTP tool
+/// routes `serve` mounts.
+///
+/// U12 closed `/extension`, but `POST /mcp/tools/call` was left holding FULL
+/// BROWSER CONTROL behind nothing but loopback binding and CORS. CORS is a rule
+/// browsers agree to follow; a local process — a hostile postinstall script,
+/// another account on a shared machine — simply opens a socket and is never
+/// asked. The secret is the check that binds to something an attacker cannot
+/// obtain rather than something it can decline to honor.
+///
+/// The secret is read from `Authorization: Bearer <secret>` OR `?secret=<secret>`.
+/// Both, because the two real caller shapes differ: a local process and the
+/// extension's service-worker `fetch` can set headers, while a curl one-liner or
+/// anything reusing the `/extension` query convention has the query string. A
+/// bare `Authorization: <secret>` (no scheme) is accepted too — the scheme is a
+/// convention here, not a protocol, and refusing over it would only produce a
+/// confusing 401 for a caller that in fact holds the right secret.
+async fn require_bridge_http_secret(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    // A CORS preflight is sent by the browser WITHOUT the Authorization header —
+    // that is the whole point of a preflight, it asks whether the header may be
+    // sent. Gating OPTIONS would make every credentialed cross-origin call fail
+    // before the real request is ever attempted, i.e. the guard would break the
+    // caller it exists to admit. A preflight carries no body and triggers no
+    // tool, so letting it through costs nothing.
+    if request.method() == Method::OPTIONS {
+        return next.run(request).await;
+    }
+
+    let header_secret = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim())
+        .map(|value| {
+            value
+                .strip_prefix("Bearer ")
+                .or_else(|| value.strip_prefix("bearer "))
+                .unwrap_or(value)
+        })
+        .map(str::trim)
+        .filter(|secret| !secret.is_empty());
+
+    let query_secret = request
+        .uri()
+        .query()
+        .and_then(|query| query_parameter(query, "secret"))
+        .filter(|secret| !secret.trim().is_empty());
+
+    let presented = header_secret.map(str::to_string).or(query_secret);
+
+    if let Err(rejection) = state.extension_auth.authorize_http(presented.as_deref()) {
+        let reason = rejection.reason();
+        eprintln!(
+            "actions-json bridge refused {} {}: {reason}",
+            request.method(),
+            request.uri().path()
+        );
+        // Never a bare 401. The body names the specific cause and how to fix it,
+        // because the operator on the other end is an agent or a script that
+        // will otherwise report "the bridge is broken" and burn a day.
+        return (
+            StatusCode::UNAUTHORIZED,
+            structured_error(
+                reason,
+                rejection.message(),
+                json!({ "route": request.uri().path() }),
+            ),
+        )
+            .into_response();
+    }
+
+    next.run(request).await
+}
+
+/// Pull one parameter out of a raw query string, percent-decoded.
+///
+/// Decoding goes through `reqwest::Url` — already a dependency, and the same
+/// parser the rest of this file uses — rather than a hand-rolled split, so a
+/// secret that survives a round trip through any conforming client is read back
+/// byte-identical. Axum's `Query` extractor was the other option and was
+/// rejected: it fails the WHOLE request on any unrelated malformed parameter,
+/// which would surface an unrelated typo as an authentication failure and send
+/// the caller hunting for the wrong problem.
+fn query_parameter(query: &str, name: &str) -> Option<String> {
+    let base = reqwest::Url::parse("http://bridge.invalid/").ok()?;
+    let url = base.join(&format!("?{query}")).ok()?;
+    url.query_pairs()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.into_owned())
 }
 
 async fn mcp_stdio_loop(state: AppState, launch: BridgeLaunchContext) -> Result<()> {
@@ -4919,8 +6831,7 @@ async fn mcp_tools_call(state: AppState, params: Value) -> Result<Value, Value> 
             .and_then(|output| output.get("ok"))
             .and_then(Value::as_bool)
             == Some(false);
-    let mut text =
-        serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
+    let mut text = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
     let (inline_limit, payload_dir) = {
         let config = payload_config.lock().await;
         (config.inline_limit_bytes, config.payload_dir.clone())
@@ -4934,10 +6845,7 @@ async fn mcp_tools_call(state: AppState, params: Value) -> Result<Value, Value> 
             }
             Err(error) => {
                 if let Some(object) = result.as_object_mut() {
-                    object.insert(
-                        "payload_spill_error".to_string(),
-                        json!(error.to_string()),
-                    );
+                    object.insert("payload_spill_error".to_string(), json!(error.to_string()));
                     text = serde_json::to_string_pretty(&result)
                         .unwrap_or_else(|_| result.to_string());
                 }
@@ -5240,23 +7148,36 @@ fn app_from_manifest_value_with_storage_root(
     )
 }
 
-async fn cors_preflight() -> impl IntoResponse {
-    (StatusCode::NO_CONTENT, cors_headers())
+async fn cors_preflight(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        StatusCode::NO_CONTENT,
+        cors_headers(&state.extension_auth.primary_origin()),
+    )
 }
 
-async fn add_cors_headers(request: Request<Body>, next: Next) -> Response {
+async fn add_cors_headers(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
     let mut response = next.run(request).await;
-    for (name, value) in cors_headers() {
+    for (name, value) in cors_headers(&state.extension_auth.primary_origin()) {
         response.headers_mut().insert(name, value);
     }
     response
 }
 
-fn cors_headers() -> [(header::HeaderName, HeaderValue); 5] {
+/// U12. This used to answer every request with `Access-Control-Allow-Origin: *`
+/// plus `access-control-allow-private-network: true` — the pair that lets an
+/// arbitrary public page read this loopback bridge's HTTP surface. Now the
+/// allowed origin is the extension itself, and the private-network opt-in is
+/// gone entirely: nothing on the public web should be inviting itself in.
+fn cors_headers(allow_origin: &str) -> [(header::HeaderName, HeaderValue); 4] {
     [
         (
             header::ACCESS_CONTROL_ALLOW_ORIGIN,
-            HeaderValue::from_static("*"),
+            HeaderValue::from_str(allow_origin)
+                .unwrap_or_else(|_| HeaderValue::from_static("null")),
         ),
         (
             header::ACCESS_CONTROL_ALLOW_METHODS,
@@ -5265,10 +7186,6 @@ fn cors_headers() -> [(header::HeaderName, HeaderValue); 5] {
         (
             header::ACCESS_CONTROL_ALLOW_HEADERS,
             HeaderValue::from_static("content-type"),
-        ),
-        (
-            header::HeaderName::from_static("access-control-allow-private-network"),
-            HeaderValue::from_static("true"),
         ),
         (header::VARY, HeaderValue::from_static("Origin")),
     ]
@@ -5361,6 +7278,644 @@ async fn tools_resolve(
     ))
 }
 
+fn file_transfer_id(value: Option<&str>) -> Result<String, (StatusCode, Json<Value>)> {
+    let id = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    if id.len() > 128
+        || !id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "transfer_id_invalid",
+                "transfer_id must contain only ASCII letters, digits, hyphen, or underscore and be at most 128 characters.",
+                json!({ "transfer_id": id }),
+            ),
+        ));
+    }
+    Ok(id)
+}
+
+fn file_transfer_filename(value: &str) -> Result<String, (StatusCode, Json<Value>)> {
+    let filename = value.trim();
+    if filename.is_empty()
+        || matches!(filename, "." | "..")
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename.contains('\0')
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "transfer_filename_invalid",
+                "filename must be one non-empty basename.",
+                json!({ "filename": value }),
+            ),
+        ));
+    }
+    Ok(filename.to_string())
+}
+
+fn file_transfer_origin(value: &str) -> Result<String, (StatusCode, Json<Value>)> {
+    let parsed = reqwest::Url::parse(value).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "transfer_origin_invalid",
+                "origin must be an absolute HTTP(S) origin.",
+                json!({ "origin": value }),
+            ),
+        )
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "transfer_origin_invalid",
+                "origin must contain only an HTTP(S) scheme and authority.",
+                json!({ "origin": value }),
+            ),
+        ));
+    }
+    Ok(parsed.origin().ascii_serialization())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn file_transfer_output_value(
+    response: ToolCallResponse,
+    primitive: &str,
+) -> Result<Value, (StatusCode, Json<Value>)> {
+    if !response.ok {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            structured_error(
+                "file_transfer_dispatch_failed",
+                "Browser runtime rejected a file transfer primitive.",
+                json!({ "primitive": primitive, "error": response.error, "call_id": response.call_id }),
+            ),
+        ));
+    }
+    let output = response.output.unwrap_or(Value::Null);
+    if output.get("ok").and_then(Value::as_bool) == Some(false) {
+        let error = output.get("error").cloned().unwrap_or(Value::Null);
+        let code = error
+            .get("code")
+            .and_then(Value::as_str)
+            .unwrap_or("file_transfer_failed");
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("Browser file transfer primitive failed.");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                code,
+                message,
+                json!({ "primitive": primitive, "error": error, "call_id": response.call_id }),
+            ),
+        ));
+    }
+    Ok(output.get("value").cloned().unwrap_or(output))
+}
+
+async fn dispatch_file_transfer_primitive(
+    state: &AppState,
+    request: &ToolCallRequest,
+    primitive: &str,
+    arguments: Value,
+) -> Result<Value, (StatusCode, Json<Value>)> {
+    let Json(response) = dispatch_resolved_tool_call(
+        state,
+        ResolvedToolCall {
+            name: primitive.to_string(),
+            arguments,
+            target_runtime_id: request.target_runtime_id.clone(),
+            target_url_contains: request.target_url_contains.clone(),
+            timeout_ms: request.timeout_ms,
+            static_output: None,
+        },
+    )
+    .await?;
+    file_transfer_output_value(response, primitive)
+}
+
+async fn cancel_file_transfer_best_effort(
+    state: &AppState,
+    request: &ToolCallRequest,
+    transfer_id: &str,
+) {
+    let _ = dispatch_file_transfer_primitive(
+        state,
+        request,
+        "file.transfer.cancel",
+        json!({ "transfer_id": transfer_id }),
+    )
+    .await;
+}
+
+async fn file_upload_call(
+    state: AppState,
+    request: ToolCallRequest,
+) -> Result<Json<ToolCallResponse>, (StatusCode, Json<Value>)> {
+    let local_path = request
+        .arguments
+        .get("local_path")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                structured_error(
+                    "transfer_path_missing",
+                    "file.upload requires local_path.",
+                    json!({}),
+                ),
+            )
+        })?;
+    let path = PathBuf::from(local_path);
+    let metadata = fs::metadata(&path).await.map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "transfer_path_unreadable",
+                "The selected local file could not be read.",
+                json!({ "path": path.display().to_string(), "message": error.to_string() }),
+            ),
+        )
+    })?;
+    if !metadata.is_file() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "transfer_path_not_file",
+                "local_path must identify one regular file.",
+                json!({ "path": path.display().to_string() }),
+            ),
+        ));
+    }
+    if metadata.len() as usize > FILE_TRANSFER_MAX_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            structured_error(
+                "transfer_oversize",
+                "Selected file exceeds the remote transfer size limit.",
+                json!({ "size": metadata.len(), "max_bytes": FILE_TRANSFER_MAX_BYTES }),
+            ),
+        ));
+    }
+    let bytes = fs::read(&path).await.map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "transfer_path_unreadable",
+                "The selected local file could not be read.",
+                json!({ "message": error.to_string() }),
+            ),
+        )
+    })?;
+    let default_filename = path.file_name().and_then(OsStr::to_str).unwrap_or("");
+    let filename = file_transfer_filename(
+        request
+            .arguments
+            .get("filename")
+            .and_then(Value::as_str)
+            .unwrap_or(default_filename),
+    )?;
+    let mime_type = request
+        .arguments
+        .get("mime_type")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let origin = file_transfer_origin(
+        request
+            .arguments
+            .get("origin")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    )?;
+    let file_input = request
+        .arguments
+        .get("file_input")
+        .cloned()
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                structured_error(
+                    "transfer_file_input_missing",
+                    "file.upload requires file_input.selector.",
+                    json!({}),
+                ),
+            )
+        })?;
+    let transfer_id =
+        file_transfer_id(request.arguments.get("transfer_id").and_then(Value::as_str))?;
+    let digest = sha256_hex(&bytes);
+    let result = async {
+        let created = dispatch_file_transfer_primitive(
+            &state,
+            &request,
+            "file.transfer.create",
+            json!({
+                "transfer_id": transfer_id,
+                "direction": "upload",
+                "filename": filename,
+                "mime_type": mime_type,
+                "expected_size": bytes.len(),
+                "expected_sha256": digest,
+                "origin": origin,
+            }),
+        )
+        .await?;
+        if created.get("state").and_then(Value::as_str) == Some("complete") {
+            return Ok(created);
+        }
+        let next_index = created
+            .get("next_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        for (index, chunk) in bytes
+            .chunks(FILE_TRANSFER_CHUNK_BYTES)
+            .enumerate()
+            .skip(next_index)
+        {
+            let acknowledged = dispatch_file_transfer_primitive(
+                &state,
+                &request,
+                "file.transfer.chunk",
+                json!({
+                    "transfer_id": transfer_id,
+                    "index": index,
+                    "base64": BASE64_STANDARD.encode(chunk),
+                }),
+            )
+            .await?;
+            if acknowledged.get("next_index").and_then(Value::as_u64) != Some((index + 1) as u64) {
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    structured_error(
+                        "transfer_ack_invalid",
+                        "Browser acknowledgement did not advance to the next chunk.",
+                        json!({ "transfer_id": transfer_id, "index": index, "ack": acknowledged }),
+                    ),
+                ));
+            }
+        }
+        let finalized = dispatch_file_transfer_primitive(
+            &state,
+            &request,
+            "file.transfer.finalize",
+            json!({ "transfer_id": transfer_id }),
+        )
+        .await?;
+        if finalized.get("sha256").and_then(Value::as_str) != Some(digest.as_str()) {
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                structured_error(
+                    "transfer_hash_mismatch",
+                    "Browser did not verify the selected file hash.",
+                    json!({ "transfer_id": transfer_id }),
+                ),
+            ));
+        }
+        dispatch_file_transfer_primitive(
+            &state,
+            &request,
+            "file.transfer.upload.consume",
+            json!({ "transfer_id": transfer_id, "origin": origin, "file_input": file_input }),
+        )
+        .await
+    }
+    .await;
+    match result {
+        Ok(value) => Ok(Json(ToolCallResponse {
+            announcements: None,
+            ok: true,
+            call_id: Uuid::new_v4().to_string(),
+            output: Some(json!({
+                "transfer_id": transfer_id,
+                "direction": "upload",
+                "filename": filename,
+                "mime_type": mime_type,
+                "size": bytes.len(),
+                "sha256": digest,
+                "origin": origin,
+                "state": value.get("state").cloned().unwrap_or(json!("complete")),
+                "attached": value.get("attached").cloned().unwrap_or(json!(true)),
+                "audit": "metadata_only"
+            })),
+            error: None,
+        })),
+        Err(error) => {
+            cancel_file_transfer_best_effort(&state, &request, &transfer_id).await;
+            Err(error)
+        }
+    }
+}
+
+async fn file_download_call(
+    state: AppState,
+    request: ToolCallRequest,
+) -> Result<Json<ToolCallResponse>, (StatusCode, Json<Value>)> {
+    let url = request
+        .arguments
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let parsed_url = reqwest::Url::parse(url).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "transfer_download_url_invalid",
+                "file.download requires an absolute URL.",
+                json!({ "url": url }),
+            ),
+        )
+    })?;
+    let origin = file_transfer_origin(
+        request
+            .arguments
+            .get("origin")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    )?;
+    if parsed_url.origin().ascii_serialization() != origin {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "transfer_origin_mismatch",
+                "Download URL must match the authorized origin.",
+                json!({ "url": url, "origin": origin }),
+            ),
+        ));
+    }
+    let transfer_id =
+        file_transfer_id(request.arguments.get("transfer_id").and_then(Value::as_str))?;
+    let requested_filename = request
+        .arguments
+        .get("filename")
+        .and_then(Value::as_str)
+        .map(file_transfer_filename)
+        .transpose()?;
+    let captured = dispatch_file_transfer_primitive(
+        &state,
+        &request,
+        "file.transfer.download.capture",
+        json!({
+            "transfer_id": transfer_id,
+            "url": parsed_url.as_str(),
+            "origin": origin,
+            "filename": requested_filename,
+            "mime_type": request.arguments.get("mime_type").cloned(),
+        }),
+    )
+    .await?;
+    let filename = file_transfer_filename(
+        captured
+            .get("filename")
+            .and_then(Value::as_str)
+            .unwrap_or("download.bin"),
+    )?;
+    let size = captured
+        .get("size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_GATEWAY,
+                structured_error(
+                    "transfer_metadata_invalid",
+                    "Browser download omitted byte size.",
+                    json!({ "transfer_id": transfer_id }),
+                ),
+            )
+        })? as usize;
+    if size > FILE_TRANSFER_MAX_BYTES {
+        cancel_file_transfer_best_effort(&state, &request, &transfer_id).await;
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            structured_error(
+                "transfer_oversize",
+                "Browser download exceeds the transfer size limit.",
+                json!({ "size": size }),
+            ),
+        ));
+    }
+    let expected_hash = captured
+        .get("sha256")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let chunk_count = captured
+        .get("chunk_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let payload_dir = state.payload.lock().await.payload_dir.clone();
+    let transfer_dir = payload_dir.join("file-transfers");
+    let output_path = transfer_dir.join(format!("{}-{}", transfer_id, filename));
+    if captured.get("state").and_then(Value::as_str) == Some("complete") {
+        let existing = fs::read(&output_path).await.map_err(|error| {
+            (
+                StatusCode::CONFLICT,
+                structured_error(
+                    "transfer_interrupted",
+                    "Browser reports a completed transfer but the private local artifact is unavailable.",
+                    json!({ "transfer_id": transfer_id, "message": error.to_string() }),
+                ),
+            )
+        })?;
+        let actual_hash = sha256_hex(&existing);
+        if existing.len() != size || actual_hash != expected_hash {
+            return Err((
+                StatusCode::CONFLICT,
+                structured_error(
+                    "transfer_local_replay_conflict",
+                    "Completed transfer metadata does not match the private local artifact.",
+                    json!({ "transfer_id": transfer_id, "expected_size": size, "actual_size": existing.len(), "expected_sha256": expected_hash, "actual_sha256": actual_hash }),
+                ),
+            ));
+        }
+        return Ok(Json(ToolCallResponse {
+            announcements: None,
+            ok: true,
+            call_id: Uuid::new_v4().to_string(),
+            output: Some(json!({
+                "transfer_id": transfer_id,
+                "direction": "download",
+                "filename": filename,
+                "mime_type": captured.get("mime_type").cloned().unwrap_or(json!("application/octet-stream")),
+                "size": size,
+                "sha256": actual_hash,
+                "origin": origin,
+                "state": "complete",
+                "local_path": output_path.display().to_string(),
+                "replayed": true,
+                "audit": "metadata_only"
+            })),
+            error: None,
+        }));
+    }
+    let mut bytes = Vec::with_capacity(size);
+    for index in 0..chunk_count {
+        let chunk = match dispatch_file_transfer_primitive(
+            &state,
+            &request,
+            "file.transfer.download.read_chunk",
+            json!({ "transfer_id": transfer_id, "index": index }),
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                cancel_file_transfer_best_effort(&state, &request, &transfer_id).await;
+                return Err(error);
+            }
+        };
+        let encoded = match chunk.get("base64").and_then(Value::as_str) {
+            Some(value) => value,
+            None => {
+                cancel_file_transfer_best_effort(&state, &request, &transfer_id).await;
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    structured_error(
+                        "transfer_chunk_invalid",
+                        "Browser download chunk omitted base64 bytes.",
+                        json!({ "index": index }),
+                    ),
+                ));
+            }
+        };
+        let decoded = match BASE64_STANDARD.decode(encoded) {
+            Ok(value) => value,
+            Err(error) => {
+                cancel_file_transfer_best_effort(&state, &request, &transfer_id).await;
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    structured_error(
+                        "transfer_chunk_invalid",
+                        "Browser download chunk was not valid base64.",
+                        json!({ "index": index, "message": error.to_string() }),
+                    ),
+                ));
+            }
+        };
+        if decoded.len() > FILE_TRANSFER_CHUNK_BYTES
+            || bytes.len() + decoded.len() > FILE_TRANSFER_MAX_BYTES
+        {
+            cancel_file_transfer_best_effort(&state, &request, &transfer_id).await;
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                structured_error(
+                    "transfer_chunk_oversize",
+                    "Browser returned an oversized download chunk.",
+                    json!({ "index": index }),
+                ),
+            ));
+        }
+        bytes.extend_from_slice(&decoded);
+    }
+    let actual_hash = sha256_hex(&bytes);
+    if bytes.len() != size || actual_hash != expected_hash {
+        cancel_file_transfer_best_effort(&state, &request, &transfer_id).await;
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            structured_error(
+                "transfer_integrity_mismatch",
+                "Downloaded bytes did not match browser metadata.",
+                json!({ "expected_size": size, "actual_size": bytes.len(), "expected_sha256": expected_hash, "actual_sha256": actual_hash }),
+            ),
+        ));
+    }
+    if let Err(error) = fs::create_dir_all(&transfer_dir).await {
+        cancel_file_transfer_best_effort(&state, &request, &transfer_id).await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            structured_error(
+                "transfer_output_unavailable",
+                "Private transfer directory could not be created.",
+                json!({ "message": error.to_string() }),
+            ),
+        ));
+    }
+    let part_path = transfer_dir.join(format!(".{}.part", transfer_id));
+    if let Err(error) = fs::write(&part_path, &bytes).await {
+        cancel_file_transfer_best_effort(&state, &request, &transfer_id).await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            structured_error(
+                "transfer_output_unavailable",
+                "Downloaded bytes could not be written.",
+                json!({ "message": error.to_string() }),
+            ),
+        ));
+    }
+    if let Err(error) = fs::rename(&part_path, &output_path).await {
+        cancel_file_transfer_best_effort(&state, &request, &transfer_id).await;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            structured_error(
+                "transfer_output_unavailable",
+                "Downloaded artifact could not be finalized.",
+                json!({ "message": error.to_string() }),
+            ),
+        ));
+    }
+    dispatch_file_transfer_primitive(
+        &state,
+        &request,
+        "file.transfer.download.complete",
+        json!({ "transfer_id": transfer_id }),
+    )
+    .await?;
+    Ok(Json(ToolCallResponse {
+        announcements: None,
+        ok: true,
+        call_id: Uuid::new_v4().to_string(),
+        output: Some(json!({
+            "transfer_id": transfer_id,
+            "direction": "download",
+            "filename": filename,
+            "mime_type": captured.get("mime_type").cloned().unwrap_or(json!("application/octet-stream")),
+            "size": size,
+            "sha256": actual_hash,
+            "origin": origin,
+            "state": "complete",
+            "local_path": output_path.display().to_string(),
+            "audit": "metadata_only"
+        })),
+        error: None,
+    }))
+}
+
+async fn file_transfer_passthrough_call(
+    state: AppState,
+    request: ToolCallRequest,
+) -> Result<Json<ToolCallResponse>, (StatusCode, Json<Value>)> {
+    let primitive = request.name.clone();
+    let value =
+        dispatch_file_transfer_primitive(&state, &request, &primitive, request.arguments.clone())
+            .await?;
+    Ok(Json(ToolCallResponse {
+        announcements: None,
+        ok: true,
+        call_id: Uuid::new_v4().to_string(),
+        output: Some(value),
+        error: None,
+    }))
+}
+
 /// Outer tools/call handler: executes the call, then piggybacks pending
 /// inject-mode a11y announcements onto the result envelope (KTD5: act → hear).
 /// Both the HTTP route and mcp_tools_call flow through here.
@@ -5377,9 +7932,7 @@ async fn tools_call(
         if !is_a11y_read {
             let drained = a11y.lock().await.drain_inject();
             if !drained.is_empty() {
-                response.announcements = Some(
-                    drained.into_iter().map(|r| json!(r)).collect(),
-                );
+                response.announcements = Some(drained.into_iter().map(|r| json!(r)).collect());
             }
         }
     }
@@ -5394,11 +7947,24 @@ async fn tools_call_inner(
         return site_actions_call(state, request).await;
     }
     if request.name == "storage.read_file" {
-        request.arguments = validate_and_strip_policy_exception_report(&request.name, &request.arguments)?;
+        request.arguments =
+            validate_and_strip_policy_exception_report(&request.name, &request.arguments)?;
         return storage_read_file_call(state, request).await;
     }
     if request.name == "bridge.payloads.configure" {
         return bridge_payloads_configure_call(state, request).await;
+    }
+    if request.name == "file.upload" {
+        return file_upload_call(state, request).await;
+    }
+    if request.name == "file.download" {
+        return file_download_call(state, request).await;
+    }
+    if matches!(
+        request.name.as_str(),
+        "file.transfer.status" | "file.transfer.cancel"
+    ) {
+        return file_transfer_passthrough_call(state, request).await;
     }
     if request.name == "browser.claimed_tabs.list" {
         return browser_claimed_tabs_list_call(state, request).await;
@@ -5427,7 +7993,9 @@ async fn tools_call_inner(
             error: None,
         }));
     }
-    if request.name == "a11y.announcements_subscribe" || request.name == "a11y.announcements_configure" {
+    if request.name == "a11y.announcements_subscribe"
+        || request.name == "a11y.announcements_configure"
+    {
         let args = &request.arguments;
         let subscriber = args
             .get("subscriber")
@@ -5572,7 +8140,9 @@ async fn dispatch_resolved_tool_call(
         ));
     }
 
-    let result = match tokio::time::timeout(Duration::from_millis(resolved.timeout_ms), response_rx).await {
+    let result = match tokio::time::timeout(Duration::from_millis(resolved.timeout_ms), response_rx)
+        .await
+    {
         Ok(result) => result.map_err(|_| {
             (
                 StatusCode::BAD_GATEWAY,
@@ -5698,17 +8268,15 @@ fn resolve_tool_call(
 
     Ok(ResolvedToolCall {
         name: handler.to_string(),
-        arguments: merge_object_values(binding_arguments, request_arguments).map_err(
-            |error| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": error,
-                        "tool": request.name
-                    })),
-                )
-            },
-        )?,
+        arguments: merge_object_values(binding_arguments, request_arguments).map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": error,
+                    "tool": request.name
+                })),
+            )
+        })?,
         target_runtime_id: request.target_runtime_id.clone(),
         target_url_contains,
         timeout_ms: request.timeout_ms,
@@ -5747,10 +8315,150 @@ async fn resolve_tool_call_with_storage(
     Ok(resolved)
 }
 
+fn site_catalog_hash(actions: &[Value]) -> String {
+    let bytes = serde_json::to_vec(actions).unwrap_or_default();
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn encode_site_catalog_cursor(cursor: &Value) -> String {
+    BASE64_STANDARD.encode(serde_json::to_vec(cursor).unwrap_or_default())
+}
+
+fn decode_site_catalog_cursor(encoded: &str) -> Option<Value> {
+    let bytes = BASE64_STANDARD.decode(encoded).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn bounded_site_action_listing(
+    mut actions: Vec<Value>,
+    query: &str,
+    requested_page_size: u64,
+    continuation: Option<&str>,
+    max_bytes: u64,
+) -> Result<Value, (StatusCode, Json<Value>)> {
+    actions.sort_by(|left, right| {
+        let left_name = left.get("name").and_then(Value::as_str).unwrap_or_default();
+        let right_name = right.get("name").and_then(Value::as_str).unwrap_or_default();
+        left_name.cmp(right_name)
+    });
+    let catalog_hash = site_catalog_hash(&actions);
+    let normalized_query = query.trim().to_lowercase();
+    let filtered: Vec<Value> = actions
+        .into_iter()
+        .filter(|action| {
+            if normalized_query.is_empty() {
+                return true;
+            }
+            let name = action.get("name").and_then(Value::as_str).unwrap_or_default();
+            let description = action
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            format!("{name}\n{description}")
+                .to_lowercase()
+                .contains(&normalized_query)
+        })
+        .collect();
+    let page_size = requested_page_size.clamp(1, 5) as usize;
+    let offset = match continuation {
+        Some(encoded) => {
+            let cursor = decode_site_catalog_cursor(encoded).ok_or_else(|| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    structured_error(
+                        "catalog_continuation_invalid",
+                        "The catalog continuation is malformed.",
+                        json!({}),
+                    ),
+                )
+            })?;
+            let valid = cursor.get("catalog_hash").and_then(Value::as_str)
+                == Some(catalog_hash.as_str())
+                && cursor.get("query").and_then(Value::as_str) == Some(normalized_query.as_str())
+                && cursor.get("page_size").and_then(Value::as_u64) == Some(page_size as u64);
+            if !valid {
+                return Err((
+                    StatusCode::CONFLICT,
+                    structured_error(
+                        "catalog_continuation_invalid",
+                        "The catalog changed or this continuation belongs to different list options.",
+                        json!({ "catalog_hash": catalog_hash }),
+                    ),
+                ));
+            }
+            cursor.get("offset").and_then(Value::as_u64).unwrap_or(u64::MAX) as usize
+        }
+        None => 0,
+    };
+    if offset > filtered.len() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "catalog_continuation_invalid",
+                "The catalog continuation offset is outside the current result set.",
+                json!({}),
+            ),
+        ));
+    }
+    let mut selected = Vec::new();
+    for action in filtered.iter().skip(offset).take(page_size) {
+        let mut candidate = selected.clone();
+        candidate.push(action.clone());
+        if serde_json::to_vec(&candidate)
+            .map(|bytes| bytes.len() as u64 > max_bytes)
+            .unwrap_or(true)
+        {
+            break;
+        }
+        selected = candidate;
+    }
+    if selected.is_empty() && offset < filtered.len() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "catalog_response_budget_too_small",
+                "No catalog entry fits within max_bytes.",
+                json!({ "minimum_action": filtered[offset].get("name") }),
+            ),
+        ));
+    }
+    let next_offset = offset + selected.len();
+    let has_more = next_offset < filtered.len();
+    Ok(json!({
+        "actions": selected,
+        "page": {
+            "page_size": page_size,
+            "returned": next_offset - offset,
+            "has_more": has_more,
+            "continuation": if has_more {
+                Some(encode_site_catalog_cursor(&json!({
+                    "catalog_hash": catalog_hash,
+                    "query": normalized_query,
+                    "page_size": page_size,
+                    "offset": next_offset
+                })))
+            } else {
+                None
+            }
+        },
+        "provenance": {
+            "catalog_hash": catalog_hash,
+            "order": "name"
+        }
+    }))
+}
+
 async fn site_actions_call(
     state: AppState,
     request: ToolCallRequest,
 ) -> Result<Json<ToolCallResponse>, (StatusCode, Json<Value>)> {
+    // Site maps are edited and synced while the bridge remains running. Keep
+    // the advertised action catalog and the workflow/state maps read from disk
+    // on the same revision so actions.site never lists an action it cannot
+    // dispatch (or hides a newly added action until restart).
+    if state.storage_root.is_some() {
+        reload_catalog(&state).await?;
+    }
     let mode = request
         .arguments
         .get("mode")
@@ -5764,7 +8472,8 @@ async fn site_actions_call(
                     json!({ "tool": "actions.site" }),
                 ),
             )
-        })?;
+        })?
+        .to_string();
     let target_url_contains = site_action_target_url_contains(&state, &request).await?;
 
     if mode == "list" {
@@ -5780,6 +8489,34 @@ async fn site_actions_call(
             &site_action_names,
             target_url_contains.as_deref(),
         );
+        let query = request
+            .arguments
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let page_size = request
+            .arguments
+            .get("page_size")
+            .and_then(Value::as_u64)
+            .unwrap_or(5);
+        let continuation = request
+            .arguments
+            .get("continuation")
+            .or_else(|| request.arguments.get("cursor"))
+            .and_then(Value::as_str);
+        let max_bytes = request
+            .arguments
+            .get("max_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(4_096)
+            .clamp(256, 48_000);
+        let action_page = bounded_site_action_listing(
+            actions,
+            query,
+            page_size,
+            continuation,
+            max_bytes,
+        )?;
         let (files, skills) = match state.storage_root.as_deref() {
             Some(storage_root) => {
                 site_storage_files_for_target(storage_root, target_url_contains.as_deref()).await?
@@ -5803,7 +8540,9 @@ async fn site_actions_call(
             output: Some(json!({
                 "ok": true,
                 "target_url_contains": target_url_contains,
-                "actions": actions,
+                "actions": action_page["actions"],
+                "page": action_page["page"],
+                "provenance": action_page["provenance"],
                 "state_projections": state_projections,
                 "files": files,
                 "skills": skills
@@ -5812,10 +8551,12 @@ async fn site_actions_call(
         }));
     }
 
-    if matches!(mode, "state_read" | "state_summary" | "state_diff") {
-        let mode = mode.to_string();
-        return site_actions_state_projection_call(state, request, mode, target_url_contains)
-            .await;
+    if matches!(mode.as_str(), "state_read" | "state_summary" | "state_diff") {
+        return site_actions_state_projection_call(state, request, mode, target_url_contains).await;
+    }
+
+    if matches!(mode.as_str(), "navigate" | "search") {
+        return site_actions_graph_call(state, request, mode, target_url_contains).await;
     }
 
     if mode != "call" {
@@ -5823,7 +8564,7 @@ async fn site_actions_call(
             StatusCode::BAD_REQUEST,
             structured_error(
                 "invalid_input",
-                "actions.site mode must be list, call, state_read, state_summary, or state_diff.",
+                "actions.site mode must be list, call, state_read, state_summary, state_diff, navigate, or search.",
                 json!({ "mode": mode }),
             ),
         ));
@@ -5880,6 +8621,27 @@ async fn site_actions_call(
                 ),
             ));
         }
+        let applicable = site_actions_for_target(
+            &catalog.site_manifest,
+            &catalog.site_action_names,
+            target_url_contains.as_deref(),
+        )
+        .iter()
+        .any(|tool| tool.get("name").and_then(Value::as_str) == Some(action.as_str()));
+        if !applicable {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                structured_error(
+                    "site_action_not_applicable",
+                    "Requested site action is declared, but not for the selected page URL.",
+                    json!({
+                        "tool": action,
+                        "target_url_contains": target_url_contains,
+                        "next_step": "Call actions.site with mode=list on the selected runtime and choose an action from that page's catalog."
+                    }),
+                ),
+            ));
+        }
     }
     let inner = ToolCallRequest {
         name: action,
@@ -5918,7 +8680,10 @@ async fn site_actions_call(
             )
             .await?;
             if maps.len() > 1 {
-                let map_paths = maps.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>();
+                let map_paths = maps
+                    .iter()
+                    .map(|(path, _)| path.clone())
+                    .collect::<Vec<_>>();
                 return Err((
                     StatusCode::CONFLICT,
                     structured_error(
@@ -5939,7 +8704,167 @@ async fn site_actions_call(
             }
         }
     }
+    if matches!(
+        resolved.name.as_str(),
+        "file.upload" | "file.download" | "file.transfer.status" | "file.transfer.cancel"
+    ) {
+        let bridge_request = ToolCallRequest {
+            name: resolved.name.clone(),
+            arguments: resolved.arguments.clone(),
+            target_runtime_id: resolved.target_runtime_id.clone(),
+            target_url_contains: resolved.target_url_contains.clone(),
+            timeout_ms: resolved.timeout_ms,
+        };
+        return match resolved.name.as_str() {
+            "file.upload" => file_upload_call(state, bridge_request).await,
+            "file.download" => file_download_call(state, bridge_request).await,
+            _ => file_transfer_passthrough_call(state, bridge_request).await,
+        };
+    }
     dispatch_resolved_tool_call(&state, resolved).await
+}
+
+async fn site_actions_graph_call(
+    state: AppState,
+    request: ToolCallRequest,
+    mode: String,
+    target_url_contains: Option<String>,
+) -> Result<Json<ToolCallResponse>, (StatusCode, Json<Value>)> {
+    let snapshot_id = request
+        .arguments
+        .get("snapshot_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                structured_error(
+                    "snapshot_required",
+                    "actions.site navigate/search requires the snapshot_id returned by state_read.",
+                    json!({ "mode": mode, "next_step": "Call actions.site with mode=state_read for the desired projection." }),
+                ),
+            )
+        })?;
+    let query = request
+        .arguments
+        .get("query")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if mode == "search" && query.as_deref().is_none_or(|value| value.trim().is_empty()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "invalid_input",
+                "actions.site search requires a non-empty query.",
+                json!({ "mode": mode }),
+            ),
+        ));
+    }
+    let scope = request.arguments.get("scope").cloned();
+    if scope.as_ref().is_some_and(|value| !value.is_object()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "invalid_input",
+                "actions.site scope must be an object.",
+                json!({ "mode": mode }),
+            ),
+        ));
+    }
+    let search_mode = request
+        .arguments
+        .get("search_mode")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if search_mode
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "semantic" | "lexical"))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "invalid_input",
+                "actions.site search_mode must be semantic or lexical.",
+                json!({ "search_mode": search_mode }),
+            ),
+        ));
+    }
+    let node_ref = request
+        .arguments
+        .get("node_ref")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let operation = if mode == "navigate" {
+        let operation = request
+            .arguments
+            .get("operation")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| if node_ref.is_some() { "node" } else { "roots" }.to_string());
+        if !matches!(operation.as_str(), "roots" | "node" | "neighbors" | "traverse") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                structured_error(
+                    "invalid_input",
+                    "actions.site navigate operation must be roots, node, neighbors, or traverse.",
+                    json!({ "operation": operation }),
+                ),
+            ));
+        }
+        if matches!(operation.as_str(), "node" | "neighbors" | "traverse") && node_ref.is_none() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                structured_error(
+                    "invalid_input",
+                    "This navigate operation requires node_ref.",
+                    json!({ "operation": operation }),
+                ),
+            ));
+        }
+        Some(operation)
+    } else {
+        None
+    };
+    let routing = ResolvedToolCall {
+        name: format!("actions.site.{mode}"),
+        arguments: json!({}),
+        target_runtime_id: request.target_runtime_id.clone(),
+        target_url_contains,
+        timeout_ms: request.timeout_ms,
+        static_output: None,
+    };
+    let dispatch = StateProjectionDispatch {
+        mode,
+        projection_name: None,
+        summary_name: None,
+        summary_arguments: json!({}),
+        max_bytes: request.arguments.get("max_bytes").and_then(Value::as_u64),
+        map_path: None,
+        projection: None,
+        snapshot_id: Some(snapshot_id),
+        node_ref,
+        operation,
+        direction: request
+            .arguments
+            .get("direction")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        edge_types: request.arguments.get("edge_types").cloned(),
+        max_depth: request.arguments.get("max_depth").and_then(Value::as_u64),
+        measure_filter: request.arguments.get("measure_filter").cloned(),
+        measure_order: request.arguments.get("measure_order").cloned(),
+        query,
+        scope,
+        cursor: request
+            .arguments
+            .get("cursor")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        page_size: request.arguments.get("page_size").and_then(Value::as_u64),
+        search_mode,
+    };
+    dispatch_state_projection_call(&state, routing, dispatch).await
 }
 
 async fn site_actions_state_projection_call(
@@ -5978,6 +8903,21 @@ async fn site_actions_state_projection_call(
         .get("summary_name")
         .and_then(Value::as_str)
         .map(str::to_string);
+    let summary_arguments = request
+        .arguments
+        .get("summary_arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if !summary_arguments.is_object() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "invalid_input",
+                "actions.site summary_arguments must be an object.",
+                json!({ "mode": mode }),
+            ),
+        ));
+    }
     let max_bytes = request.arguments.get("max_bytes").and_then(Value::as_u64);
 
     let projections =
@@ -6031,11 +8971,25 @@ async fn site_actions_state_projection_call(
     };
     let dispatch = StateProjectionDispatch {
         mode,
-        projection_name,
+        projection_name: Some(projection_name),
         summary_name,
+        summary_arguments,
         max_bytes,
-        map_path,
-        projection,
+        map_path: Some(map_path),
+        projection: Some(projection),
+        snapshot_id: None,
+        node_ref: None,
+        operation: None,
+        direction: None,
+        edge_types: None,
+        max_depth: None,
+        measure_filter: None,
+        measure_order: None,
+        query: None,
+        scope: None,
+        cursor: None,
+        page_size: None,
+        search_mode: None,
     };
     dispatch_state_projection_call(&state, routing, dispatch).await
 }
@@ -6059,7 +9013,8 @@ async fn dispatch_state_projection_call(
         },
     );
 
-    let item = state_projection_call_message(call_id.clone(), runtime.runtime_id.clone(), &dispatch);
+    let item =
+        state_projection_call_message(call_id.clone(), runtime.runtime_id.clone(), &dispatch);
 
     if runtime.tx.send(Message::Text(item.to_string())).is_err() {
         state.pending.lock().await.remove(&call_id);
@@ -6218,9 +9173,6 @@ async fn site_storage_files_for_target(
     let mut files = Vec::new();
     let mut skills = Vec::new();
     for map_path in maps {
-        if !storage_map_matches_target(&map_path, target_url_contains) {
-            continue;
-        }
         let text = fs::read_to_string(&map_path).await.map_err(|error| {
             (
                 StatusCode::BAD_REQUEST,
@@ -6242,6 +9194,9 @@ async fn site_storage_files_for_target(
             )
         })?;
         if map.get("protocol").and_then(Value::as_str) != Some("actions.json") {
+            continue;
+        }
+        if !storage_map_matches_target(&map_path, &map, target_url_contains) {
             continue;
         }
         let declarations = map
@@ -6310,9 +9265,6 @@ async fn site_storage_workflow_maps_for_action(
         })?;
     let mut matches = Vec::new();
     for map_path in maps {
-        if !storage_map_matches_target(&map_path, target_url_contains) {
-            continue;
-        }
         let Ok(text) = fs::read_to_string(&map_path).await else {
             continue;
         };
@@ -6320,6 +9272,9 @@ async fn site_storage_workflow_maps_for_action(
             continue;
         };
         if map.get("protocol").and_then(Value::as_str) != Some("actions.json") {
+            continue;
+        }
+        if !storage_map_matches_target(&map_path, &map, target_url_contains) {
             continue;
         }
         let declares_workflow_action = map
@@ -6350,9 +9305,8 @@ async fn site_storage_workflow_maps_for_action(
             .map(|(relative_path, _)| storage_scope_precedence_rank(relative_path))
             .min()
             .unwrap_or(u8::MAX);
-        matches.retain(|(relative_path, _)| {
-            storage_scope_precedence_rank(relative_path) == best_rank
-        });
+        matches
+            .retain(|(relative_path, _)| storage_scope_precedence_rank(relative_path) == best_rank);
     }
     Ok(matches)
 }
@@ -6389,38 +9343,35 @@ async fn dispatch_site_action_call(
         ));
     }
 
-    let result = tokio::time::timeout(Duration::from_millis(routing.timeout_ms), response_rx)
+    let result = match tokio::time::timeout(Duration::from_millis(routing.timeout_ms), response_rx)
         .await
-        .map_err(|_| {
-            let call_id_for_cleanup = call_id.clone();
-            let state_for_cleanup = state.clone();
-            tokio::spawn(async move {
-                let removed = state_for_cleanup
-                    .pending
-                    .lock()
-                    .await
-                    .remove(&call_id_for_cleanup)
-                    .is_some();
-                eprintln!(
-                    "actions-json-mcp pending timeout name=site_action_call call_id={} removed_pending={}",
-                    call_id_for_cleanup, removed
-                );
-            });
-            (
-                StatusCode::GATEWAY_TIMEOUT,
-                route_error(
-                    "dispatch_timeout",
-                    "The site action was dispatched to the tab but no response arrived in time.",
-                    json!({ "call_id": call_id, "pending_cleanup": "scheduled" }),
-                ),
-            )
-        })?
-        .map_err(|_| {
+    {
+        Ok(result) => result.map_err(|_| {
             (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({ "error": "extension runtime dropped response", "call_id": call_id })),
             )
-        })?;
+        })?,
+        Err(_) => {
+            let removed = state.pending.lock().await.remove(&call_id).is_some();
+            let timeout_context = take_action_timeout_context(state, &call_id, removed).await;
+            eprintln!(
+                "actions-json-mcp pending timeout name=site_action_call call_id={} removed_pending={} context={}",
+                call_id,
+                removed,
+                timeout_context
+            );
+            return Err((
+                StatusCode::GATEWAY_TIMEOUT,
+                route_error(
+                    "dispatch_timeout",
+                    "The site action was dispatched to the tab but no response arrived in time.",
+                    timeout_context,
+                ),
+            ));
+        }
+    };
+    state.action_progress.lock().await.remove(&call_id);
 
     let is_error = result.get("type").and_then(Value::as_str) == Some("action_error");
     Ok(Json(ToolCallResponse {
@@ -6450,9 +9401,6 @@ async fn site_storage_state_projections_for_target(
         })?;
     let mut projections = Vec::new();
     for map_path in maps {
-        if !storage_map_matches_target(&map_path, target_url_contains) {
-            continue;
-        }
         let Ok(text) = fs::read_to_string(&map_path).await else {
             continue;
         };
@@ -6460,6 +9408,9 @@ async fn site_storage_state_projections_for_target(
             continue;
         };
         if map.get("protocol").and_then(Value::as_str) != Some("actions.json") {
+            continue;
+        }
+        if !storage_map_matches_target(&map_path, &map, target_url_contains) {
             continue;
         }
         let relative_path = map_path
@@ -6499,7 +9450,8 @@ fn state_projection_listing(projections: &[(String, Value)]) -> Vec<Value> {
                             json!({
                                 "name": summary.get("name").cloned().unwrap_or(Value::Null),
                                 "description": summary.get("description").cloned().unwrap_or(Value::Null),
-                                "max_bytes": summary.get("max_bytes").cloned().unwrap_or(Value::Null)
+                                "max_bytes": summary.get("max_bytes").cloned().unwrap_or(Value::Null),
+                                "input_schema": summary.get("input_schema").cloned().unwrap_or(Value::Null)
                             })
                         })
                         .collect::<Vec<_>>()
@@ -6583,14 +9535,61 @@ fn declared_storage_relative_path(
     )
 }
 
-fn storage_map_matches_target(map_path: &Path, target_url_contains: Option<&str>) -> bool {
+fn storage_map_matches_target(
+    map_path: &Path,
+    map: &Value,
+    target_url_contains: Option<&str>,
+) -> bool {
     let Some(target) = target_url_contains else {
         return true;
     };
     let Some(host) = storage_map_site_host(map_path) else {
+        return map_matches_target_url(map, target_url_contains);
+    };
+    (target.contains(host.as_str()) || host.contains(target))
+        && map_matches_target_url(map, target_url_contains)
+}
+
+fn map_scope_url_matches(map: &Value) -> Option<&str> {
+    map.get("scope")
+        .and_then(|scope| scope.get("url_matches"))
+        .and_then(Value::as_str)
+}
+
+fn map_matches_target_url(map: &Value, target_url_contains: Option<&str>) -> bool {
+    let Some(target) = target_url_contains else {
         return true;
     };
-    target.contains(host.as_str()) || host.contains(target)
+    map_scope_url_matches(map)
+        .map(|pattern| url_pattern_matches_target(pattern, target))
+        .unwrap_or(true)
+}
+
+fn url_pattern_matches_target(pattern: &str, target: &str) -> bool {
+    if target.starts_with("http://") || target.starts_with("https://") {
+        return wildcard_matches(pattern, target);
+    }
+
+    // target_url_contains also accepts URL fragments and human-readable tab
+    // titles. Enforce map scope for URL-like fragments; title-only intent is
+    // resolved against the live runtime before execution.
+    if target.contains('/') {
+        let normalized_pattern = strip_url_routing_prefix(pattern);
+        let normalized_target = strip_url_routing_prefix(target);
+        return wildcard_matches(normalized_pattern, normalized_target)
+            || normalized_pattern.contains(normalized_target);
+    }
+    true
+}
+
+fn strip_url_routing_prefix(value: &str) -> &str {
+    let without_scheme = value
+        .split_once("://")
+        .map(|(_, remainder)| remainder)
+        .unwrap_or(value);
+    without_scheme
+        .strip_prefix("www.")
+        .unwrap_or(without_scheme)
 }
 
 fn wildcard_matches(pattern: &str, value: &str) -> bool {
@@ -6623,9 +9622,6 @@ fn projection_matches_target_url(projection: &Value, target_url_contains: Option
     let Some(target) = target_url_contains else {
         return true;
     };
-    if !(target.starts_with("http://") || target.starts_with("https://")) {
-        return true;
-    }
     let Some(pattern) = projection
         .get("scope")
         .and_then(|scope| scope.get("url_matches"))
@@ -6633,7 +9629,7 @@ fn projection_matches_target_url(projection: &Value, target_url_contains: Option
     else {
         return true;
     };
-    wildcard_matches(pattern, target)
+    url_pattern_matches_target(pattern, target)
 }
 
 fn storage_map_site_host(map_path: &Path) -> Option<String> {
@@ -6666,6 +9662,28 @@ fn stamp_default_target_url_contains(tool: &mut Value, site_host: &str) {
     binding_object
         .entry("target_url_contains".to_string())
         .or_insert_with(|| json!(site_host));
+}
+
+fn stamp_map_url_matches(tool: &mut Value, map: &Value) {
+    let Some(pattern) = map_scope_url_matches(map) else {
+        return;
+    };
+    let Some(tool_object) = tool.as_object_mut() else {
+        return;
+    };
+    let x_actions = tool_object.entry("x_actions").or_insert_with(|| json!({}));
+    let Some(x_actions_object) = x_actions.as_object_mut() else {
+        return;
+    };
+    let binding = x_actions_object
+        .entry("binding")
+        .or_insert_with(|| json!({}));
+    let Some(binding_object) = binding.as_object_mut() else {
+        return;
+    };
+    binding_object
+        .entry("map_url_matches".to_string())
+        .or_insert_with(|| json!(pattern));
 }
 
 async fn read_declared_storage_file(
@@ -6788,18 +9806,31 @@ fn site_actions_for_target(
                 .unwrap_or(false)
         })
         .filter(|tool| {
-            let binding_target = tool
+            let binding = tool
                 .get("x_actions")
                 .and_then(|x_actions| x_actions.get("binding"))
-                .and_then(|binding| binding.get("target_url_contains"))
+                .unwrap_or(&Value::Null);
+            let binding_target = binding
+                .get("target_url_contains")
                 .and_then(Value::as_str);
-            match (target_url_contains, binding_target) {
+            let host_matches = match (target_url_contains, binding_target) {
                 (Some(target), Some(binding_target)) => {
                     target.contains(binding_target) || binding_target.contains(target)
                 }
                 (Some(_), None) => true,
                 (None, _) => true,
+            };
+            if !host_matches {
+                return false;
             }
+            ["map_url_matches", "url_matches"]
+                .iter()
+                .filter_map(|key| binding.get(*key).and_then(Value::as_str))
+                .all(|pattern| {
+                    target_url_contains
+                        .map(|target| url_pattern_matches_target(pattern, target))
+                        .unwrap_or(true)
+                })
         })
         .map(|tool| {
             json!({
@@ -6810,6 +9841,16 @@ fn site_actions_for_target(
                     .get("x_actions")
                     .and_then(|x_actions| x_actions.get("binding"))
                     .and_then(|binding| binding.get("target_url_contains"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "url_matches": tool
+                    .get("x_actions")
+                    .and_then(|x_actions| x_actions.get("binding"))
+                    .and_then(|binding| {
+                        binding
+                            .get("url_matches")
+                            .or_else(|| binding.get("map_url_matches"))
+                    })
                     .cloned()
                     .unwrap_or(Value::Null)
             })
@@ -7489,7 +10530,10 @@ fn validate_tool_arguments(
     if errors.is_empty() {
         return Ok(());
     }
-    let messages = errors.iter().map(|error| error.message.as_str()).collect::<Vec<_>>();
+    let messages = errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect::<Vec<_>>();
     let missing_required = errors
         .iter()
         .filter(|error| error.keyword == "required")
@@ -7635,7 +10679,11 @@ struct ValidationError {
     message: String,
 }
 
-fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> Vec<ValidationError> {
+fn validate_value_against_schema(
+    value: &Value,
+    schema: &Value,
+    path: &str,
+) -> Vec<ValidationError> {
     let Some(schema_object) = schema.as_object() else {
         return Vec::new();
     };
@@ -7643,7 +10691,11 @@ fn validate_value_against_schema(value: &Value, schema: &Value, path: &str) -> V
     if let Some(schema_type) = schema_object.get("type").and_then(Value::as_str) {
         if let Err(message) = validate_json_type(value, schema_type, path) {
             errors.push(ValidationError {
-                path: if path.is_empty() { "arguments".to_string() } else { path.to_string() },
+                path: if path.is_empty() {
+                    "arguments".to_string()
+                } else {
+                    path.to_string()
+                },
                 keyword: "type".to_string(),
                 message,
             });
@@ -7847,6 +10899,29 @@ fn content_type_for_path(path: &Path) -> &'static str {
     }
 }
 
+/// Maps a dead runtime id to the live runtime on the SAME TAB, if one exists.
+///
+/// `runtime_key` is "chrome-tab:<tabId>" and survives a navigation, so it is the
+/// only durable link between a runtime that was replaced and the one that
+/// replaced it. Returns None rather than guessing: a tab that is really gone
+/// gets a plain refusal.
+async fn successor_for_stale_runtime(
+    state: &AppState,
+    runtimes: &HashMap<String, RuntimeClient>,
+    stale_runtime_id: &str,
+) -> Option<String> {
+    let runtime_key = state
+        .stale_runtime_keys
+        .lock()
+        .await
+        .get(stale_runtime_id)
+        .cloned()?;
+    runtimes
+        .values()
+        .find(|client| client.runtime_key.as_deref() == Some(runtime_key.as_str()))
+        .map(|client| client.runtime_id.clone())
+}
+
 async fn select_runtime(
     state: &AppState,
     request: &ResolvedToolCall,
@@ -7864,17 +10939,27 @@ async fn select_runtime(
     }
 
     if let Some(runtime_id) = request.target_runtime_id.as_deref() {
-        return runtimes.get(runtime_id).cloned().ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "error": "target runtime not connected",
-                    "target_runtime_id": runtime_id,
-                    "runtimes": runtime_summaries(&runtimes),
-                    "routing_trace": runtime_routing_trace(&runtimes, request, "runtime_id_not_found")
-                })),
-            )
-        });
+        if let Some(client) = runtimes.get(runtime_id) {
+            return Ok(client.clone());
+        }
+        // The id is dead. Still a refusal — never a fallback — but a dead id on a
+        // tab that is still alive is the COMMON case, not an exception: ids
+        // rotate on every cross-document navigation. Name the successor so the
+        // caller can retry immediately instead of re-enumerating. A miss yields
+        // a plainer refusal; it never yields a neighbouring runtime, which would
+        // be the misroute this whole change removes.
+        let successor = successor_for_stale_runtime(state, &runtimes, runtime_id).await;
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "target runtime not connected",
+                "target_runtime_id": runtime_id,
+                "successor_runtime_id": successor,
+                "successor_reason": successor.as_ref().map(|_| "runtime_replaced_by_navigation"),
+                "runtimes": runtime_summaries(&runtimes),
+                "routing_trace": runtime_routing_trace(&runtimes, request, "runtime_id_not_found")
+            })),
+        ));
     }
 
     if let Some(needle) = request.target_url_contains.as_deref() {
@@ -7983,14 +11068,17 @@ fn runtime_summaries(runtimes: &HashMap<String, RuntimeClient>) -> Vec<Value> {
 /// crate): strip the scheme, cut at the first `/`, drop any `user@` and `:port`.
 /// Returns None for an empty or path-only string.
 fn host_from_url(url: &str) -> Option<String> {
-    let without_scheme = url
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(url);
+    let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let authority = without_scheme.split(['/', '?', '#']).next().unwrap_or("");
-    let host_port = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
     // Trim a :port (but keep an IPv6 bracket form intact enough for a label).
-    let host = host_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_port);
+    let host = host_port
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(host_port);
     if host.is_empty() {
         None
     } else {
@@ -8061,8 +11149,69 @@ fn runtime_summary(client: &RuntimeClient) -> Value {
     row
 }
 
-async fn extension_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+/// U12. `WebSocketUpgrade` consumes the request, so it MUST come last; `HeaderMap`
+/// and `Query` are non-consuming and are declared before it. Without the header
+/// extractor this handler could not see `Origin` at all — which is precisely why
+/// the bridge used to hand credentials to any page that dialed the socket.
+///
+/// Both checks run BEFORE `on_upgrade`, so a refused caller never reaches
+/// `handle_extension_socket` and therefore never reaches the `runtime_ready`
+/// branch that spawns credential hydration. The refusal is a plain HTTP 403
+/// whose body is the specific reason, and it is logged server-side with the same
+/// string, so an operator sees the same discriminating word on both sides.
+async fn extension_ws(
+    headers: header::HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+    State(state): State<AppState>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok());
+    let presented_secret = params.get("secret").map(String::as_str);
+
+    if let Err(rejection) = state.extension_auth.authorize(origin, presented_secret) {
+        let reason = rejection.reason();
+        eprintln!(
+            "actions-json bridge refused an /extension upgrade: {reason} (origin={})",
+            origin.unwrap_or("<none>")
+        );
+        return (StatusCode::FORBIDDEN, reason).into_response();
+    }
+
     ws.on_upgrade(move |socket| handle_extension_socket(socket, state))
+        .into_response()
+}
+
+async fn extension_auth_check(
+    Query(params): Query<HashMap<String, String>>,
+    State(state): State<AppState>,
+) -> Response {
+    let presented_secret = params.get("secret").map(String::as_str);
+
+    match state.extension_auth.authorize_preflight(presented_secret) {
+        Ok(()) => Json(json!({
+            "ok": true,
+            "authorized": true,
+        }))
+        .into_response(),
+        Err(rejection) => {
+            let reason = rejection.reason();
+            eprintln!("actions-json bridge refused an /extension/auth-check request: {reason}");
+            (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "ok": false,
+                    "authorized": false,
+                    "error": {
+                        "code": reason,
+                        "message": rejection.message(),
+                    }
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 async fn ingest_action_progress(state: &AppState, item: &Value) -> bool {
@@ -8254,20 +11403,28 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
             }
             Some("credential_hydration_result") => {
                 let mut last_credential_hydration = state.last_credential_hydration.lock().await;
-                *last_credential_hydration = Some(json!({
-                    "configured": item
-                        .get("configured")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                    "sent": true,
-                    "status": if item.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-                        "accepted"
-                    } else {
-                        "rejected"
-                    },
-                    "provider": item.get("provider").and_then(Value::as_str).unwrap_or("openai"),
-                    "redacted": item.get("redacted").and_then(Value::as_str)
-                }));
+                let provider = item
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .unwrap_or("openai");
+                record_credential_hydration_status(
+                    &mut last_credential_hydration,
+                    provider,
+                    json!({
+                        "configured": item
+                            .get("configured")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        "sent": true,
+                        "status": if item.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                            "accepted"
+                        } else {
+                            "rejected"
+                        },
+                        "provider": provider,
+                        "redacted": item.get("redacted").and_then(Value::as_str)
+                    }),
+                );
             }
             Some("action_progress") => {
                 ingest_action_progress(&state, &item).await;
@@ -8305,7 +11462,9 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
                     }
                     let mut pending = state.pending.lock().await;
                     match pending.get(call_id) {
-                        Some(pending_call) if Some(pending_call.runtime_id.as_str()) == item_runtime_id => {
+                        Some(pending_call)
+                            if Some(pending_call.runtime_id.as_str()) == item_runtime_id =>
+                        {
                             if let Some(pending_call) = pending.remove(call_id) {
                                 eprintln!(
                                     "actions-json-mcp pending matched type={} call_id={} runtime_id={}",
@@ -8540,6 +11699,22 @@ fn spawn_liveness_sweep(state: AppState) {
 /// socket did not. Reassigns the active runtime if it was the reaped one, and
 /// records the eviction in the lifecycle log. Returns whether a runtime was
 /// present to reap (unknown/already-removed id → false, no-op, no panic).
+/// How many dead runtime ids to remember for successor lookup. Ids rotate on
+/// every navigation, so this map would grow without bound in a long session;
+/// the cap is generous relative to a turn (a tester saw eleven rotations in two
+/// hours) and losing the oldest only costs a plainer refusal.
+const STALE_RUNTIME_MEMORY: usize = 256;
+
+async fn remember_stale_runtime(state: &AppState, runtime_id: &str, runtime_key: &str) {
+    let mut stale = state.stale_runtime_keys.lock().await;
+    if stale.len() >= STALE_RUNTIME_MEMORY {
+        // Cheap eviction: this is a hint cache, and a miss degrades to the
+        // plain refusal that was correct before this existed.
+        stale.clear();
+    }
+    stale.insert(runtime_id.to_string(), runtime_key.to_string());
+}
+
 async fn remove_single_runtime(state: &AppState, runtime_id: &str, reason: &str) -> bool {
     let active_before = state.active_runtime_id.lock().await.clone();
     let mut runtimes = state.runtimes.lock().await;
@@ -8549,9 +11724,16 @@ async fn remove_single_runtime(state: &AppState, runtime_id: &str, reason: &str)
     let removed_active = active_before.as_deref() == Some(runtime_id);
     let remaining = runtimes.len();
     let next_active = runtimes.keys().next().cloned();
+    let removed_runtime_key = removed_client.runtime_key.clone();
     drop(runtimes);
     if removed_active {
         *state.active_runtime_id.lock().await = next_active;
+    }
+    // Remember which TAB this id lived on so a later call carrying it can be
+    // told its successor instead of just being refused. Ids rotate on every
+    // navigation, so this is the common path, not an edge case.
+    if let Some(runtime_key) = removed_runtime_key {
+        remember_stale_runtime(state, runtime_id, &runtime_key).await;
     }
     append_lifecycle_log(
         state.storage_root.as_deref(),
@@ -8614,9 +11796,31 @@ async fn sweep_stale_runtimes(state: &AppState) -> usize {
     removed.len()
 }
 
+/// U12b. The CLI is a client of the bridge's OWN gated routes, so it has to
+/// present the same secret every other caller does. It can read it directly:
+/// `list-tools` and `open-overlay` run on the machine that owns the
+/// installation, so `ExtensionAuthConfig::load(None)` resolves the very
+/// `.actions-json.local.json` the serving process resolved — the same cwd-based
+/// lookup `state_from_catalog` uses.
+///
+/// Loading (rather than requiring a flag) is the point: an operator running
+/// `actions-json-mcp list-tools` must not have to paste a secret to talk to
+/// their own bridge. If the bridge is a DIFFERENT installation, the secrets
+/// differ and the request is refused with `bridge_secret_mismatch` — which is
+/// the correct and informative answer, not a failure of this design.
+fn local_bridge_secret() -> String {
+    ExtensionAuthConfig::load(None).handshake_secret().to_string()
+}
+
 async fn list_tools(bridge: String) -> Result<()> {
     let url = format!("{}/mcp/tools/list", bridge.trim_end_matches('/'));
-    let body = reqwest::get(url).await?.text().await?;
+    let body = reqwest::Client::new()
+        .get(url)
+        .bearer_auth(local_bridge_secret())
+        .send()
+        .await?
+        .text()
+        .await?;
     println!("{body}");
     Ok(())
 }
@@ -8636,6 +11840,7 @@ async fn open_overlay(
     let url = format!("{}/mcp/tools/call", bridge.trim_end_matches('/'));
     let response = reqwest::Client::new()
         .post(url)
+        .bearer_auth(local_bridge_secret())
         .json(&json!({
             "name": "overlay.open",
             "target_runtime_id": target_runtime_id,

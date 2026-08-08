@@ -5,6 +5,12 @@
 // Secrets are never logged or echoed back into the page beyond the input state.
 
 import { createCloudStore } from "./agent/cloud-store.mjs";
+import {
+  bridgePairingState,
+  removeBridgePairingSecret,
+  saveBridgePairingSecret,
+} from "./agent/bridge-pairing-settings.mjs";
+import { bridgeConnectionEntries } from "./agent/bridge-connection-log.mjs";
 
 const $ = (id) => document.getElementById(id);
 const FIELDS = ["bucket", "region", "prefix", "accessKeyId", "secretAccessKey"];
@@ -21,15 +27,126 @@ function setStatus(el, text, ok) {
   el.className = ok ? "ok" : "err";
 }
 
+function renderBridgeConnectionLog(entries) {
+  const list = $("bridge-connection-log");
+  list.replaceChildren();
+  $("bridge-connection-empty").hidden = entries.length > 0;
+  for (const entry of entries) {
+    const item = document.createElement("li");
+    item.className = `connection-log-entry connection-log-entry--${entry.status}`;
+
+    const heading = document.createElement("div");
+    heading.className = "connection-log-heading";
+    const status = document.createElement("strong");
+    status.textContent = entry.status;
+    const time = document.createElement("time");
+    time.dateTime = entry.timestamp;
+    time.textContent = entry.timestamp ? new Date(entry.timestamp).toLocaleString() : "Time unavailable";
+    heading.append(status, time);
+
+    const summary = document.createElement("div");
+    summary.textContent = `${entry.stage}: ${entry.summary}`;
+    item.append(heading, summary);
+
+    if (entry.detail) {
+      const detail = document.createElement("code");
+      detail.textContent = entry.detail;
+      item.append(detail);
+    }
+
+    const context = document.createElement("small");
+    context.textContent = [
+      entry.bridgeUrl || "Bridge URL unavailable",
+      entry.extensionVersion ? `extension ${entry.extensionVersion}` : "",
+      entry.extensionId ? `ID ${entry.extensionId}` : "",
+    ].filter(Boolean).join(" · ");
+    item.append(context);
+    list.append(item);
+  }
+}
+
+async function refreshBridgeConnectionLog() {
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: "actions-json:agent-session-log",
+      limit: 40,
+    });
+    const manifest = chrome.runtime.getManifest();
+    renderBridgeConnectionLog(bridgeConnectionEntries(response?.log?.events, {
+      extensionId: chrome.runtime.id,
+      extensionVersion: manifest.version,
+    }));
+  } catch (error) {
+    renderBridgeConnectionLog([{
+      timestamp: new Date().toISOString(),
+      status: "failed",
+      stage: "diagnostics",
+      summary: "The extension could not load its connection history.",
+      detail: error?.message || String(error),
+      bridgeUrl: $("bridgeUrl").value.trim(),
+      extensionId: chrome.runtime.id,
+      extensionVersion: chrome.runtime.getManifest().version,
+    }]);
+  }
+}
+
 async function load() {
   const stored = await chrome.storage.local.get([
     "actionsJsonCloudStorage",
     "actionsJsonUsageReadKey",
+    "bridgeUrl",
   ]);
   const config = stored.actionsJsonCloudStorage;
   if (config) for (const f of FIELDS) $(f).value = config[f] ?? "";
   if (stored.actionsJsonUsageReadKey) $("usageReadKey").value = stored.actionsJsonUsageReadKey;
+  $("bridgeUrl").value = stored.bridgeUrl || "ws://127.0.0.1:17345/extension";
+  const pairing = await bridgePairingState(chrome.storage.local);
+  setStatus(
+    $("bridge-pairing-status"),
+    pairing.paired ? "A bridge secret is saved on this browser." : "No bridge secret is saved.",
+    pairing.paired,
+  );
+  await refreshBridgeConnectionLog();
 }
+
+$("save-bridge-pairing").addEventListener("click", async () => {
+  const bridgeUrl = $("bridgeUrl").value.trim();
+  if (!/^wss?:\/\//i.test(bridgeUrl)) {
+    setStatus($("bridge-pairing-status"), "Enter a ws:// or wss:// bridge URL.", false);
+    return;
+  }
+  await chrome.storage.local.set({ bridgeUrl });
+  setStatus($("bridge-pairing-status"), "Saving and verifying the secure bridge…", true);
+  const result = await saveBridgePairingSecret({
+    storageArea: chrome.storage.local,
+    runtime: chrome.runtime,
+    value: $("bridgeHandshakeSecret").value,
+    bridgeUrl,
+  });
+  if (result.ok) {
+    $("bridgeHandshakeSecret").value = "";
+    setStatus(
+      $("bridge-pairing-status"),
+      "✓ Coding agent connected. Switch to a website tab and choose Take control.",
+      true,
+    );
+  } else {
+    setStatus($("bridge-pairing-status"), result.message, false);
+  }
+  await refreshBridgeConnectionLog();
+});
+
+$("remove-bridge-pairing").addEventListener("click", async () => {
+  await removeBridgePairingSecret({
+    storageArea: chrome.storage.local,
+    runtime: chrome.runtime,
+  });
+  $("bridgeHandshakeSecret").value = "";
+  setStatus($("bridge-pairing-status"), "Bridge secret removed. Connections now fail closed.", true);
+  await refreshBridgeConnectionLog();
+});
+
+$("refresh-bridge-log").addEventListener("click", refreshBridgeConnectionLog);
 
 $("save").addEventListener("click", async () => {
   const config = readForm();

@@ -30,17 +30,31 @@ function assetFileName(version, slug) {
   return `${BINARY_BASE}-${version}-${slug}.tar.gz`;
 }
 
+// Base URL for every asset published under a version's release tag.
+function releaseAssetUrl(version, file) {
+  return `https://github.com/yaniv256/actions.json/releases/download/extension-v${version}/${file}`;
+}
+
 // GitHub release download URL for a version tag + asset.
 function downloadUrl(version, slug) {
-  const file = assetFileName(version, slug);
-  return `https://github.com/yaniv256/actions.json/releases/download/extension-v${version}/${file}`;
+  return releaseAssetUrl(version, assetFileName(version, slug));
+}
+
+// The SHA256SUMS.txt manifest published alongside the tarballs by
+// scripts/release-binaries.sh. Same release tag, fixed filename.
+const CHECKSUMS_FILE = 'SHA256SUMS.txt';
+
+function checksumsUrl(version) {
+  return releaseAssetUrl(version, CHECKSUMS_FILE);
 }
 
 module.exports = {
   assetSlug,
   assetFileName,
   downloadUrl,
+  checksumsUrl,
   binaryName,
   BINARY_BASE,
+  CHECKSUMS_FILE,
   SUPPORTED,
 };

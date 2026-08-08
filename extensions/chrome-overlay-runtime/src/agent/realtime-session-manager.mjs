@@ -17,6 +17,7 @@ import { DEFAULT_MODEL } from "./realtime-model.mjs";
 export { DEFAULT_MODEL };
 const MAX_REALTIME_IMAGE_DATA_URL_CHARS = 512_000;
 const DEFAULT_DEVELOPER_TEXT_RESPONSE_TIMEOUT_MS = 45_000;
+const DEFAULT_RESPONSE_OUTPUT_CLEAR_TIMEOUT_MS = 500;
 
 const DEFAULT_INSTRUCTIONS = [
   "You are an actions.json hosted browser agent running inside the user's browser.",
@@ -25,7 +26,7 @@ const DEFAULT_INSTRUCTIONS = [
   "Tab orientation is a permanent responsibility, not a site-specific action. When the user asks about a website, board, tab, page, workflow, or visible artifact, first use browser.claimed_tabs.list/browser_claimed_tabs_list when available to inspect claimed tabs. In a hosted browser session that result is scoped to the current extension instance; absence there does not prove that no other browser or machine is connected. In an MCP session the bridge-global result is authoritative and runtime_id is the routing address. Choose the relevant tab from the user's request, title, URL, and task context; if the relevant hosted tab is not active, call browser.claimed_tabs.activate/browser_claimed_tabs_activate before page reads or actions.site. If actions.site returns empty data, consider wrong active tab or unsynced storage before concluding a capability is unavailable.",
   "Cross-tab content sourcing is a core capability within the inventory scope returned by browser.claimed_tabs.list. You may hold several authorized tabs at once (for example Trello, Linear, and LinkedIn), and a request to import, sync, copy, compare, or reference content that lives on another listed tab is a request you can fulfill yourself. Never ask the user to paste content from another listed site, and never say a listed source is unreadable based on the current tab's catalog alone: activate the source tab, call actions.site mode=list there, read the source content with its site actions, then return to the destination tab, complete the task, and verify it. Only report a source unavailable after the source tab's own catalog and actions have actually failed; an extension-local inventory cannot rule out tabs connected through another browser instance.",
   "Use actions.site to discover and run current-site actions. At the start of a session, when the user asks you to orient to a site, or when navigation changes to a new site, call actions.site/actions_site with mode=list before relying on generic screenshots or DOM extraction.",
-  "When actions.site/actions_site mode=list returns state_projections, treat them as the preferred way to understand the page's logical state. Use mode=state_summary for compact orientation, mode=state_read for exact state, and mode=state_diff to verify what changed since the last snapshot before falling back to generic DOM reads, screenshots, or locator searches.",
+  "When actions.site/actions_site mode=list returns state_projections, treat them as the preferred way to understand the page's logical state. Use mode=state_summary for compact orientation, mode=state_read for exact state, and mode=state_diff to verify what changed since the last snapshot before falling back to generic DOM reads, screenshots, or locator searches. When a summary declares input_schema, pass schema-valid summary_arguments and follow its has_more/next_offset fields until the requested collection has been read completely.",
   "actions.json site actions are the first-choice operating layer. If actions.site/actions_site lists an action that matches the user's goal, call that site-specific action before any generic DOM, screenshot, locator, pointer, or text primitive. Generic primitives are fallback tools: use them only when no relevant actions.json action exists, when the stored action fails, or when you are following geometry returned by a stored action. Ignoring a relevant actions.json action and using a generic DOM query first is a policy violation because the site map is the product's operating memory.",
   "The action catalog is a library of proven shortcuts, not the boundary of your ability. When no listed action matches the goal, or a stored action fails, you are expected to complete the task yourself by composing primitives: find the control with locator.element_info/locator_element_info or dom.observe.visible/dom_observe_visible (attribute selectors such as data-testid and aria-label beat text matching; exact text_equals beats text_contains when text is all you have), operate it with pointer.click/pointer_click, text.insert/text_insert, or keyboard.press/keyboard_press, then verify the effect with a state projection or locator.text_content/locator_text_content before reporting. Multi-step UI flows (open a menu, click a link, confirm a dialog) are within your competence — walk them one primitive at a time. Telling the user something cannot be done because no site action exists, without first attempting a primitive composition, is a capability-alignment failure. Reserve refusal for true user-only boundaries: sign-in, payment, consent, or a primitive that actually failed after honest attempts.",
   "Aim clicks at a hit-test-attested clickable_center. Discovery tools (locator.element_info/locator_element_info, dom.observe.visible/dom_observe_visible, and a11y.query) may return visible geometry that is not actionable. Pass coordinates to pointer.click/pointer_click only when clickable_center is present and the result reports receives_events=true; for a11y.query also require actionability_attested=true. If only visible_center is present, inspect occluded_by and scroll or dismiss the obstruction, then re-resolve the identity. Never click a bounding_box's x/y: that is the box's top-left corner pixel and usually misses the control entirely while still reporting clicked=true. A click that lands nowhere is silent — so after any click that should change the page, re-check the state, and if nothing changed, take browser.screenshot/browser_screenshot and look at the actual page (an open popover, a confirmation dialog, a focused field) before retrying or reporting failure. Destructive UI flows in particular usually open a confirmation popover after the first click; screenshot or re-observe to find the confirm button instead of concluding the delete failed.",
@@ -163,6 +164,30 @@ function cloneJson(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
+// OpenAI Realtime rejects a function whose top-level parameters schema contains
+// any of these composition keywords: "Invalid schema for function '<name>':
+// schema must have type 'object' and not have 'oneOf'/'anyOf'/'allOf'/'enum'/
+// 'const'/'not' at the top level." One rejected function fails the ENTIRE
+// session.update tool catalog, so the hosted agent loads with NO tools. Several
+// primitives (e.g. pointer.click, which accepts x/y OR a locator) legitimately
+// express their constraint with a top-level anyOf. Realtime can't enforce that
+// constraint anyway; the compound-action executor validates real arguments
+// downstream. So lower the top-level composition to a valid object schema and
+// fold its intent into the description so the agent still gets the guidance.
+// (Investigation: extension-0.1.231-hosted-agent-tool-load-failure.)
+const REALTIME_FORBIDDEN_TOP_LEVEL_KEYWORDS = ["oneOf", "anyOf", "allOf", "enum", "const", "not"];
+
+function sanitizeRealtimeTopLevelSchema(parameters) {
+  const lowered = [];
+  for (const keyword of REALTIME_FORBIDDEN_TOP_LEVEL_KEYWORDS) {
+    if (Object.prototype.hasOwnProperty.call(parameters, keyword)) {
+      lowered.push(keyword);
+      delete parameters[keyword];
+    }
+  }
+  return lowered;
+}
+
 function withPolicyExceptionReportSchema(tool) {
   const originalName = String(tool?.name || "").trim();
   if (isActionsSiteToolName(originalName)) {
@@ -172,7 +197,8 @@ function withPolicyExceptionReportSchema(tool) {
     tool?.parameters && typeof tool.parameters === "object"
       ? cloneJson(tool.parameters)
       : { type: "object", properties: {} };
-  parameters.type = parameters.type || "object";
+  const loweredKeywords = sanitizeRealtimeTopLevelSchema(parameters);
+  parameters.type = "object";
   parameters.properties =
     parameters.properties && typeof parameters.properties === "object" ? parameters.properties : {};
   parameters.properties.policy_exception_report = cloneJson(POLICY_EXCEPTION_REPORT_SCHEMA);
@@ -181,9 +207,12 @@ function withPolicyExceptionReportSchema(tool) {
     required.push("policy_exception_report");
   }
   parameters.required = required;
+  const loweredNote = loweredKeywords.length
+    ? ` This tool's parameters have an either/or constraint (originally a top-level ${loweredKeywords.join("/")} in its schema); the constraint is not enforced by the schema here, so supply a valid combination of the listed properties.`
+    : "";
   return {
     ...tool,
-    description: `${tool.description || ""} Direct fallback tool: include policy_exception_report unless this call is an internal primitive executed by an actions.json compound action.`.trim(),
+    description: `${tool.description || ""} Direct fallback tool: include policy_exception_report unless this call is an internal primitive executed by an actions.json compound action.${loweredNote}`.trim(),
     parameters,
   };
 }
@@ -318,6 +347,17 @@ function extractScreenshotPayload(result) {
   };
 }
 
+/**
+ * Input-audio transcription config sent in the audio-mode `session.update`.
+ *
+ * Hoisted out of the `session.update` literal so the `realtime.session.audio_config`
+ * audit event and the wire payload read the SAME object. A duplicated literal
+ * could drift, and the audit would then confidently report a config the session
+ * never actually used — the failure mode that let user-delta questions go
+ * undiagnosed through repeated asks in the first place.
+ */
+const REALTIME_INPUT_TRANSCRIPTION = Object.freeze({ model: "gpt-4o-mini-transcribe" });
+
 const REALTIME_DIAGNOSTIC_EVENT_TYPES = new Set([
   "input_audio_buffer.speech_started",
   "input_audio_buffer.speech_stopped",
@@ -353,10 +393,66 @@ function normalizeDiagnosticTranscript(value, maxLength = 1200) {
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1)}…` : normalized;
 }
 
-function realtimeDiagnosticPayload(event = {}, generatedTranscript = null) {
+// Terminal response statuses that are NOT success. A response.done carrying any
+// of these was being recorded ok:true, which is how a failed continuation became
+// user-visible silence with a log that said it worked (a user, ext 0.1.248,
+// 2026-07-27).
+// NOT "cancelled". A user interrupting the agent mid-answer produces
+// response.cancelled, and that is the system working — barging in is a feature.
+// Flagging it would fill the log with false alarms and re-create the same
+// problem in the other direction: a failure signal nobody trusts is a failure
+// signal nobody reads. Only outcomes NOBODY asked for count here.
+const REALTIME_NON_SUCCESS_STATUSES = new Set(["failed", "incomplete"]);
+
+// Bounded so a rejection that echoes a large payload cannot push the memory
+// record past its own limits — losing the field a second way, for a new reason.
+const STATUS_DETAIL_MESSAGE_LIMIT = 1200;
+
+/**
+ * True when a terminal Realtime response did not complete.
+ * Non-terminal events (deltas, lifecycle) are never failures here: classifying
+ * them would make every healthy stream look broken.
+ */
+export function realtimeEventIsFailure(event = {}) {
+  if (event?.type !== "response.done" && event?.type !== "response.cancelled") {
+    return false;
+  }
+  const status = event.status || event.response?.status || null;
+  return typeof status === "string" && REALTIME_NON_SUCCESS_STATUSES.has(status);
+}
+
+// Keeps the SHAPE and the beginning of the message. The cause lives at the front
+// of an error string ("context_length_exceeded", "invalid_request_error"); the
+// tail is usually an echo of the offending payload.
+function boundedStatusDetails(details) {
+  if (!details || typeof details !== "object") {
+    return null;
+  }
+  const error = details.error && typeof details.error === "object" ? details.error : null;
+  return {
+    type: typeof details.type === "string" ? details.type : null,
+    reason: typeof details.reason === "string" ? details.reason : null,
+    error: error
+      ? {
+          type: typeof error.type === "string" ? error.type : null,
+          code: typeof error.code === "string" ? error.code : null,
+          param: typeof error.param === "string" ? error.param : null,
+          message:
+            typeof error.message === "string"
+              ? error.message.slice(0, STATUS_DETAIL_MESSAGE_LIMIT)
+              : null,
+        }
+      : null,
+  };
+}
+
+export function realtimeDiagnosticPayload(event = {}, generatedTranscript = null) {
   const response = event.response && typeof event.response === "object" ? event.response : null;
   const item = event.item && typeof event.item === "object" ? event.item : null;
   return {
+    // THE field this whole record exists for when a response fails. Without it
+    // an investigator can prove a continuation failed and never learn why.
+    status_details: boundedStatusDetails(event.status_details || response?.status_details),
     response_id: event.response_id || response?.id || null,
     item_id: event.item_id || item?.id || null,
     item_type: item?.type || null,
@@ -428,7 +524,10 @@ export class HostedRealtimeSessionManager {
     tools = [],
     toolExecutor = defaultToolExecutor,
     eventObserver = null,
+    diagnosticObserver = null,
     expenditureObserver = null,
+    responseOutputController = null,
+    responseOutputClearTimeoutMs = DEFAULT_RESPONSE_OUTPUT_CLEAR_TIMEOUT_MS,
     developerTextResponseTimeoutMs = DEFAULT_DEVELOPER_TEXT_RESPONSE_TIMEOUT_MS,
   }) {
     if (!storage) {
@@ -446,6 +545,12 @@ export class HostedRealtimeSessionManager {
     this.audioTranscriptBuffers = new Map();
     this.toolExecutor = toolExecutor;
     this.eventObserver = typeof eventObserver === "function" ? eventObserver : null;
+    this.diagnosticObserver =
+      typeof diagnosticObserver === "function" ? diagnosticObserver : null;
+    this.responseOutputController = responseOutputController;
+    this.responseOutputClearTimeoutMs = Number.isFinite(responseOutputClearTimeoutMs)
+      ? Math.max(0, responseOutputClearTimeoutMs)
+      : DEFAULT_RESPONSE_OUTPUT_CLEAR_TIMEOUT_MS;
     this.developerTextResponseTimeoutMs = Number.isFinite(developerTextResponseTimeoutMs)
       ? Math.max(0, developerTextResponseTimeoutMs)
       : DEFAULT_DEVELOPER_TEXT_RESPONSE_TIMEOUT_MS;
@@ -478,6 +583,17 @@ export class HostedRealtimeSessionManager {
       outputMuted: false,
       textOnly: true,
     };
+  }
+
+  async recordStartDiagnostic(phase, details = {}) {
+    if (!this.diagnosticObserver) return;
+    await Promise.resolve(this.diagnosticObserver({ phase, ...details })).catch((error) => {
+      console.warn("Hosted-session diagnostic observer failed", {
+        phase,
+        trace_id: details.trace_id || null,
+        error: error?.message || String(error),
+      });
+    });
   }
 
   getState() {
@@ -596,6 +712,7 @@ export class HostedRealtimeSessionManager {
     if (!cancelledId) return;
     // Remember which response was cancelled so its late tool results are dropped.
     this._cancelledResponseIds.add(cancelledId);
+    await this._clearResponseOutputBuffer();
     try {
       await this.sendRealtimeEvent({ type: "response.cancel" });
     } catch {
@@ -608,6 +725,24 @@ export class HostedRealtimeSessionManager {
   // interrupted (cancelled) — its output no longer belongs to a live turn.
   _shouldDiscardToolResult(job) {
     return Boolean(job?.originResponseId) && this._cancelledResponseIds.has(job.originResponseId);
+  }
+
+  async _clearResponseOutputBuffer() {
+    if (typeof this.responseOutputController?.clearBuffer !== "function") return;
+    let timer = null;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(resolve, this.responseOutputClearTimeoutMs);
+    });
+    try {
+      await Promise.race([
+        Promise.resolve().then(() => this.responseOutputController.clearBuffer()),
+        timeout,
+      ]);
+    } catch {
+      // An optional output sink must never block cancellation or session teardown.
+    } finally {
+      if (timer !== null) clearTimeout(timer);
+    }
   }
 
   resetExpenditure() {
@@ -727,8 +862,22 @@ export class HostedRealtimeSessionManager {
 
   async start({ textOnly = true } = {}) {
     this.resetExpenditure();
+    const diagnosticStartedAt = Date.now();
+    const checkpoint = (phase, details = {}) =>
+      this.recordStartDiagnostic(`manager.${phase}`, {
+        trace_id: details.trace_id || null,
+        elapsed_ms: Date.now() - diagnosticStartedAt,
+        ...details,
+      });
     try {
+      await checkpoint("credential.read.begin", { ok: true });
       const apiKey = await loadOpenAiApiKey(this.storage);
+      await checkpoint("credential.read.complete", {
+        ok: true,
+        credential_present: Boolean(apiKey),
+        credential_length_bucket:
+          apiKey.length < 40 ? "under_40" : (apiKey.length < 100 ? "40_to_99" : "100_plus"),
+      });
       const voice = await getRealtimeVoice(this.storage);
       const turnDetectionSettings = await getRealtimeTurnDetectionSettings(this.storage);
       const turnDetection = realtimeTurnDetectionConfig(turnDetectionSettings);
@@ -746,6 +895,7 @@ export class HostedRealtimeSessionManager {
         model: this.model,
         textOnly,
       });
+      await checkpoint("transport.create.complete", { ok: true, text_only: Boolean(textOnly) });
       this.transport = transport;
       transport.onEvent = async (event) => {
         try {
@@ -767,7 +917,9 @@ export class HostedRealtimeSessionManager {
       transport.onStatusEvent = async (event) => {
         await this.handleTransportStatusEvent(event).catch(() => {});
       };
+      await checkpoint("transport.connect.begin", { ok: true });
       await transport.connect();
+      await checkpoint("transport.connect.complete", { ok: true });
       const returningContext = await loadReturningSessionContext(this.storage);
       if (returningContext) {
         await this.sendRealtimeEvent(returningContext, transport);
@@ -803,8 +955,14 @@ export class HostedRealtimeSessionManager {
           text_only: textOnly,
           voice,
           turn_detection: textOnly ? null : turnDetection,
+          // Recorded because its ABSENCE was itself a diagnostic gap: user-side
+          // partial transcripts were asked about repeatedly with no logged
+          // evidence of what transcription config the session actually ran.
+          // Null in text mode, where the whole `audio` block is omitted.
+          transcription: textOnly ? null : REALTIME_INPUT_TRANSCRIPTION,
         },
       }).catch(() => {});
+      await checkpoint("session_update.send.begin", { ok: true });
       await this.sendRealtimeEvent({
         type: "session.update",
         session: {
@@ -820,7 +978,7 @@ export class HostedRealtimeSessionManager {
             : {
                 audio: {
                   input: {
-                    transcription: { model: "gpt-4o-mini-transcribe" },
+                    transcription: REALTIME_INPUT_TRANSCRIPTION,
                     turn_detection: turnDetection,
                   },
                   output: { voice },
@@ -828,14 +986,17 @@ export class HostedRealtimeSessionManager {
               }),
         },
       }, transport);
+      await checkpoint("session_update.send.complete", { ok: true });
       // Route the session-start greet through createResponse too, so it is the
       // single sanctioned response.create emitter. First response of the
       // session — nothing is in flight, so queue fires immediately.
+      await checkpoint("initial_response.create.begin", { ok: true });
       await this.createResponse({
         response: {
           instructions: this.initialResponseInstructions(),
         },
       });
+      await checkpoint("initial_response.create.complete", { ok: true });
 
       this.state = {
         status: "connected",
@@ -849,8 +1010,14 @@ export class HostedRealtimeSessionManager {
         type: "session",
         summary: `Started ${this.model} session in ${textOnly ? "text" : "audio"} mode.`,
       });
+      await checkpoint("connected", { ok: true, state_status: this.state.status });
       return this.getState();
     } catch (error) {
+      await checkpoint("failed", {
+        ok: false,
+        error_name: error?.name || null,
+        error_message: error?.message || String(error),
+      });
       if (this.transport && typeof this.transport.close === "function") {
         await this.transport.close().catch(() => {});
       }
@@ -874,6 +1041,7 @@ export class HostedRealtimeSessionManager {
 
   async stop() {
     this.emitExpenditureSummary();
+    await this._clearResponseOutputBuffer();
     if (this.transport && typeof this.transport.close === "function") {
       await this.transport.close();
     }
@@ -1050,6 +1218,11 @@ export class HostedRealtimeSessionManager {
   }
 
   async handleRealtimeEvent(event) {
+    try {
+      this.responseOutputController?.observeRealtimeEvent?.(event);
+    } catch {
+      // Optional output telemetry must not interfere with Realtime event handling.
+    }
     this.lastRealtimeInboundEventType = event?.type || null;
     const eventResponseId = event?.response?.id || event?.response_id || null;
     // Single-flight active-response tracking (drives serialization of sends).
@@ -1079,11 +1252,21 @@ export class HostedRealtimeSessionManager {
     }
     if (REALTIME_DIAGNOSTIC_EVENT_TYPES.has(event?.type)) {
       const generatedTranscript = generatedTranscriptForEvent(this.audioTranscriptBuffers, event);
+      // ok was HARDCODED true, so a response.done carrying status:"failed" was
+      // written to memory as a success. Combined with the runtime clearing its
+      // busy state and returning {handled:true, toolCalls:0}, a rejected
+      // post-tool continuation became silence the user could not distinguish
+      // from the agent having nothing to say — and a log that agreed nothing
+      // was wrong (2026-07-27).
+      const isFailure = realtimeEventIsFailure(event);
+      const failureStatus = event.status || event.response?.status || null;
       await recordAgentMemoryEvent(this.storage, {
         type: "realtime",
         name: event.type,
-        ok: true,
-        summary: `Realtime event ${event.type}.`,
+        ok: !isFailure,
+        summary: isFailure
+          ? `Realtime event ${event.type} did NOT complete (status: ${failureStatus}).`
+          : `Realtime event ${event.type}.`,
         output: realtimeDiagnosticPayload(event, generatedTranscript),
       }).catch(() => {});
       if (

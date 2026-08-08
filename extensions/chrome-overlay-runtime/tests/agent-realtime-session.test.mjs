@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { saveOpenAiApiKey } from "../src/agent/credential-store.mjs";
 import { DEFAULT_MODEL, HostedRealtimeSessionManager } from "../src/agent/realtime-session-manager.mjs";
+import { createRuntimeHostedSessionClient } from "../src/agent/runtime-session-client.mjs";
 import {
   getAgentSessionLog,
   recordAgentMemoryEvent,
@@ -74,6 +75,39 @@ function nextTimer() {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+test("runtime hosted client preserves structured startup error diagnostics", async () => {
+  const chromeApi = {
+    runtime: {
+      onMessage: { addListener() {} },
+      async sendMessage() {
+        return {
+          ok: false,
+          responder: "offscreen-agent",
+          trace_id: "hosted-start-test",
+          error: {
+            name: "OperationError",
+            code: "transport_connect_failed",
+            message: "SDP exchange refused",
+            phase: "manager.transport.connect",
+          },
+        };
+      },
+    },
+  };
+  const client = createRuntimeHostedSessionClient({ chromeApi });
+
+  await assert.rejects(
+    client.start(),
+    (error) =>
+      error.message === "SDP exchange refused" &&
+      error.name === "OperationError" &&
+      error.code === "transport_connect_failed" &&
+      error.phase === "manager.transport.connect" &&
+      error.trace_id === "hosted-start-test" &&
+      error.responder === "offscreen-agent",
+  );
+});
+
 function fallbackArgs(args = {}, overrides = {}) {
   return {
     ...args,
@@ -104,6 +138,77 @@ test("hosted realtime session fails closed when no OpenAI key is configured", as
     busy: false,
     activeResponseId: null,
   });
+});
+
+test("hosted realtime session diagnostics identify the exact failed startup phase without exposing credentials", async () => {
+  const storage = createStorage();
+  await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
+  const transportFactory = {
+    create() {
+      return {
+        async connect() {
+          throw new DOMException("SDP exchange refused", "OperationError");
+        },
+        async close() {},
+      };
+    },
+  };
+  const diagnostics = [];
+  const manager = new HostedRealtimeSessionManager({
+    storage,
+    transportFactory,
+    diagnosticObserver(event) {
+      diagnostics.push(event);
+    },
+  });
+
+  await assert.rejects(() => manager.start(), /SDP exchange refused/);
+
+  assert.deepEqual(
+    diagnostics.map((event) => event.phase),
+    [
+      "manager.credential.read.begin",
+      "manager.credential.read.complete",
+      "manager.transport.create.complete",
+      "manager.transport.connect.begin",
+      "manager.failed",
+    ],
+  );
+  assert.equal(diagnostics.at(-1).error_name, "OperationError");
+  assert.equal(diagnostics.at(-1).error_message, "SDP exchange refused");
+  assert.equal(JSON.stringify(diagnostics).includes("session-secret"), false);
+});
+
+test("hosted realtime session diagnostics reach connected after every startup boundary", async () => {
+  const storage = createStorage();
+  await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
+  const transportFactory = createFakeTransportFactory();
+  const diagnostics = [];
+  const manager = new HostedRealtimeSessionManager({
+    storage,
+    transportFactory,
+    diagnosticObserver(event) {
+      diagnostics.push(event);
+    },
+  });
+
+  await manager.start({ textOnly: true });
+
+  assert.deepEqual(
+    diagnostics.map((event) => event.phase),
+    [
+      "manager.credential.read.begin",
+      "manager.credential.read.complete",
+      "manager.transport.create.complete",
+      "manager.transport.connect.begin",
+      "manager.transport.connect.complete",
+      "manager.session_update.send.begin",
+      "manager.session_update.send.complete",
+      "manager.initial_response.create.begin",
+      "manager.initial_response.create.complete",
+      "manager.connected",
+    ],
+  );
 });
 
 test("hosted realtime session starts the default model with a fake transport and redacted public state", async () => {
@@ -240,6 +345,60 @@ test("hosted realtime session tells the model the realtime-safe pointer click fu
   assert.match(initialResponse.response.instructions, /site\.map|teacher|host|guide/i);
 });
 
+test("hosted realtime session lowers top-level schema composition so Realtime accepts the whole catalog", async () => {
+  // Regression for the hosted-agent tool-load failure: a primitive whose
+  // parameters use a top-level anyOf/oneOf (e.g. pointer.click accepting x/y OR a
+  // locator) made Realtime reject the ENTIRE session.update catalog with
+  // invalid_function_parameters, so the agent loaded with NO tools. The
+  // normalization layer must strip the forbidden top-level composition keywords
+  // before publishing. (Investigation: extension-0.1.231-hosted-agent-tool-load-failure.)
+  const storage = createStorage();
+  await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
+  const transportFactory = createFakeTransportFactory();
+  const manager = new HostedRealtimeSessionManager({
+    storage,
+    transportFactory,
+    tools: [
+      {
+        type: "function",
+        name: "pointer.click",
+        description: "Click a viewport point or a resolved locator.",
+        parameters: {
+          type: "object",
+          anyOf: [{ required: ["x", "y"] }, { required: ["locator"] }],
+          properties: {
+            x: { type: "number" },
+            y: { type: "number" },
+            locator: { type: "string" },
+          },
+          additionalProperties: false,
+        },
+      },
+    ],
+  });
+
+  await manager.start({ textOnly: true });
+
+  const sessionUpdate = transportFactory.transports[0].events[0];
+  const pointerTool = sessionUpdate.session.tools.find((tool) => tool.name === "pointer_click");
+  assert.ok(pointerTool, "pointer_click must be advertised");
+  // No forbidden top-level composition keyword survives to Realtime.
+  for (const keyword of ["oneOf", "anyOf", "allOf", "enum", "const", "not"]) {
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(pointerTool.parameters, keyword),
+      false,
+      `top-level ${keyword} must be lowered before publishing to Realtime`,
+    );
+  }
+  assert.equal(pointerTool.parameters.type, "object");
+  // The properties and the injected policy_exception_report are preserved.
+  assert.ok(pointerTool.parameters.properties.x);
+  assert.ok(pointerTool.parameters.properties.locator);
+  assert.ok(pointerTool.parameters.properties.policy_exception_report);
+  // The dropped either/or intent is folded into the description so the agent still gets it.
+  assert.match(pointerTool.description, /either\/or|anyOf|valid combination/i);
+});
+
 test("hosted realtime session starts audio mode with transcription and realtime voice output", async () => {
   const storage = createStorage();
   await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
@@ -341,6 +500,7 @@ test("hosted realtime session logs the active audio turn detection config", asyn
       create_response: true,
       interrupt_response: false,
     },
+    transcription: { model: "gpt-4o-mini-transcribe" },
   });
 });
 
@@ -447,7 +607,19 @@ test("hosted realtime session sends injected realtime tool declarations", async 
   assert.match(sessionUpdate.session.instructions, /not the boundary of your ability/i);
   assert.match(sessionUpdate.session.instructions, /composing primitives/i);
   assert.match(sessionUpdate.session.instructions, /capability-alignment failure/i);
-  assert.match(sessionUpdate.session.instructions, /Aim clicks at the returned clickable_center/i);
+  // #216 reworded this to "hit-test-attested" and the assertion was not
+  // updated, so this test had been red since that commit.
+  //
+  // Anchored to the CLICK-AIMING SENTENCE, not to a bare /attested/: the word
+  // appears twice in this prompt (the other is "actionability_attested=true"
+  // further down), so a loose match stays green even if the click guidance
+  // drops attestation entirely. I wrote that looser version first and caught
+  // it with a known-answer check — it passed with the requirement removed.
+  assert.match(
+    sessionUpdate.session.instructions,
+    /Aim clicks at a hit-test-attested clickable_center/i,
+    "click guidance must keep its hit-test attestation requirement (#216)",
+  );
   assert.match(sessionUpdate.session.instructions, /Never click a bounding_box's x\/y/i);
   assert.match(sessionUpdate.session.instructions, /if nothing changed, take browser\.screenshot/i);
   assert.match(sessionUpdate.session.instructions, /Do not narrate the report/i);
@@ -1348,6 +1520,140 @@ test("hosted realtime session notifies observers and stores completed transcript
   assert.match(transcriptEvents.at(-1).text, /inspect it now/);
 });
 
+/**
+ * The discriminating experiment for "user partial transcripts never show".
+ *
+ * There is no `.delta` branch in the session manager, which invited the
+ * conclusion that the manager DROPS user deltas and needs a forwarding branch.
+ * It does not: the transport callback hands every raw event to the
+ * eventObserver BEFORE handleRealtimeEvent runs, so a `.delta` needs no branch
+ * of its own to reach the UI. This test pins that, payload included — asserting
+ * the delta TEXT survives, not merely that some event arrived, because a
+ * type-only assertion would still pass if the payload were stripped.
+ */
+test("hosted realtime session forwards user input transcription deltas to observers with the delta payload intact", async () => {
+  const storage = createStorage();
+  await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
+  const transportFactory = createFakeTransportFactory();
+  const observed = [];
+  const manager = new HostedRealtimeSessionManager({
+    storage,
+    transportFactory,
+    eventObserver(event) {
+      observed.push(event);
+    },
+  });
+
+  await manager.start({ textOnly: false });
+  observed.length = 0;
+
+  await transportFactory.transports[0].onEvent({
+    type: "conversation.item.input_audio_transcription.delta",
+    item_id: "item_delta_1",
+    delta: "can you inspect",
+  });
+  await transportFactory.transports[0].onEvent({
+    type: "conversation.item.input_audio_transcription.delta",
+    item_id: "item_delta_1",
+    delta: " this page?",
+  });
+
+  const deltas = observed.filter(
+    (event) => event.type === "conversation.item.input_audio_transcription.delta",
+  );
+  assert.equal(deltas.length, 2);
+  assert.deepEqual(
+    deltas.map((event) => event.delta),
+    ["can you inspect", " this page?"],
+  );
+  assert.equal(deltas[0].item_id, "item_delta_1");
+});
+
+/**
+ * Regression guard for the `.completed` path, which already worked. A fix aimed
+ * at deltas must not disturb the branch that finalizes the user's turn.
+ */
+test("hosted realtime session still finalizes the user turn from input transcription completed after deltas stream", async () => {
+  const storage = createStorage();
+  await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
+  const transportFactory = createFakeTransportFactory();
+  const observed = [];
+  const manager = new HostedRealtimeSessionManager({
+    storage,
+    transportFactory,
+    eventObserver(event) {
+      observed.push(event.type);
+    },
+  });
+
+  await manager.start({ textOnly: false });
+
+  await transportFactory.transports[0].onEvent({
+    type: "conversation.item.input_audio_transcription.delta",
+    item_id: "item_delta_2",
+    delta: "can you inspect",
+  });
+  const result = await transportFactory.transports[0].onEvent({
+    type: "conversation.item.input_audio_transcription.completed",
+    item_id: "item_delta_2",
+    transcript: "Can you inspect this page?",
+  });
+
+  assert.equal(result, undefined);
+  assert.ok(observed.includes("conversation.item.input_audio_transcription.delta"));
+  assert.ok(observed.includes("conversation.item.input_audio_transcription.completed"));
+  const transcriptEvents = storage.data.ACTIONS_JSON_AGENT_MEMORY_V1.events.filter(
+    (event) => event.type === "transcript" && event.role === "user",
+  );
+  assert.equal(transcriptEvents.at(-1).text, "Can you inspect this page?");
+});
+
+test("hosted realtime session audit logs the input transcription config alongside voice and turn detection", async () => {
+  const storage = createStorage();
+  await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
+  const transportFactory = createFakeTransportFactory();
+  const manager = new HostedRealtimeSessionManager({ storage, transportFactory });
+
+  await manager.start({ textOnly: false });
+
+  const configEvent = storage.data.ACTIONS_JSON_AGENT_MEMORY_V1.events.find(
+    (event) => event.type === "realtime" && event.name === "realtime.session.audio_config",
+  );
+  assert.equal(configEvent.output.text_only, false);
+  assert.equal(configEvent.output.voice, "cedar");
+  assert.deepEqual(configEvent.output.transcription, { model: "gpt-4o-mini-transcribe" });
+  assert.equal(configEvent.output.turn_detection.type, "server_vad");
+
+  // The audit must describe the config the session ACTUALLY sent, not a
+  // second literal that could drift away from the wire payload.
+  const sessionUpdate = transportFactory.transports[0].events.find(
+    (event) => event.type === "session.update",
+  );
+  assert.deepEqual(configEvent.output.transcription, sessionUpdate.session.audio.input.transcription);
+});
+
+test("hosted realtime session omits the audio block and logs null transcription in text-only mode", async () => {
+  const storage = createStorage();
+  await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
+  const transportFactory = createFakeTransportFactory();
+  const manager = new HostedRealtimeSessionManager({ storage, transportFactory });
+
+  await manager.start({ textOnly: true });
+
+  const sessionUpdate = transportFactory.transports[0].events.find(
+    (event) => event.type === "session.update",
+  );
+  assert.equal(sessionUpdate.session.audio, undefined);
+  assert.deepEqual(sessionUpdate.session.output_modalities, ["text"]);
+
+  const configEvent = storage.data.ACTIONS_JSON_AGENT_MEMORY_V1.events.find(
+    (event) => event.type === "realtime" && event.name === "realtime.session.audio_config",
+  );
+  assert.equal(configEvent.output.text_only, true);
+  assert.equal(configEvent.output.transcription, null);
+  assert.equal(configEvent.output.turn_detection, null);
+});
+
 test("hosted realtime session persists realtime VAD and interruption lifecycle events", async () => {
   const storage = createStorage();
   await saveOpenAiApiKey(storage, "sk-proj-session-secret-value-123456");
@@ -1411,6 +1717,7 @@ test("hosted realtime session persists realtime VAD and interruption lifecycle e
           generated_transcript: null,
           transcript: null,
           status: null,
+          status_details: null,
         },
       },
       {
@@ -1427,6 +1734,7 @@ test("hosted realtime session persists realtime VAD and interruption lifecycle e
           generated_transcript: null,
           transcript: null,
           status: null,
+          status_details: null,
         },
       },
       {
@@ -1443,6 +1751,7 @@ test("hosted realtime session persists realtime VAD and interruption lifecycle e
           generated_transcript: "Long answer part one.",
           transcript: null,
           status: "cancelled",
+          status_details: null,
         },
       },
       {
@@ -1459,6 +1768,7 @@ test("hosted realtime session persists realtime VAD and interruption lifecycle e
           generated_transcript: "Long answer part one.",
           transcript: null,
           status: null,
+          status_details: null,
         },
       },
     ],

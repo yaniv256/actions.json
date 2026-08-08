@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { globSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 // The two storage scopes MERGE — private does not shadow public. The bridge then resolves the
@@ -24,12 +26,8 @@ import test from "node:test";
 // It asserts the PROPERTY, not a list of the maps we happen to know about today.
 
 function storedMaps() {
-  try {
-    return execSync("ls /home/agent-zara/actions.json.storage/scopes/*/sites/*/*/actions.json")
-      .toString().trim().split("\n").filter(Boolean);
-  } catch {
-    return [];
-  }
+  const storageRoot = process.env.ACTIONS_JSON_STORAGE_ROOT ?? join(homedir(), "actions.json.storage");
+  return globSync(join(storageRoot, "scopes", "*", "sites", "*", "*", "actions.json"));
 }
 
 function bySurface(maps) {

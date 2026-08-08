@@ -1,6 +1,24 @@
 import { parseStoragePath, siteHostMatchesPage } from "../storage-bundle.mjs";
+import { validateProjectionCachePolicy } from "./projection-cache-policy.mjs";
 
 export const EXTENSION_STORAGE_BUNDLE_KEY = "actionsJsonStorageBundle";
+
+export function listExecutableRuntimeActionNames(manifest) {
+  const names = new Set();
+  for (const tool of Array.isArray(manifest?.tools) ? manifest.tools : []) {
+    if (typeof tool?.name === "string" && tool.name) {
+      names.add(tool.name);
+    }
+  }
+  for (const primitive of Array.isArray(manifest?.primitive_dictionary?.primitives)
+    ? manifest.primitive_dictionary.primitives
+    : []) {
+    if (typeof primitive?.name === "string" && primitive.name && primitive.support !== "unsupported") {
+      names.add(primitive.name);
+    }
+  }
+  return [...names];
+}
 
 function safeInputSchema(tool) {
   return tool?.input_schema && typeof tool.input_schema === "object"
@@ -28,6 +46,43 @@ function storageBundleEntries(bundle) {
 
 function entrySizeBytes(entry) {
   return new TextEncoder().encode(String(entry?.text ?? "")).length;
+}
+
+function fnv1a64(value) {
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of new TextEncoder().encode(String(value ?? ""))) {
+    hash ^= BigInt(byte);
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return `fnv1a64:${hash.toString(16).padStart(16, "0")}`;
+}
+
+function base64UrlEncode(value) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+function base64UrlDecode(value) {
+  const normalized = String(value).replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "="));
+  return new TextDecoder().decode(Uint8Array.from(binary, (character) => character.charCodeAt(0)));
+}
+
+function encodeCatalogContinuation(binding) {
+  const payload = base64UrlEncode(JSON.stringify(binding));
+  return `v1.${payload}.${fnv1a64(payload).slice("fnv1a64:".length)}`;
+}
+
+function decodeCatalogContinuation(value) {
+  const match = /^v1\.([A-Za-z0-9_-]+)\.([0-9a-f]{16})$/u.exec(String(value || ""));
+  if (!match || fnv1a64(match[1]) !== `fnv1a64:${match[2]}`) return null;
+  try {
+    return JSON.parse(base64UrlDecode(match[1]));
+  } catch {
+    return null;
+  }
 }
 
 function parseFrontMatter(text) {
@@ -139,6 +194,130 @@ export function listSiteActionsFromBundle(bundle, pageUrl, targetUrlContains = p
     }
   }
   return actions;
+}
+
+/**
+ * Return a compact, bounded action catalog without changing the legacy list API.
+ * Continuations are deliberately content-bound: a storage refresh invalidates an
+ * old cursor instead of silently paginating through a different catalog.
+ */
+export function listSiteActionsBoundedFromBundle(
+  bundle,
+  pageUrl,
+  {
+    query = "",
+    page_size: requestedPageSize = 5,
+    max_bytes: requestedMaxBytes = 4_096,
+    continuation = null,
+    target_url_contains: targetUrlContains = pageUrl,
+  } = {},
+) {
+  const normalizedQuery = String(query || "").trim().toLocaleLowerCase();
+  const pageSize = Math.min(5, Math.max(1, Number.isInteger(requestedPageSize) ? requestedPageSize : 5));
+  const maxBytes = Math.min(64_000, Math.max(256, Number.isInteger(requestedMaxBytes) ? requestedMaxBytes : 4_096));
+  const order = "name,map_path";
+  const maps = loadSiteActionMapsFromBundle(bundle, pageUrl).map(({ path, map }) => {
+    const entry = storageBundleEntries(bundle).find((candidate) => candidate.path === path);
+    return {
+      path,
+      map,
+      content_hash: fnv1a64(entry?.text ?? JSON.stringify(map)),
+    };
+  });
+  const catalogHash = fnv1a64(
+    maps.map(({ path, content_hash: contentHash }) => `${path}\0${contentHash}`).sort().join("\n"),
+  );
+  const actions = [];
+  for (const { path, map, content_hash: contentHash } of maps) {
+    for (const tool of map.tools) {
+      const name = tool?.name;
+      if (typeof name !== "string" || !name) continue;
+      const bindingTarget = tool.x_actions?.binding?.target_url_contains;
+      if (
+        typeof bindingTarget === "string" &&
+        targetUrlContains &&
+        !String(targetUrlContains).includes(bindingTarget) &&
+        !bindingTarget.includes(String(targetUrlContains))
+      ) {
+        continue;
+      }
+      const description = tool.description || null;
+      if (normalizedQuery && !`${name}\n${description || ""}`.toLocaleLowerCase().includes(normalizedQuery)) {
+        continue;
+      }
+      actions.push({
+        name,
+        description,
+        input_schema: safeInputSchema(tool),
+        target_url_contains: bindingTarget || null,
+        source: { map_path: path, content_hash: contentHash },
+      });
+    }
+  }
+  actions.sort((left, right) =>
+    left.name.localeCompare(right.name) || left.source.map_path.localeCompare(right.source.map_path),
+  );
+
+  const cursor = continuation ? decodeCatalogContinuation(continuation) : null;
+  if (
+    continuation &&
+    (!cursor ||
+      cursor.catalog_hash !== catalogHash ||
+      cursor.query !== normalizedQuery ||
+      cursor.order !== order ||
+      cursor.page_size !== pageSize ||
+      !Number.isInteger(cursor.offset) ||
+      cursor.offset < 0)
+  ) {
+    return {
+      ok: false,
+      error: {
+        code: "catalog_continuation_invalid",
+        message: "The catalog continuation is malformed or belongs to different catalog content or query options.",
+      },
+    };
+  }
+  const offset = cursor?.offset ?? 0;
+  const provenance = { catalog_hash: catalogHash, order };
+  const buildValue = (selected, nextOffset) => {
+    const hasMore = nextOffset < actions.length;
+    return {
+      actions: selected,
+      page: {
+        page_size: pageSize,
+        returned: selected.length,
+        has_more: hasMore,
+        continuation: hasMore
+          ? encodeCatalogContinuation({
+              catalog_hash: catalogHash,
+              query: normalizedQuery,
+              order,
+              page_size: pageSize,
+              offset: nextOffset,
+            })
+          : null,
+      },
+      provenance,
+    };
+  };
+  const selected = [];
+  for (const action of actions.slice(offset, offset + pageSize)) {
+    const candidate = [...selected, action];
+    const envelope = { ok: true, value: buildValue(candidate, offset + candidate.length) };
+    if (new TextEncoder().encode(JSON.stringify(envelope)).length > maxBytes) break;
+    selected.push(action);
+  }
+  if (selected.length === 0 && offset < actions.length) {
+    return {
+      ok: false,
+      error: {
+        code: "catalog_response_budget_too_small",
+        message: "No action entry fits within max_bytes.",
+        minimum_action: actions[offset].name,
+      },
+    };
+  }
+  return { ok: true, value: buildValue(selected, offset + selected.length) };
 }
 
 export function listSiteStorageFilesFromBundle(bundle, pageUrl) {
@@ -319,12 +498,20 @@ export function resolveSiteActionFromBundle(bundle, pageUrl, { action, arguments
     };
   }
   const { map, tool } = entry;
+  const cacheValidation = validateProjectionCachePolicy(tool.cache);
+  if (!cacheValidation.ok) {
+    return {
+      ok: false,
+      error: { code: "invalid_cache_policy", message: cacheValidation.error },
+    };
+  }
   const postcondition = findStatePostcondition(map, tool.name);
   const staticOutput = tool.x_actions?.static_output;
   if (staticOutput !== undefined) {
     return {
       ok: true,
       static_output: staticOutput,
+      ...(tool.cache ? { cache: tool.cache } : {}),
     };
   }
   if (tool.workflow && typeof tool.workflow === "object" && !Array.isArray(tool.workflow)) {
@@ -336,6 +523,7 @@ export function resolveSiteActionFromBundle(bundle, pageUrl, { action, arguments
         input: args,
         ...(postcondition ? { postcondition } : {}),
       },
+      ...(tool.cache ? { cache: tool.cache } : {}),
     };
   }
   const handler = tool.x_actions?.handler;
@@ -358,5 +546,6 @@ export function resolveSiteActionFromBundle(bundle, pageUrl, { action, arguments
       target_url_contains: targetUrlContains,
       ...(postcondition ? { postcondition } : {}),
     },
+    ...(tool.cache ? { cache: tool.cache } : {}),
   };
 }

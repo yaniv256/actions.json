@@ -154,7 +154,7 @@ async fn run_interactive(
     // Write the command to a .bat and point schtasks /TR at the .bat — NOT an inline
     // `cmd /c "..."`. The inline form triple-nests quotes (cmd /c "  helper.exe "chrome" ...  >
     // "log" 2>&1 ") which schtasks/cmd parse wrong, silently breaking the helper invocation or
-    // the redirect (investigations/rust-helper-cdp-pipe-oneway.md — the .bat form works in every
+    // the redirect (the internal investigation record — the .bat form works in every
     // manual repro, the inline form fails). The .bat holds the exact command + redirect verbatim.
     let cmdline = helper_batch_command(helper_win, request_win)?;
     let stamp = short_stamp();

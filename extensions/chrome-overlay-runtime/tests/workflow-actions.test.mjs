@@ -99,6 +99,37 @@ test("workflow validation rejects unsupported language, duplicate ids, and unbou
   );
 });
 
+test("workflow validation accepts the effect taxonomy and rejects unknown effects", () => {
+  for (const effect of [
+    "observation",
+    "readiness",
+    "cleanup",
+    "reversible_mutation",
+    "irreversible_mutation",
+    "verification",
+  ]) {
+    assert.deepEqual(
+      validateWorkflow({
+        version: 1,
+        expression_language: "jsonata",
+        steps: [{ id: "classified", primitive: "keyboard.press", effect, args: { key: "Escape" } }],
+      }),
+      { ok: true },
+    );
+  }
+
+  const invalid = validateWorkflow({
+    version: 1,
+    expression_language: "jsonata",
+    steps: [{ id: "classified", primitive: "keyboard.press", effect: "ui_state", args: { key: "Escape" } }],
+  });
+  assert.equal(invalid.ok, false);
+  assert.match(
+    invalid.error.message,
+    /effect.*observation.*readiness.*cleanup.*reversible_mutation.*irreversible_mutation.*verification/i,
+  );
+});
+
 test("Trello label candidates are scoped to the labels popover", () => {
   const tool = trelloTool("trello.card.label_options.candidates");
 
@@ -683,6 +714,187 @@ test("workflow failures include normalized class, failed state, recoverability, 
   assert.match(result.error.safe_recovery, /retry/i);
 });
 
+test("verification exhaustion after a completed mutation is indeterminate and unsafe to retry", async () => {
+  const result = await executeWorkflowAction({
+    actionName: "trello.card.checklist.create",
+    input: { title: "Launch checklist" },
+    workflow: {
+      version: 1,
+      expression_language: "jsonata",
+      steps: [
+        {
+          id: "submitChecklist",
+          primitive: "pointer.click",
+          args: { x: 10, y: 20 },
+        },
+        {
+          id: "verifyChecklist",
+          primitive: "dom.observe.attributes",
+          args: {
+            selector: "[data-testid='checklist-title']",
+            attributes: ["text"],
+          },
+          retry_until: "{% $count(steps.verifyChecklist.output.matches[attributes.text = input.title]) >= 1 %}",
+          max_attempts: 2,
+          on_error: "continue",
+        },
+      ],
+    },
+    async executePrimitive(call) {
+      if (call.name === "pointer.click") {
+        return { ok: true, output: { clicked: true } };
+      }
+      return { ok: true, output: { match_count: 0, matches: [] } };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "workflow_retry_exhausted");
+  assert.equal(result.error.failure_class, "mutation_outcome_indeterminate");
+  assert.equal(result.error.failed_state, "postcondition");
+  assert.equal(result.error.outcome, "indeterminate");
+  assert.equal(result.error.mutation_may_have_committed, true);
+  assert.equal(result.error.retryable, false);
+  assert.equal(result.error.recoverable, true);
+  assert.match(result.error.safe_recovery, /read.*state/i);
+  assert.match(result.error.safe_recovery, /do not retry/i);
+});
+
+test("explicit cleanup does not make a later verifier failure indeterminate", async () => {
+  const result = await executeWorkflowAction({
+    actionName: "trello.cleanup.then.read",
+    workflow: {
+      version: 1,
+      expression_language: "jsonata",
+      steps: [
+        {
+          id: "dismissDraft",
+          primitive: "keyboard.press",
+          effect: "cleanup",
+          args: { key: "Escape" },
+        },
+        {
+          id: "findCardList",
+          primitive: "locator.element_info",
+          effect: "verification",
+          args: { locator: { selector: "[data-testid='list']" } },
+          retry_until: "{% steps.findCardList.output.clickable_center.x != null %}",
+          max_attempts: 2,
+          on_error: "continue",
+        },
+      ],
+    },
+    async executePrimitive(call) {
+      if (call.name === "keyboard.press") return { ok: true, output: { pressed: true } };
+      return { ok: true, output: { candidates: [] } };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.failure_class, "control_not_ready");
+  assert.equal(result.error.mutation_may_have_committed, undefined);
+  assert.equal(result.steps[0].effect, "cleanup");
+  assert.equal(result.steps[1].effect, "verification");
+});
+
+test("unannotated legacy keyboard cleanup conservatively makes later readiness failure indeterminate", async () => {
+  const result = await executeWorkflowAction({
+    actionName: "trello.card.by_title.open",
+    workflow: {
+      version: 1,
+      expression_language: "jsonata",
+      steps: [
+        { id: "closeAnyOpenCard", primitive: "keyboard.press", args: { key: "Escape" } },
+        {
+          id: "findCardList",
+          primitive: "locator.element_info",
+          args: { locator: { selector: "[data-testid='card-name']" } },
+          retry_until: "{% false %}",
+          max_attempts: 1,
+          on_error: "continue",
+        },
+      ],
+    },
+    async executePrimitive(call) {
+      if (call.name === "keyboard.press") return { ok: true, output: { pressed: true } };
+      return { ok: true, output: { candidates: [] } };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.failure_class, "mutation_outcome_indeterminate");
+  assert.equal(result.steps[0].effect, "irreversible_mutation");
+  assert.equal(result.steps[1].effect, "observation");
+});
+
+test("explicit irreversible mutation makes later verification failure indeterminate regardless of primitive name", async () => {
+  const result = await executeWorkflowAction({
+    actionName: "custom.mutation.then.verify",
+    workflow: {
+      version: 1,
+      expression_language: "jsonata",
+      steps: [
+        {
+          id: "applyDomainChange",
+          primitive: "custom.execute",
+          effect: "irreversible_mutation",
+          args: {},
+        },
+        {
+          id: "verifyDomainChange",
+          primitive: "locator.element_info",
+          effect: "verification",
+          args: {},
+          retry_until: "{% false %}",
+          max_attempts: 1,
+          on_error: "continue",
+        },
+      ],
+    },
+    async executePrimitive(call) {
+      if (call.name === "custom.execute") return { ok: true, output: { changed: true } };
+      return { ok: true, output: {} };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.failure_class, "mutation_outcome_indeterminate");
+  assert.equal(result.error.mutation_may_have_committed, true);
+  assert.equal(result.steps[0].effect, "irreversible_mutation");
+  assert.equal(result.steps[1].effect, "verification");
+});
+
+test("explicit reversible mutation remains indeterminate until an independent reversal is represented", async () => {
+  const result = await executeWorkflowAction({
+    actionName: "custom.reversible.then.verify",
+    workflow: {
+      version: 1,
+      expression_language: "jsonata",
+      steps: [
+        { id: "temporarilyChangeState", primitive: "custom.toggle", effect: "reversible_mutation", args: {} },
+        {
+          id: "verifyState",
+          primitive: "locator.element_info",
+          effect: "verification",
+          args: {},
+          retry_until: "{% false %}",
+          max_attempts: 1,
+          on_error: "continue",
+        },
+      ],
+    },
+    async executePrimitive(call) {
+      if (call.name === "custom.toggle") return { ok: true, output: { toggled: true } };
+      return { ok: true, output: {} };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.failure_class, "mutation_outcome_indeterminate");
+  assert.equal(result.error.mutation_may_have_committed, true);
+  assert.equal(result.steps[0].effect, "reversible_mutation");
+});
+
 test("workflow failures classify overlay interference from pointer failures", async () => {
   const result = await executeWorkflowAction({
     actionName: "overlay.blocked.click",
@@ -915,7 +1127,12 @@ test("settle_after locator timeout FAILS its step and halts the workflow", async
   assert.equal(result.error.step_id, "openCard");
   assert.equal(result.error.cause.code, "workflow_settle_timeout");
   assert.equal(result.error.cause.cause.reason, "timeout");
+  assert.equal(result.error.failure_class, "mutation_outcome_indeterminate");
+  assert.equal(result.error.failed_state, "postcondition");
+  assert.equal(result.error.outcome, "indeterminate");
+  assert.equal(result.error.mutation_may_have_committed, true);
   assert.equal(result.error.retryable, false);
+  assert.match(result.error.safe_recovery, /do not retry/i);
   // The step after the failed settle must NOT run — that marching-on is the whole defect.
   assert.deepEqual(primitiveCalls, ["pointer.click", "locator.wait_for"]);
   const openStep = result.steps.find((step) => step.id === "openCard");
@@ -1131,4 +1348,60 @@ test("validateWorkflow keeps default caps when limits only provides knownPrimiti
   );
   assert.equal(result.ok, false);
   assert.match(result.error.message, /too many steps/);
+});
+
+test("target_guard refuses an effect unless the prior locator resolved exactly one candidate", async () => {
+  const calls = [];
+  const workflow = {
+    version: 1,
+    expression_language: "jsonata",
+    steps: [
+      { id: "find", primitive: "locator.element_info", effect: "observation" },
+      {
+        id: "click",
+        primitive: "pointer.click",
+        effect: "reversible_mutation",
+        target_guard: { source_step: "find", candidate_count: 1 },
+        args: { x: "{% steps.find.output.clickable_center.x %}" },
+      },
+    ],
+  };
+  const failed = await executeWorkflowAction({
+    workflow,
+    executePrimitive: async (call) => {
+      calls.push(call);
+      if (call.name === "locator.element_info") return { ok: true, output: { candidate_count: 2, ambiguous: true, clickable_center: { x: 1 } } };
+      return { ok: true };
+    },
+  });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.error.cause.code, "workflow_target_not_unique");
+  assert.equal(failed.error.cause.effect_performed, false);
+  assert.equal(calls.filter((call) => call.name === "pointer.click").length, 0);
+
+  calls.length = 0;
+  const passed = await executeWorkflowAction({
+    workflow,
+    executePrimitive: async (call) => {
+      calls.push(call);
+      if (call.name === "locator.element_info") return { ok: true, output: { candidate_count: 1, ambiguous: false, clickable_center: { x: 1 } } };
+      return { ok: true, output: { clicked: true } };
+    },
+  });
+  assert.equal(passed.ok, true);
+  assert.equal(calls.filter((call) => call.name === "pointer.click").length, 1);
+});
+
+test("target_guard must reference an earlier step and exact candidate count one", () => {
+  const result = validateWorkflow({
+    version: 1,
+    expression_language: "jsonata",
+    steps: [{
+      id: "click",
+      primitive: "pointer.click",
+      target_guard: { source_step: "missing", candidate_count: 1 },
+    }],
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.error.message, /target guards/);
 });

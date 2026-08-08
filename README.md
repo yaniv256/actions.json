@@ -26,10 +26,13 @@ a **first-party map** a site owner publishes so every agent understands their
 site.
 
 <p align="center">
-  <a href="https://yaniv256.github.io/actions.json/decks/schema-v1-proposal-deck.html">
-    <img src="docs/assets/schema-v1-teaching-deck-preview.gif" alt="Animated preview of the actions.json schema v1 teaching deck" width="960">
-  </a>
+  <img src="docs/assets/agent-kanban-trello-actions-json.jpg" alt="Coding agents operating a live Trello board through actions.json, organized as a kanban board with Backlog, Next, Blocked, and In Progress lists" width="960">
 </p>
+
+<p align="center"><em>Four coding agents running at once, each operating a real
+website through <code>actions.json</code>. The Trello board on the right is their
+shared task memory — read and written by the agents through declared actions,
+and legible to a human at a glance.</em></p>
 
 ## Quickstart
 
@@ -62,6 +65,12 @@ The bridge drives a browser through the Chrome extension, so install that next:
 Connect it to the bridge and take control of a tab. Ask your agent to explore a
 site and write an `actions.json` for it — the agent loads the map and your
 OpenAI key into the browser for you.
+
+The extension asks for the `debugger` permission and `<all_urls>` host access,
+and the bridge holds your OpenAI key. Before you install, read what those are
+for and what bounds them: **[SECURITY.md](SECURITY.md)** — threat model,
+per-tab authorization, credential custody, and known residual risks, each cited
+to the line of source that implements it.
 
 Full walkthrough, plus the standalone-extension path: **[Getting
 Started](https://yaniv256.github.io/actions.json/getting-started.html)**.
@@ -120,6 +129,27 @@ A projection can declare **markers**: named, typed promises (this marker's
 cursor ends *here*; this one's pointer ends *there*) built from portable
 primitives, with no stored coordinates. `marker.query`, `cursor.move_to`, and
 `pointer.move_to` resolve them live — re-resolvable positions even on a canvas.
+
+### A worked use case — a Trello board as an agent's task memory
+
+The screenshot at the top is a real session: several coding agents running at
+once, each operating a website through `actions.json`. On the right, a Trello
+board is doing a specific job — it is the agents' **task memory**.
+
+A long-running agent forgets everything between sessions, so it keeps its work
+somewhere durable and structured. Trello is a good place for that, because a
+human can glance at the board and see the whole state — Backlog, Next, Blocked,
+In Progress, Done. `actions.json` is what lets the agent *operate* that same
+board: it moves a card by a declared action, then reads the board back to
+confirm the card actually moved — no scraping, no guessing which button matters,
+and never trusting that a write worked without an independent read.
+
+The discipline for using a board this way — one goal in progress, a checklist on
+it, blocked work linked to what unblocks it — is a portable skill,
+**[agent-kanban](https://github.com/yaniv256/agent-kanban)**. It works over any
+store (Trello, Obsidian, plain files, Linear, Jira), and recommends
+Trello-via-`actions.json` for a single reason: it is the one option that is
+agent-driveable and human-legible at the same time.
 
 ### And the platform underneath
 
@@ -235,10 +265,17 @@ subcommand (the MCP server a coding agent connects to):
 
 ```bash
 cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- mcp \
-  --bind 0.0.0.0:17345 \
+  --bind 127.0.0.1:17345 \
   --actions extensions/chrome-overlay-runtime/actions/overlay.actions.json \
   --storage-root .storage
 ```
+
+`0.0.0.0:17345` binds every network interface and is only for cross-machine
+operation. `GET /runtimes` needs no credential — it reports the URL and title of
+every authorized tab — so a non-loopback bind publishes your browsing to anyone
+who can route to the port. Restrict it with a host firewall and a private
+network such as Tailscale, and never expose port 17345 to the public internet.
+See [Security](SECURITY.md).
 
 ## Repository Map
 

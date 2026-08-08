@@ -1,15 +1,16 @@
 import {
-  listSiteActionsFromBundle,
+  listSiteActionsBoundedFromBundle,
+  listExecutableRuntimeActionNames,
   listSiteStorageFilesFromBundle,
   readSiteStorageFileFromBundle,
   resolveSiteActionFromBundle,
   siteBlockedPrimitiveNamesFromBundle,
 } from "./agent/local-actions-catalog.mjs";
 import {
-  buildSemanticDeltas,
-  diffStates,
+  INTERNAL_STATE_PROJECTION_MAX_BYTES,
   listStateProjectionsFromBundle,
-  verifyStatePostcondition,
+  stateProjectionCacheNamespaces,
+  resolveStateProjectionSemanticConfig,
 } from "./agent/state-projections.mjs";
 import {
   buildRealtimeToolCatalog,
@@ -18,6 +19,19 @@ import {
 import {
   BridgeOutputDeliveryQueue,
 } from "./agent/bridge-output-delivery.mjs";
+import {
+  bridgeAuthHeaders,
+  loadBridgeHandshakeSecret as loadSharedBridgeHandshakeSecret,
+} from "./agent/hosted-tool-executor.mjs";
+import { buildCorpusArtifact } from "./agent/corpus-build.mjs";
+import { loadCorpusIndexFromBundle } from "./agent/corpus-index.mjs";
+import { embedQuery, embedTexts } from "./agent/corpus-embedding.mjs";
+import { searchCorpus } from "./agent/corpus-search.mjs";
+import { createIndexedDbAdapter } from "./agent/indexeddb-adapter.mjs";
+import { createProjectionEmbeddingCache } from "./agent/projection-embedding-cache.mjs";
+import { runProjectionSemanticSearch } from "./agent/projection-semantic-search.mjs";
+import jsonata from "./agent/vendor/jsonata.mjs";
+import { loadOpenAiApiKey } from "./agent/credential-store.mjs";
 import { ShimTree } from "./a11y/automation_shim.js";
 // Static import — MV3 service workers DISALLOW dynamic import() (HTML spec).
 // A dynamic import here silently failed and dropped the entire announcement
@@ -33,6 +47,12 @@ import {
   TransferBufferError,
   transferInsertValue,
 } from "./agent/transfer-buffer.mjs";
+import {
+  base64ToBytes,
+  bytesToBase64,
+  FileTransferError,
+  FileTransferStore,
+} from "./agent/file-transfer.mjs";
 import {
   executeWorkflowAction,
 } from "./agent/workflow-actions.mjs";
@@ -53,8 +73,35 @@ import {
   agentEventFromSessionEvent,
 } from "./agent/agent-event-map.mjs";
 import { DEFAULT_MODEL } from "./agent/realtime-model.mjs";
+import {
+  loadProtofaceCredentials,
+  saveProtofaceCredentials,
+} from "./agent/protoface-credential-store.mjs";
+import { DebuggerSessionManager } from "./agent/debugger-session-manager.mjs";
+import {
+  createDirectProtofaceSession,
+  endDirectProtofaceSession,
+} from "../dist/protoface-broker-bundle.mjs";
+import {
+  createGroupStore,
+} from "./delegated-agent/group-store.mjs";
+import {
+  claimTabWithDurableAuthority,
+} from "./agent/tab-ownership-authority.mjs";
+import {
+  classifyProposalState,
+  deriveDiscoveryProposal,
+  deriveHomeLease,
+  senderMatchesLease,
+} from "./delegated-agent/home-lease.mjs";
+import {
+  createProjectionCacheStore,
+  readDeclaredProjectionCache,
+} from "./agent/projection-cache-store.mjs";
+import { applyProjectionCacheInvalidations } from "./agent/projection-cache-policy.mjs";
 
-const SESSION_STATE_KEY = "ACTIONS_JSON_OVERLAY_SESSION_STATE";
+const SESSION_STATE_KEY = "actionsJsonOrdinarySessions.v2";
+const LEGACY_SESSION_STATE_KEY = "ACTIONS_JSON_OVERLAY_SESSION_STATE";
 const AGENT_KEY_STORAGE_KEY = "ACTIONS_JSON_OPENAI_API_KEY";
 const AGENT_MEMORY_STORAGE_KEY = "ACTIONS_JSON_AGENT_MEMORY_V1";
 const EXTENSION_STORAGE_BUNDLE_KEY = "actionsJsonStorageBundle";
@@ -64,13 +111,16 @@ const EXTENSION_STORAGE_BUNDLE_KEY = "actionsJsonStorageBundle";
 // 80 could not hold one full task run (~150 events), which blinded post-hoc
 // debugging and made memory-contamination checks impossible.
 const MAX_AGENT_LOG_EVENTS = 500;
-const DEFAULT_SESSION_ID = "actions-json-default";
+const DEFAULT_SESSION_ID = "extension:default";
+const LEGACY_DEFAULT_SESSION_ID = "actions-json-default";
 const DEFAULT_SESSION_GROUP_TITLE = "actions.json";
 const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:17345/extension";
 const AGENT_OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
 const AGENT_OFFSCREEN_TARGET = "actions-json-agent-offscreen";
 const EXTENSION_ACTIONS_URL = "actions/overlay.actions.json";
 const BACKGROUND_BRIDGE_CONNECT_TIMEOUT_MS = 8000;
+const PROTOFACE_CREATE_CALLER_TIMEOUT_MS = 7000;
+const PROTOFACE_END_CALLER_TIMEOUT_MS = 1500;
 // Tab-lifecycle + dialog-dismiss tools are handled only in the background
 // service worker (executeBackgroundHostedToolCall), not in content.js. Direct
 // MCP-bridge tool calls (type:"action_call") must be intercepted in
@@ -82,6 +132,21 @@ const BRIDGE_BACKGROUND_ACTION_NAMES = new Set([
   "browser.open_tab",
   "browser.close_tab",
   "browser.dismiss_dialog",
+  // corpus.search reads the storage bundle from chrome.storage.local and never
+  // touches the page, so it lives only here. Missing from this set it was
+  // ADVERTISED by the bridge, ROUTED by the bridge, PRESENT in the packaged
+  // extension, and still answered `handler_failed: No handler implemented` on a
+  // direct MCP call — because that call falls through to a content script with
+  // no handler for it (found by a tester against 0.1.246, 2026-07-27).
+  //
+  // Every guard was green: the catalog test proved advertisement, the packaging
+  // test proved the module ships, and the live smoke proved the handler runs —
+  // because the smoke called executeLocalHostedToolCall directly and never
+  // exercised this path. Implementing a primitive on ONE of two dispatch paths
+  // looks identical to implementing it. bridge-dispatch-reachability.test.mjs
+  // now asserts the property.
+  "corpus.search",
+  "corpus.build",
   // a11y primitives run on the CDP-backed AutomationShim, which lives here in
   // the background worker (it owns chrome.debugger) — forwarding them to
   // content.js executeAction would throw "No handler implemented".
@@ -130,13 +195,7 @@ const getKnownPrimitiveNames = () => {
           return null;
         }
         const manifest = await response.json();
-        const primitives = manifest?.primitive_dictionary?.primitives;
-        if (!Array.isArray(primitives) || primitives.length === 0) {
-          return null;
-        }
-        const names = primitives
-          .map((primitive) => primitive?.name)
-          .filter((name) => typeof name === "string" && name);
+        const names = listExecutableRuntimeActionNames(manifest);
         return names.length > 0 ? names : null;
       } catch (_error) {
         // Fail open: a manifest read problem must not block workflow execution.
@@ -174,16 +233,113 @@ const ROUTE_ERROR_NEXT_STEP = {
     "No claimed tab resolved for this call. Claim the target tab (claim_tab), then retry.",
 };
 
+const siteActionExceptionEnvelope = (error) => ({
+  code: error?.code || "site_action_failed",
+  message: error?.message || String(error),
+  recoverable: typeof error?.recoverable === "boolean" ? error.recoverable : true,
+  ...(typeof error?.retryable === "boolean" ? { retryable: error.retryable } : {}),
+  ...(error?.next_step ? { next_step: error.next_step } : {}),
+});
+
 const transferBuffer = new TransferBuffer();
-const stateProjectionSnapshots = new Map();
+const fileTransferStore = new FileTransferStore();
+const FILE_TRANSFER_DB = "actions-json-file-transfer-v1";
+const FILE_TRANSFER_ENTRIES = "entries";
+const FILE_TRANSFER_CHUNKS = "chunks";
+const FILE_TRANSFER_IO_TIMEOUT_MS = 3000;
+let fileTransferDatabasePromise;
+let fileTransferHydrated = false;
+let fileTransferLane = Promise.resolve();
+
+const fileTransferDatabase = () => {
+  if (!fileTransferDatabasePromise) {
+    fileTransferDatabasePromise = new Promise((resolve, reject) => {
+      const request = indexedDB.open(FILE_TRANSFER_DB, 2);
+      request.onupgradeneeded = () => {
+        for (const name of [...request.result.objectStoreNames]) request.result.deleteObjectStore(name);
+        request.result.createObjectStore(FILE_TRANSFER_ENTRIES, { keyPath: "transferId" });
+        request.result.createObjectStore(FILE_TRANSFER_CHUNKS, { keyPath: ["transferId", "index"] });
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => {
+        fileTransferDatabasePromise = null;
+        reject(request.error || new Error("File transfer database open failed."));
+      };
+    });
+  }
+  return withTimeout(fileTransferDatabasePromise, FILE_TRANSFER_IO_TIMEOUT_MS, "file transfer database open");
+};
+
+const fileTransferReadSnapshot = async () => {
+  const database = await fileTransferDatabase();
+  return withTimeout(new Promise((resolve, reject) => {
+    const transaction = database.transaction([FILE_TRANSFER_ENTRIES, FILE_TRANSFER_CHUNKS], "readonly");
+    const entryRequest = transaction.objectStore(FILE_TRANSFER_ENTRIES).getAll();
+    const chunkRequest = transaction.objectStore(FILE_TRANSFER_CHUNKS).getAll();
+    transaction.oncomplete = () => {
+      const chunksByTransfer = new Map();
+      for (const chunk of chunkRequest.result || []) {
+        const list = chunksByTransfer.get(chunk.transferId) || [];
+        list[chunk.index] = Uint8Array.from(chunk.bytes || []);
+        chunksByTransfer.set(chunk.transferId, list);
+      }
+      resolve((entryRequest.result || []).map((entry) => ({
+        ...entry,
+        chunks: chunksByTransfer.get(entry.transferId) || [],
+      })));
+    };
+    transaction.onerror = () => reject(transaction.error || new Error("File transfer state read failed."));
+  }), FILE_TRANSFER_IO_TIMEOUT_MS, "file transfer state read");
+};
+
+const fileTransferPersistMutation = async (primitive, args = {}) => {
+  if (["file.transfer.status", "file.transfer.download.read_chunk", "file.transfer.upload.consume"].includes(primitive)) return;
+  const database = await fileTransferDatabase();
+  const entry = fileTransferStore.exportSnapshot().find((candidate) => candidate.transferId === args.transfer_id);
+  await withTimeout(new Promise((resolve, reject) => {
+    const transaction = database.transaction([FILE_TRANSFER_ENTRIES, FILE_TRANSFER_CHUNKS], "readwrite");
+    const entries = transaction.objectStore(FILE_TRANSFER_ENTRIES);
+    const chunks = transaction.objectStore(FILE_TRANSFER_CHUNKS);
+    if (!entry) {
+      entries.delete(args.transfer_id);
+    } else {
+      const { chunks: entryChunks, ...metadata } = entry;
+      entries.put(metadata);
+      if (primitive === "file.transfer.chunk") {
+        const index = Number(args.index);
+        const bytes = entryChunks[index];
+        if (bytes) chunks.put({ transferId: entry.transferId, index, bytes });
+      } else if (primitive === "file.transfer.download.capture") {
+        for (let index = 0; index < entryChunks.length; index += 1) {
+          chunks.put({ transferId: entry.transferId, index, bytes: entryChunks[index] });
+        }
+      } else if (["file.transfer.upload.complete", "file.transfer.download.complete", "file.transfer.cancel"].includes(primitive)) {
+        const range = IDBKeyRange.bound([entry.transferId, 0], [entry.transferId, Number.MAX_SAFE_INTEGER]);
+        chunks.delete(range);
+      }
+    }
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error("File transfer state write failed."));
+    transaction.onabort = () => reject(transaction.error || new Error("File transfer state write aborted."));
+  }), FILE_TRANSFER_IO_TIMEOUT_MS, "file transfer state write");
+};
+
+const ensureFileTransferHydrated = async () => {
+  if (fileTransferHydrated) return;
+  fileTransferStore.importSnapshot(await fileTransferReadSnapshot());
+  fileTransferHydrated = true;
+};
 const bridgeOutputDeliveryQueue = new BridgeOutputDeliveryQueue({
   emitDiagnostic: (event) => appendBackgroundDiagnosticEvent(event),
 });
 
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (details) => {
   const existing = await chrome.storage.local.get("bridgeUrl");
   if (!existing.bridgeUrl) {
     await chrome.storage.local.set({ bridgeUrl: DEFAULT_BRIDGE_URL });
+  }
+  if (details?.reason === "install") {
+    await chrome.runtime.openOptionsPage();
   }
 });
 
@@ -193,7 +349,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 // promise) MUST NOT hang the caller forever. Every claimed_tabs.* handler awaits
 // SessionStore readiness, so an unbounded init promise wedges all tab-lifecycle
 // calls into 504s while non-store handlers keep working. Bounding it turns a
-// permanent hang into a fast, retryable degradation. (investigations/bridge-504-timeouts.md)
+// permanent hang into a fast, retryable degradation. (the internal investigation record)
 const SESSION_STORE_IO_TIMEOUT_MS = 3000;
 
 // NOTE: withTimeout(promise, ms, label) is declared once later in this module and
@@ -207,17 +363,26 @@ const SESSION_STORE_IO_TIMEOUT_MS = 3000;
 // worker mid-access and leaves a dead promise; bounding each access turns that
 // permanent hang into a fast rejection the caller can degrade from. Callers own
 // the readiness/degrade lifecycle (e.g. SessionStore.ensureReady); this helper
-// owns only the timeout. (docs/plans/2026-07-07-001; investigations/bridge-504-timeouts.md)
+// owns only the timeout. (the implementation plan; the internal investigation record)
 const boundedStorageGet = (key, ms = SESSION_STORE_IO_TIMEOUT_MS) => {
   return withTimeout(chrome.storage.local.get(key), ms, "storage.local.get");
 };
 const boundedStorageSet = (items, ms = SESSION_STORE_IO_TIMEOUT_MS) => {
   return withTimeout(chrome.storage.local.set(items), ms, "storage.local.set");
 };
+const boundedStorageRemove = (keys, ms = SESSION_STORE_IO_TIMEOUT_MS) => {
+  return withTimeout(chrome.storage.local.remove(keys), ms, "storage.local.remove");
+};
+const projectionCacheStore = createProjectionCacheStore({
+  storage: {
+    get: (key) => boundedStorageGet(key),
+    set: (items) => boundedStorageSet(items),
+  },
+});
 
 class SessionStore {
   constructor() {
-    this.state = { sessions: {} };
+    this.state = { schemaVersion: 2, groups: {}, tabOwners: {} };
     // Self-healing readiness: a one-shot `this.ready = this.load()` that stalls
     // wedges EVERY reader forever (the 504 root cause). Instead, ensureReady()
     // re-initializes the load promise whenever the previous attempt rejected or
@@ -225,15 +390,90 @@ class SessionStore {
     // the whole tab-lifecycle surface.
     this.readyPromise = null;
     this.loaded = false;
+    this.invalidPersistedState = false;
+  }
+
+  normalizeClaim(tabId, claim = {}) {
+    const assignedAt = typeof claim.assignedAt === "string" && Number.isFinite(Date.parse(claim.assignedAt))
+      ? claim.assignedAt
+      : new Date(0).toISOString();
+    return {
+      ...claim,
+      schemaVersion: 1,
+      tabId,
+      windowId: Number.isInteger(claim.windowId) && claim.windowId >= 0 ? claim.windowId : 0,
+      currentDocumentId: typeof claim.currentDocumentId === "string"
+        ? claim.currentDocumentId
+        : (typeof claim.documentId === "string" ? claim.documentId : null),
+      currentRuntimeId: typeof claim.currentRuntimeId === "string"
+        ? claim.currentRuntimeId
+        : (typeof claim.runtimeId === "string" ? claim.runtimeId : null),
+      assignedAt,
+    };
+  }
+
+  normalizeState(value) {
+    if (!value || typeof value !== "object" || value.schemaVersion !== 2 || !value.groups || typeof value.groups !== "object") {
+      return null;
+    }
+    const groups = structuredClone(value.groups);
+    const tabOwners = {};
+    for (const [groupId, group] of Object.entries(groups)) {
+      if (!group || typeof group !== "object" || group.id !== groupId || !group.tabs || typeof group.tabs !== "object") {
+        return null;
+      }
+      for (const [tabIdKey, rawClaim] of Object.entries(group.tabs)) {
+        const tabId = Number(tabIdKey);
+        if (!Number.isInteger(tabId) || tabId < 0 || tabOwners[tabIdKey]) return null;
+        group.tabs[tabIdKey] = this.normalizeClaim(tabId, rawClaim);
+        tabOwners[tabIdKey] = groupId;
+      }
+    }
+    const ordinary = groups[DEFAULT_SESSION_ID];
+    if (ordinary && (ordinary.kind !== "extension" || ordinary.id !== DEFAULT_SESSION_ID)) return null;
+    return { schemaVersion: 2, groups, tabOwners };
+  }
+
+  migrateLegacyState(value) {
+    const legacy = value?.sessions?.[LEGACY_DEFAULT_SESSION_ID]
+      || value?.sessions?.[DEFAULT_SESSION_ID];
+    const groups = {};
+    if (legacy && typeof legacy === "object") {
+      const tabs = {};
+      for (const [tabIdKey, claim] of Object.entries(legacy.tabs && typeof legacy.tabs === "object" ? legacy.tabs : {})) {
+        const tabId = Number(tabIdKey);
+        if (!Number.isInteger(tabId) || tabId < 0) continue;
+        tabs[tabIdKey] = this.normalizeClaim(tabId, claim);
+      }
+      groups[DEFAULT_SESSION_ID] = {
+        schemaVersion: 2,
+        id: DEFAULT_SESSION_ID,
+        kind: "extension",
+        title: typeof legacy.title === "string" && legacy.title ? legacy.title : DEFAULT_SESSION_GROUP_TITLE,
+        status: "live",
+        activeTabId: Number.isInteger(legacy.activeTabId) ? legacy.activeTabId : null,
+        tabs,
+        chromeGroupIdsByWindow: {},
+      };
+    }
+    return this.normalizeState({ schemaVersion: 2, groups, tabOwners: {} });
   }
 
   async load() {
-    const stored = await boundedStorageGet(SESSION_STATE_KEY);
-    const value = stored[SESSION_STATE_KEY];
-    if (value && typeof value === "object") {
-      this.state = {
-        sessions: value.sessions && typeof value.sessions === "object" ? value.sessions : {},
-      };
+    let stored = await boundedStorageGet(SESSION_STATE_KEY);
+    let value = stored[SESSION_STATE_KEY];
+    if (value === undefined && LEGACY_SESSION_STATE_KEY !== SESSION_STATE_KEY) {
+      stored = await boundedStorageGet(LEGACY_SESSION_STATE_KEY);
+      value = stored[LEGACY_SESSION_STATE_KEY];
+    }
+    const normalized = value?.schemaVersion === 2
+      ? this.normalizeState(value)
+      : this.migrateLegacyState(value);
+    if (!normalized) {
+      this.invalidPersistedState = value !== undefined;
+      this.state = { schemaVersion: 2, groups: {}, tabOwners: {} };
+    } else {
+      this.state = normalized;
     }
     this.loaded = true;
   }
@@ -261,34 +501,344 @@ class SessionStore {
   }
 
   async save() {
-    await boundedStorageSet({ [SESSION_STATE_KEY]: this.state })
-      .catch(() => { /* best effort; in-memory state remains authoritative this run */ });
+    if (this.invalidPersistedState) return false;
+    const normalized = this.normalizeState(this.state);
+    if (!normalized) return false;
+    const persisted = await boundedStorageSet({ [SESSION_STATE_KEY]: normalized })
+      .then(() => true)
+      .catch(() => false);
+    this.applyNormalizedState(normalized);
+    return persisted;
+  }
+
+  snapshotState() {
+    return structuredClone(this.state);
+  }
+
+  restoreState(snapshot) {
+    const normalized = this.normalizeState(snapshot);
+    if (!normalized) throw new Error("Cannot restore invalid ordinary-session state");
+    this.applyNormalizedState(normalized);
+  }
+
+  rollbackClaimMetadata({ groupId, tabId, expectedRevision, snapshot }) {
+    const normalizedSnapshot = this.normalizeState(snapshot);
+    if (!normalizedSnapshot) throw new Error("Cannot restore invalid ordinary-session state");
+    const tabKey = String(tabId);
+    const currentGroup = this.state.groups[groupId];
+    const currentClaim = currentGroup?.tabs?.[tabKey];
+    if (currentClaim?.ownershipRevision !== expectedRevision) return false;
+
+    const previousGroup = normalizedSnapshot.groups[groupId] || null;
+    const previousClaim = previousGroup?.tabs?.[tabKey] || null;
+    if (previousClaim) {
+      currentGroup.tabs[tabKey] = structuredClone(previousClaim);
+    } else {
+      delete currentGroup.tabs[tabKey];
+    }
+    if (currentGroup.activeTabId === tabId) {
+      currentGroup.activeTabId = previousGroup?.activeTabId ?? null;
+    }
+
+    const normalizedCurrent = this.normalizeState(this.state);
+    if (!normalizedCurrent) throw new Error("Cannot compensate invalid ordinary-session state");
+    this.applyNormalizedState(normalizedCurrent);
+    return true;
+  }
+
+  applyNormalizedState(normalized) {
+    // Keep group objects identity-stable: callers retain the object returned by
+    // getSession() while they perform a lifecycle operation. Replacing the full
+    // state after one save would detach that live reference and silently drop
+    // later URL/active-tab updates.
+    this.state.schemaVersion = 2;
+    this.state.tabOwners = normalized.tabOwners;
+    for (const [groupId, normalizedGroup] of Object.entries(normalized.groups)) {
+      const current = this.state.groups[groupId];
+      if (current && typeof current === "object") {
+        for (const key of Object.keys(current)) delete current[key];
+        Object.assign(current, normalizedGroup);
+      } else {
+        this.state.groups[groupId] = normalizedGroup;
+      }
+    }
+    for (const groupId of Object.keys(this.state.groups)) {
+      if (!normalized.groups[groupId]) delete this.state.groups[groupId];
+    }
   }
 
   async getSession(sessionId = DEFAULT_SESSION_ID) {
     await this.ensureReady();
-    const existing = this.state.sessions[sessionId];
+    if (this.invalidPersistedState) {
+      throw new Error("Invalid persisted ordinary-session state");
+    }
+    if (sessionId !== DEFAULT_SESSION_ID) {
+      throw new Error("SessionStore requires the explicit ordinary group ID");
+    }
+    const existing = this.state.groups[sessionId];
     if (existing && typeof existing === "object") {
       return existing;
     }
     const created = {
-      chromeGroupId: null,
+      schemaVersion: 2,
+      id: DEFAULT_SESSION_ID,
+      kind: "extension",
       title: DEFAULT_SESSION_GROUP_TITLE,
+      status: "live",
       activeTabId: null,
       tabs: {},
+      chromeGroupIdsByWindow: {},
     };
-    this.state.sessions[sessionId] = created;
+    this.state.groups[sessionId] = created;
     await this.save();
-    return created;
+    return this.state.groups[sessionId] || created;
   }
 
   async getSessionEntries() {
     await this.ensureReady();
-    return Object.entries(this.state.sessions);
+    if (this.invalidPersistedState) {
+      throw new Error("Invalid persisted ordinary-session state");
+    }
+    return Object.entries(this.state.groups)
+      .filter(([groupId]) => groupId === DEFAULT_SESSION_ID);
+  }
+
+  async ownerOfTab(tabId) {
+    await this.ensureReady();
+    if (this.invalidPersistedState) {
+      throw new Error("Invalid persisted ordinary-session state");
+    }
+    return this.state.tabOwners[String(tabId)] || null;
   }
 }
 
 const sessionStore = new SessionStore();
+const delegatedGroupStore = createGroupStore({
+  storage: {
+    get: (key) => boundedStorageGet(key),
+    set: (items) => boundedStorageSet(items),
+    remove: (keys) => boundedStorageRemove(keys),
+  },
+  // U2 deliberately has no metadata-only authority path. U3/U4 replace this
+  // deny-all lookup with the approval store backed by digest-verified immutable
+  // bundle bytes; reading chrome.storage metadata alone must never grant a group.
+  approvalLookup: async () => null,
+  activationIdFactory: () => crypto.randomUUID(),
+});
+
+let ordinaryAuthorityReadyPromise = null;
+const ensureOrdinaryAuthorityReady = () => {
+  if (!ordinaryAuthorityReadyPromise) {
+    ordinaryAuthorityReadyPromise = (async () => {
+      const ordinary = await sessionStore.getSession(DEFAULT_SESSION_ID);
+      const initialized = await delegatedGroupStore.initialize({
+        legacyState: {
+          sessions: {
+            [LEGACY_DEFAULT_SESSION_ID]: structuredClone(ordinary),
+          },
+        },
+      });
+      if (!initialized) throw new Error("Tab ownership authority is unavailable");
+      return delegatedGroupStore.adoptOrdinaryGroup(ordinary);
+    })().catch((error) => {
+      ordinaryAuthorityReadyPromise = null;
+      throw error;
+    });
+  }
+  return ordinaryAuthorityReadyPromise;
+};
+
+const readOrdinaryTabOwnership = async (tabId) => {
+  await ensureOrdinaryAuthorityReady();
+  const ownership = await delegatedGroupStore.authoritativeClaimOfTab(tabId);
+  if (ownership.state === "unavailable") {
+    throw new Error(`Tab ownership authority unavailable: ${ownership.reason}`);
+  }
+  return ownership;
+};
+
+const requireOrdinaryTabOwnership = async (tabId, expectedRevision = null) => {
+  const ownership = await readOrdinaryTabOwnership(tabId);
+  if (ownership.state !== "owned" || ownership.groupId !== DEFAULT_SESSION_ID) {
+    throw new Error(`Chrome tab ${tabId} is not durably claimed by ${DEFAULT_SESSION_ID}`);
+  }
+  if (
+    expectedRevision !== null
+    && ownership.lease?.ownershipRevision !== expectedRevision
+  ) {
+    throw new Error(`Chrome tab ${tabId} durable ownership lease is stale`);
+  }
+  return ownership;
+};
+
+const ownershipMatchesOrdinaryClaim = (ownership, claim) => (
+  ownership.state === "owned"
+  && ownership.groupId === DEFAULT_SESSION_ID
+  && (ownership.lease?.ownershipRevision || null) === (claim?.ownershipRevision || null)
+);
+
+// Discovery is deliberately ephemeral: the document-start broker re-announces
+// the immutable proposal on every fresh document and BFCache restoration. Trust
+// remains in the durable approval store introduced by U2/U4; a proposal row is
+// only an availability signal and can never grant delegated authority.
+const delegatedProposalsByTab = new Map();
+const delegatedHomeLeasesByTab = new Map();
+const DELEGATED_PROPOSALS_STORAGE_KEY = "actionsJsonDelegatedProposals.v1";
+let delegatedProposalWriteLane = Promise.resolve();
+
+const readDelegatedProposalRecords = async () => {
+  const stored = await chrome.storage.session.get(DELEGATED_PROPOSALS_STORAGE_KEY);
+  const records = stored?.[DELEGATED_PROPOSALS_STORAGE_KEY];
+  return records && typeof records === "object" ? records : {};
+};
+
+const persistDelegatedProposalRecord = (tabId, record) => {
+  const task = delegatedProposalWriteLane.then(async () => {
+    const records = await readDelegatedProposalRecords();
+    records[String(tabId)] = structuredClone(record);
+    await chrome.storage.session.set({ [DELEGATED_PROPOSALS_STORAGE_KEY]: records });
+  });
+  delegatedProposalWriteLane = task.catch(() => {});
+  return task;
+};
+
+const removeDelegatedProposalRecord = (tabId) => {
+  const task = delegatedProposalWriteLane.then(async () => {
+    const records = await readDelegatedProposalRecords();
+    delete records[String(tabId)];
+    await chrome.storage.session.set({ [DELEGATED_PROPOSALS_STORAGE_KEY]: records });
+  });
+  delegatedProposalWriteLane = task.catch(() => {});
+  return task;
+};
+
+const setDelegatedProposalBadge = async (tabId, state) => {
+  const badge = state === "invalid" ? "!" : "A";
+  const color = state === "invalid" ? "#b64040" : "#126b7d";
+  await Promise.all([
+    chrome.action.setBadgeText({ tabId, text: badge }),
+    chrome.action.setBadgeBackgroundColor({ tabId, color }),
+    chrome.action.setTitle({
+      tabId,
+      title: state === "invalid" ? "Invalid website-agent declaration" : "Website agent available",
+    }),
+  ]);
+};
+
+const recordDelegatedDiscovery = async (message, sender) => {
+  const tabId = sender?.tab?.id;
+  if (!Number.isInteger(tabId)) throw new Error("Website-agent discovery requires a sender tab");
+  let record;
+  try {
+    const proposal = deriveDiscoveryProposal(message, sender);
+    // U3 has no metadata-only grant path. U4 replaces these null authorities
+    // with digest-proved durable approval/group lookups.
+    const state = classifyProposalState({ proposal, approval: null, group: null });
+    record = { proposal, state, error: null, updatedAt: new Date().toISOString() };
+  } catch (error) {
+    record = {
+      proposal: { valid: false, source: { tabId, documentId: sender?.documentId || null } },
+      state: "invalid",
+      error: error?.message || String(error),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+  delegatedProposalsByTab.set(tabId, record);
+  await persistDelegatedProposalRecord(tabId, record);
+  await setDelegatedProposalBadge(tabId, record.state);
+  return {
+    ok: record.state !== "invalid",
+    proposal: structuredClone(record),
+    ...(record.error ? { error: record.error } : {}),
+  };
+};
+
+const listDelegatedProposals = async (tabId) => {
+  const persisted = await readDelegatedProposalRecords().catch(() => ({}));
+  if (Number.isInteger(tabId)) {
+    const record = delegatedProposalsByTab.get(tabId) || persisted[String(tabId)];
+    return record ? [structuredClone(record)] : [];
+  }
+  const merged = { ...persisted };
+  for (const [recordTabId, record] of delegatedProposalsByTab) merged[String(recordTabId)] = record;
+  return Object.values(merged).map((record) => structuredClone(record));
+};
+
+const sendDelegatedHomeActivation = async (lease) => {
+  const response = await chrome.tabs.sendMessage(lease.tabId, {
+    type: "actions-json:delegated-agent-activate",
+    portNonce: lease.portNonce,
+    sourceOrigin: lease.origin,
+  }, { documentId: lease.documentId });
+  if (response?.ok !== true) throw new Error(response?.error || "Delegated home activation failed");
+  delegatedHomeLeasesByTab.set(lease.tabId, lease);
+  return structuredClone(lease);
+};
+
+// U4 calls this only after a digest-proved approval enters approved-dormant or
+// live state. Keeping activation internal prevents a website message from
+// promoting its own discovery record into authority.
+const activateDelegatedHome = async (tabId, { portNonce = crypto.randomUUID() } = {}) => {
+  const [record] = await listDelegatedProposals(tabId);
+  if (!record || (record.state !== "approved-dormant" && record.state !== "live")) {
+    throw new Error("A reviewed delegated approval is required before activation");
+  }
+  const source = record.proposal.source;
+  const lease = deriveHomeLease({
+    tab: { id: source.tabId, url: source.url },
+    url: source.url,
+    origin: source.origin,
+    frameId: 0,
+    documentId: source.documentId,
+  }, { portNonce });
+  return sendDelegatedHomeActivation(lease);
+};
+
+const rehandshakeDelegatedHome = async (lease) => {
+  const refreshed = {
+    ...lease,
+    portNonce: crypto.randomUUID(),
+    leasedAt: new Date().toISOString(),
+  };
+  return sendDelegatedHomeActivation(refreshed);
+};
+
+const handleDelegatedLifecycle = async (message, sender) => {
+  const tabId = sender?.tab?.id;
+  const lease = delegatedHomeLeasesByTab.get(tabId);
+  if (!lease || !senderMatchesLease(sender, lease, { lifecycle: true })) {
+    return { ok: false, error: "No matching delegated home lease" };
+  }
+  if (message.event === "pagehide") {
+    if (message.persisted === true) return { ok: true, suspendedForBfcache: true };
+    delegatedHomeLeasesByTab.delete(tabId);
+    return { ok: true, ended: true };
+  }
+  if (message.event === "pageshow" && message.persisted === true) {
+    const refreshed = await rehandshakeDelegatedHome(lease);
+    return { ok: true, restored: true, lease: refreshed };
+  }
+  if (message.event === "pageshow") return { ok: true, restored: false };
+  return { ok: false, error: "Unknown delegated lifecycle event" };
+};
+
+const handleDelegatedPageCall = async (message, sender) => {
+  const tabId = sender?.tab?.id;
+  const lease = delegatedHomeLeasesByTab.get(tabId);
+  if (!lease || !senderMatchesLease(sender, lease) || message.portNonce !== lease.portNonce) {
+    return { ok: false, error: { code: "stale_home_lease", message: "The delegated home lease is missing or stale." } };
+  }
+  // U7 installs the validated, local-only delegated dispatcher here. Keeping
+  // this explicit denial proves that U3 transport cannot fall through to the
+  // ordinary hosted-agent catalog or MCP bridge.
+  return { ok: false, error: { code: "delegated_dispatcher_not_ready", message: "Delegated action dispatch is not enabled yet." } };
+};
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  delegatedProposalsByTab.delete(tabId);
+  delegatedHomeLeasesByTab.delete(tabId);
+  removeDelegatedProposalRecord(tabId).catch(() => {});
+});
 
 const hasTabId = (tab) => tab && typeof tab.id === "number";
 
@@ -483,16 +1033,20 @@ const runtimeIdsForTab = (tabId) => {
 const resolveBridgeItemTabId = (item) => {
   const runtimeId = runtimeIdFromBridgeItem(item);
   const runtimeKey = runtimeKeyFromBridgeItem(item);
-  let tabId = runtimeId ? bridgeRuntimeRoutes.get(`runtime_id:${runtimeId}`) : null;
-  if (!Number.isInteger(tabId) && runtimeKey) {
-    tabId = bridgeRuntimeRoutes.get(`runtime_key:${runtimeKey}`);
-  }
-  if (!Number.isInteger(tabId)) {
-    const runtimeKeyTabId = tabIdFromRuntimeKey(runtimeKey);
-    if (Number.isInteger(runtimeKeyTabId)) {
-      tabId = runtimeKeyTabId;
+  if (runtimeId) {
+    const tabId = bridgeRuntimeRoutes.get(`runtime_id:${runtimeId}`);
+    if (!Number.isInteger(tabId)) return null;
+    if (runtimeKey) {
+      const keyTabId = bridgeRuntimeRoutes.get(`runtime_key:${runtimeKey}`);
+      if (!Number.isInteger(keyTabId) || keyTabId !== tabId) return null;
     }
+    return tabId;
   }
+  if (runtimeKey) {
+    const tabId = bridgeRuntimeRoutes.get(`runtime_key:${runtimeKey}`);
+    return Number.isInteger(tabId) ? tabId : null;
+  }
+  let tabId = null;
   if (!Number.isInteger(tabId) && bridgeState?.activeRuntimeTabIds?.size === 1) {
     tabId = Array.from(bridgeState.activeRuntimeTabIds)[0];
   }
@@ -687,6 +1241,7 @@ const requestRuntimeReadyForClaimedTab = async ({ tabId, tab, claim, bridgeUrl }
 const replayClaimedTabsToBridge = async ({ bridgeUrl, bridgeSessionId, reason = "bridge_open", attempt = 1 }) => {
   const startedAtMs = Date.now();
   const entries = await sessionStore.getSessionEntries();
+  const metadataSnapshot = sessionStore.snapshotState();
   const failures = [];
   let claimedCount = 0;
   let registeredCount = 0;
@@ -699,11 +1254,32 @@ const replayClaimedTabsToBridge = async ({ bridgeUrl, bridgeSessionId, reason = 
       const tabId = Number(tabIdKey);
       if (!Number.isInteger(tabId)) continue;
       claimedCount += 1;
+      const ownership = await readOrdinaryTabOwnership(tabId);
+      if (!ownershipMatchesOrdinaryClaim(ownership, claim)) {
+        delete session.tabs[tabIdKey];
+        if (session.activeTabId === tabId) session.activeTabId = null;
+        changed = true;
+        removedCount += 1;
+        failures.push({
+          tab_id: tabId,
+          runtime_key: claim.runtimeKey || runtimeKeyForTab(tabId),
+          url: claim.url || null,
+          stage: "authority_mismatch",
+          error_message: "Secondary session metadata had no matching durable ordinary ownership claim.",
+        });
+        continue;
+      }
       let tab = null;
       try {
         tab = await chrome.tabs.get(tabId);
       } catch (error) {
+        await delegatedGroupStore.releaseTabIfRevision(
+          DEFAULT_SESSION_ID,
+          tabId,
+          claim.ownershipRevision || null,
+        );
         delete session.tabs[tabIdKey];
+        if (session.activeTabId === tabId) session.activeTabId = null;
         changed = true;
         removedCount += 1;
         failures.push({
@@ -737,6 +1313,7 @@ const replayClaimedTabsToBridge = async ({ bridgeUrl, bridgeSessionId, reason = 
           reason,
           attempt,
         });
+        await requireOrdinaryTabOwnership(tabId, claim.ownershipRevision || null);
         if (!sendBridgeItem(decorated)) {
           throw new Error("Bridge WebSocket closed during claimed-tab replay.");
         }
@@ -765,7 +1342,10 @@ const replayClaimedTabsToBridge = async ({ bridgeUrl, bridgeSessionId, reason = 
   }
 
   if (changed) {
-    await sessionStore.save();
+    if (await sessionStore.save() !== true) {
+      sessionStore.restoreState(metadataSnapshot);
+      throw new Error("Claimed-tab replay metadata did not persist");
+    }
   }
 
   const summary = {
@@ -820,8 +1400,15 @@ const connectBackgroundBridge = async (state, options = {}) => {
     shouldReconnect: false,
   };
   closeBridgeSocket();
+  // U12: resolved BEFORE the Promise so the socket is constructed with the
+  // secret already in the URL. `loadBridgeHandshakeSecret` is declared later in
+  // this module but its const initializes at module-eval, well before any
+  // connect runs — the same ordering `withTimeout` relies on above.
+  const handshakeSecret = await loadBridgeHandshakeSecret().catch(() => "");
+  await verifyBridgeAuthorization(bridgeState.bridgeUrl, handshakeSecret);
+  const socketUrl = bridgeSocketUrl(bridgeState.bridgeUrl, handshakeSecret);
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(bridgeState.bridgeUrl);
+    const ws = new WebSocket(socketUrl);
     bridgeSocket = ws;
     let opened = false;
     let settled = false;
@@ -1040,11 +1627,7 @@ const connectBackgroundBridge = async (state, options = {}) => {
             type: "action_error",
             call_id: item?.call_id || null,
             runtime_id: runtimeIdFromBridgeItem(item),
-            error: {
-              code: "site_action_failed",
-              message: error.message || String(error),
-              recoverable: true,
-            },
+            error: siteActionExceptionEnvelope(error),
           });
         });
         return;
@@ -1112,7 +1695,7 @@ const attachRuntimeToOpenBridge = async ({ bridgeUrl, tabId, readyItem, relayedR
   }
   // Ask Chrome for the tab instead of synthesizing one. A hardcoded `title: null`
   // here reached the registry verbatim, and `runtime_matches_intent` matches on
-  // url OR title OR host — so intent routing by title ("the Zara board runtime")
+  // url OR title OR host — so intent routing by title ("the an operator board runtime")
   // silently died for every runtime that attached to an already-open socket, which
   // is every runtime after the first reconnect. The other two callers of
   // decorateReadyItemForReplay already pass the real tab; this one was the outlier.
@@ -1173,13 +1756,19 @@ const injectContent = async (tabId) => {
 
 const connectClaimedTab = async (tabId, claim) => {
   await injectContent(tabId);
-  await chrome.tabs.sendMessage(tabId, {
+  const response = await chrome.tabs.sendMessage(tabId, {
     type: "actions-json:connect",
     bridgeUrl: claim.bridgeUrl,
     runtimeKey: runtimeKeyForTab(tabId),
     authorizationId: claim.authorizationId,
     extensionVersion: chrome.runtime.getManifest().version,
   });
+  if (!response?.ok) {
+    const detail = typeof response?.error === "string"
+      ? response.error
+      : response?.error?.message;
+    throw new Error(detail || "The claimed tab failed to connect to the bridge.");
+  }
   // Record the LOCAL route for EVERY path that (re)connects a claimed tab —
   // claim, navigate, activate, reconnect-on-update all funnel through here.
   // The runtime_key is stable (chrome-tab:<tabId>), so recording it now means
@@ -1188,10 +1777,16 @@ const connectClaimedTab = async (tabId, claim) => {
   // lands. Centralizing this in connectClaimedTab prevents the class of bug where
   // a new connect path forgets to populate bridgeRuntimeRoutes (Incident 2026-07-03).
   rememberRuntimeRoute({ runtime_key: runtimeKeyForTab(tabId) }, tabId);
+  return response;
 };
 
 const ensureSessionGroup = async (session, tabId) => {
-  let groupId = session.chromeGroupId;
+  const tab = await chrome.tabs.get(tabId);
+  const windowId = Number.isInteger(tab?.windowId) ? tab.windowId : 0;
+  session.chromeGroupIdsByWindow = session.chromeGroupIdsByWindow && typeof session.chromeGroupIdsByWindow === "object"
+    ? session.chromeGroupIdsByWindow
+    : {};
+  let groupId = session.chromeGroupIdsByWindow[String(windowId)];
   if (typeof groupId === "number") {
     try {
       await chrome.tabGroups.get(groupId);
@@ -1202,7 +1797,7 @@ const ensureSessionGroup = async (session, tabId) => {
   }
   if (typeof groupId !== "number") {
     groupId = await chrome.tabs.group({ tabIds: [tabId] });
-    session.chromeGroupId = groupId;
+    session.chromeGroupIdsByWindow[String(windowId)] = groupId;
   }
   await chrome.tabGroups.update(groupId, {
     title: session.title || DEFAULT_SESSION_GROUP_TITLE,
@@ -1210,6 +1805,14 @@ const ensureSessionGroup = async (session, tabId) => {
     collapsed: false,
   });
   return groupId;
+};
+
+const restoreTabChromeGroup = async (tabId, previousGroupId) => {
+  if (Number.isInteger(previousGroupId) && previousGroupId >= 0) {
+    await chrome.tabs.group({ groupId: previousGroupId, tabIds: [tabId] });
+    return;
+  }
+  await chrome.tabs.ungroup(tabId);
 };
 
 const claimAuthorizedTab = async (message) => {
@@ -1224,27 +1827,63 @@ const claimAuthorizedTab = async (message) => {
   if (tab.url?.startsWith("chrome://")) {
     throw new Error(`Chrome internal tab ${tabId} cannot be authorized`);
   }
+  await ensureOrdinaryAuthorityReady();
 
   const session = await sessionStore.getSession(DEFAULT_SESSION_ID);
-  const groupId = await ensureSessionGroup(session, tab.id);
+  const metadataSnapshot = sessionStore.snapshotState();
+  let chromeTabGroupId = null;
+  let connectionResponse = null;
   const authorizationId = message.authorizationId || newAuthorizationId();
   const bridgeUrl = message.bridgeUrl || DEFAULT_BRIDGE_URL;
-  session.activeTabId = tab.id;
-  session.tabs[String(tab.id)] = {
+  const claim = {
+    schemaVersion: 1,
+    tabId: tab.id,
+    windowId: Number.isInteger(tab.windowId) ? tab.windowId : 0,
+    currentDocumentId: null,
+    currentRuntimeId: null,
+    assignedAt: new Date().toISOString(),
     bridgeUrl,
     authorizationId,
     runtimeKey: runtimeKeyForTab(tab.id),
     url: tab.url || null,
   };
-  await sessionStore.save();
-  await connectClaimedTab(tab.id, session.tabs[String(tab.id)]);
+  await claimTabWithDurableAuthority({
+    authority: delegatedGroupStore,
+    groupId: DEFAULT_SESSION_ID,
+    lease: claim,
+    persistMetadata: async (claimedLease) => {
+      session.activeTabId = tab.id;
+      session.tabs[String(tab.id)] = claimedLease;
+      return sessionStore.save();
+    },
+    rollbackMetadata: async (claimedLease) => sessionStore.rollbackClaimMetadata({
+      groupId: DEFAULT_SESSION_ID,
+      tabId: tab.id,
+      expectedRevision: claimedLease.ownershipRevision,
+      snapshot: metadataSnapshot,
+    }),
+    connect: async (claimedLease) => {
+      const visualMetadataSnapshot = sessionStore.snapshotState();
+      const previousChromeGroupId = tab.groupId;
+      chromeTabGroupId = await ensureSessionGroup(session, tab.id);
+      if (await sessionStore.save() !== true) {
+        sessionStore.restoreState(visualMetadataSnapshot);
+        await restoreTabChromeGroup(tab.id, previousChromeGroupId).catch(() => {});
+        throw new Error("Chrome tab grouping metadata did not persist");
+      }
+      await requireOrdinaryTabOwnership(tab.id, claimedLease.ownershipRevision);
+      connectionResponse = await connectClaimedTab(tab.id, claimedLease);
+    },
+  });
 
   return {
     ok: true,
     tabId: tab.id,
     runtimeKey: runtimeKeyForTab(tab.id),
     authorizationId,
-    groupId,
+    agentGroupId: DEFAULT_SESSION_ID,
+    chromeTabGroupId,
+    runtimeId: connectionResponse?.readyItem?.runtime_id || null,
   };
 };
 
@@ -1261,6 +1900,7 @@ const hostFromUrlLabel = (url) => {
 };
 const serializeClaimedTab = (session, tab, claim) => {
   const url = tab.url || claim.url || null;
+  const windowId = typeof tab.windowId === "number" ? tab.windowId : claim.windowId;
   return {
     runtime_id: runtimeIdsForTab(tab.id)[0] || null,
     tab_id: tab.id,
@@ -1268,7 +1908,11 @@ const serializeClaimedTab = (session, tab, claim) => {
     title: tab.title || null,
     host: hostFromUrlLabel(url),
     active: Boolean(session.activeTabId === tab.id || tab.active),
-    window_id: typeof tab.windowId === "number" ? tab.windowId : null,
+    window_id: typeof windowId === "number" ? windowId : null,
+    agent_group_id: DEFAULT_SESSION_ID,
+    chrome_tab_group_id: typeof session.chromeGroupIdsByWindow?.[String(windowId)] === "number"
+      ? session.chromeGroupIdsByWindow[String(windowId)]
+      : null,
     authorization_id: claim.authorizationId || null,
     bridge_url: claim.bridgeUrl || DEFAULT_BRIDGE_URL,
     // Internal id, retained for debugging; not the agent's addressing key.
@@ -1278,27 +1922,47 @@ const serializeClaimedTab = (session, tab, claim) => {
 
 const listClaimedTabs = async () => {
   const entries = await sessionStore.getSessionEntries();
+  const metadataSnapshot = sessionStore.snapshotState();
   const tabs = [];
-  let activeTabId = null;
   let changed = false;
 
   for (const [_sessionId, session] of entries) {
-    activeTabId = session.activeTabId || activeTabId;
     for (const [tabIdKey, claim] of Object.entries(session.tabs || {})) {
       const tabId = Number(tabIdKey);
       if (!Number.isInteger(tabId)) continue;
+      const ownership = await readOrdinaryTabOwnership(tabId);
+      if (!ownershipMatchesOrdinaryClaim(ownership, claim)) {
+        delete session.tabs[tabIdKey];
+        if (session.activeTabId === tabId) session.activeTabId = null;
+        changed = true;
+        continue;
+      }
       try {
         const tab = await chrome.tabs.get(tabId);
+        await requireOrdinaryTabOwnership(tabId, claim.ownershipRevision || null);
         tabs.push(serializeClaimedTab(session, tab, claim));
       } catch (_error) {
+        await delegatedGroupStore.releaseTabIfRevision(
+          DEFAULT_SESSION_ID,
+          tabId,
+          claim.ownershipRevision || null,
+        );
         delete session.tabs[tabIdKey];
+        if (session.activeTabId === tabId) session.activeTabId = null;
         changed = true;
       }
     }
   }
 
+  const activeTabId = entries
+    .map(([_sessionId, session]) => session.activeTabId)
+    .find(Number.isInteger) ?? null;
+
   if (changed) {
-    await sessionStore.save();
+    if (await sessionStore.save() !== true) {
+      sessionStore.restoreState(metadataSnapshot);
+      throw new Error("Claimed-tab cleanup metadata did not persist");
+    }
   }
 
   return {
@@ -1341,14 +2005,22 @@ const activateClaimedTab = async (message) => {
     const claim = session.tabs?.[String(tabId)];
     if (!claim) continue;
 
+    await requireOrdinaryTabOwnership(tabId, claim.ownershipRevision || null);
     const tab = await chrome.tabs.get(tabId);
+    await requireOrdinaryTabOwnership(tabId, claim.ownershipRevision || null);
     if (typeof tab.windowId === "number") {
       await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
     }
+    await requireOrdinaryTabOwnership(tabId, claim.ownershipRevision || null);
     await chrome.tabs.update(tabId, { active: true });
+    const metadataSnapshot = sessionStore.snapshotState();
     claim.url = tab.url || claim.url || null;
     session.activeTabId = tabId;
-    await sessionStore.save();
+    if (await sessionStore.save() !== true) {
+      sessionStore.restoreState(metadataSnapshot);
+      throw new Error("Activated tab, but secondary session metadata did not persist");
+    }
+    await requireOrdinaryTabOwnership(tabId, claim.ownershipRevision || null);
 
     // Foregrounding a healthy tab does not disturb its runtime — skip the
     // reconnect so activation stays non-disruptive to this tab and every other
@@ -1375,7 +2047,9 @@ const activateClaimedTab = async (message) => {
       ? Math.max(0, Math.min(5000, Math.floor(message.reconnectDelayMs)))
       : 300;
     setTimeout(() => {
-      connectClaimedTab(tabId, claim).catch((error) => {
+      requireOrdinaryTabOwnership(tabId, claim.ownershipRevision || null)
+        .then(() => connectClaimedTab(tabId, claim))
+        .catch((error) => {
         appendBackgroundDiagnosticEvent({
           type: "navigation",
           name: "background.claimed_tab.activate",
@@ -1435,14 +2109,20 @@ const resolveClaimedTarget = async (tabIdArg) => {
   if (Number.isInteger(tabIdArg)) {
     for (const [_sessionId, session] of entries) {
       const claim = session.tabs?.[String(tabIdArg)];
-      if (claim) return { session, tabId: tabIdArg, claim };
+      if (claim) {
+        await requireOrdinaryTabOwnership(tabIdArg, claim.ownershipRevision || null);
+        return { session, tabId: tabIdArg, claim };
+      }
     }
     throw new Error(`Chrome tab ${tabIdArg} is not claimed by actions.json.`);
   }
   for (const [_sessionId, session] of entries) {
     const active = session.activeTabId;
     const claim = active != null ? session.tabs?.[String(active)] : null;
-    if (claim) return { session, tabId: Number(active), claim };
+    if (claim) {
+      await requireOrdinaryTabOwnership(Number(active), claim.ownershipRevision || null);
+      return { session, tabId: Number(active), claim };
+    }
   }
   throw new Error("No active claimed tab; pass tab_id.");
 };
@@ -1468,6 +2148,7 @@ const navigateClaimedTab = async (message = {}) => {
   const previousRuntimeIds = runtimeIdsForTab(tabId);
   const previousUrl = claim.url || null;
 
+  await requireOrdinaryTabOwnership(tabId, claim.ownershipRevision || null);
   if (reload) {
     await chrome.tabs.reload(tabId);
   } else {
@@ -1482,9 +2163,13 @@ const navigateClaimedTab = async (message = {}) => {
     withoutHash(previousUrl) === withoutHash(tab.url) &&
     previousUrl !== tab.url
   );
+  const metadataSnapshot = sessionStore.snapshotState();
   claim.url = tab.url || claim.url || null;
   session.activeTabId = tabId;
-  await sessionStore.save();
+  if (await sessionStore.save() !== true) {
+    sessionStore.restoreState(metadataSnapshot);
+    throw new Error("Tab navigated, but secondary session metadata did not persist");
+  }
   // The old content document is gone. Reap its bridge rows and local routes
   // before reconnecting, otherwise runtimeIdsForTab keeps the stale id first
   // and serializeClaimedTab returns a runtime that the bridge is already
@@ -1506,6 +2191,7 @@ const navigateClaimedTab = async (message = {}) => {
   let connected = false;
   let connectError = null;
   try {
+    await requireOrdinaryTabOwnership(tabId, claim.ownershipRevision || null);
     await connectClaimedTab(tabId, claim);
     connected = true;
   } catch (error) {
@@ -1584,21 +2270,56 @@ const openClaimedTab = async (message = {}) => {
   }
   const tabId = created.id;
   await waitForTabComplete(tabId);
+  const tab = await chrome.tabs.get(tabId);
+  await ensureOrdinaryAuthorityReady();
 
   const session = await sessionStore.getSession(DEFAULT_SESSION_ID);
-  await ensureSessionGroup(session, tabId);
+  const metadataSnapshot = sessionStore.snapshotState();
+  let chromeTabGroupId = null;
   const authorizationId = newAuthorizationId();
   const bridgeUrl = await loadBridgeUrl().catch(() => DEFAULT_BRIDGE_URL);
-  session.activeTabId = tabId;
-  session.tabs[String(tabId)] = {
+  const claim = {
+    schemaVersion: 1,
+    tabId,
+    windowId: Number.isInteger(tab.windowId) ? tab.windowId : 0,
+    currentDocumentId: null,
+    currentRuntimeId: null,
+    assignedAt: new Date().toISOString(),
     bridgeUrl,
     authorizationId,
     runtimeKey: runtimeKeyForTab(tabId),
     url: url,
   };
-  await sessionStore.save();
+  const claimedLease = await claimTabWithDurableAuthority({
+    authority: delegatedGroupStore,
+    groupId: DEFAULT_SESSION_ID,
+    lease: claim,
+    persistMetadata: async (authoritativeLease) => {
+      session.activeTabId = tabId;
+      session.tabs[String(tabId)] = authoritativeLease;
+      return sessionStore.save();
+    },
+    rollbackMetadata: async (authoritativeLease) => sessionStore.rollbackClaimMetadata({
+      groupId: DEFAULT_SESSION_ID,
+      tabId,
+      expectedRevision: authoritativeLease.ownershipRevision,
+      snapshot: metadataSnapshot,
+    }),
+    // Registration and the live content connection happen below. Visual
+    // grouping is deferred until authority and secondary metadata are proven.
+    connect: async (authoritativeLease) => {
+      const visualMetadataSnapshot = sessionStore.snapshotState();
+      const previousChromeGroupId = tab.groupId;
+      chromeTabGroupId = await ensureSessionGroup(session, tabId);
+      if (await sessionStore.save() !== true) {
+        sessionStore.restoreState(visualMetadataSnapshot);
+        await restoreTabChromeGroup(tabId, previousChromeGroupId).catch(() => {});
+        throw new Error("Chrome tab grouping metadata did not persist");
+      }
+      await requireOrdinaryTabOwnership(tabId, authoritativeLease.ownershipRevision);
+    },
+  });
 
-  const tab = await chrome.tabs.get(tabId);
   let readyItem = null;
   let registered = false;
   // `registered` says a row exists in the bridge registry. `connected` says the
@@ -1610,7 +2331,7 @@ const openClaimedTab = async (message = {}) => {
     readyItem = await requestRuntimeReadyForClaimedTab({
       tabId,
       tab,
-      claim: session.tabs[String(tabId)],
+      claim: claimedLease,
       bridgeUrl,
     });
     // Register the new runtime with the bridge NOW, the same way replay does —
@@ -1618,11 +2339,12 @@ const openClaimedTab = async (message = {}) => {
     const decorated = await decorateReadyItemForReplay({
       readyItem,
       tab,
-      claim: session.tabs[String(tabId)],
+      claim: claimedLease,
       bridgeSessionId: bridgeState?.bridgeSessionId || null,
       reason: "open_tab",
       attempt: 1,
     });
+    await requireOrdinaryTabOwnership(tabId, claimedLease.ownershipRevision);
     registered = sendBridgeItem(decorated);
     rememberRuntimeRegistration(decorated, tabId);
     // CRUCIAL: requestRuntimeReadyForClaimedTab only sends `runtime-ready`, which
@@ -1643,7 +2365,8 @@ const openClaimedTab = async (message = {}) => {
     // one word. (Incident 2026-07-09: a `.catch(() => {})` here silently
     // degraded every fresh tab to "will replay on next bridge open", which may
     // be hours away. It guarded the fix for incident 2026-07-03.)
-    await connectClaimedTab(tabId, session.tabs[String(tabId)]);
+    await requireOrdinaryTabOwnership(tabId, claimedLease.ownershipRevision);
+    await connectClaimedTab(tabId, claimedLease);
     connected = true;
   } catch (error) {
     connectError = error?.message || String(error);
@@ -1669,6 +2392,8 @@ const openClaimedTab = async (message = {}) => {
       runtime_id: readyItem?.runtime_id || null,
       runtime_key: runtimeKeyForTab(tabId),
       authorization_id: authorizationId,
+      agent_group_id: DEFAULT_SESSION_ID,
+      chrome_tab_group_id: chromeTabGroupId,
       url: tab.url || url,
       ready: Boolean(readyItem),
       registered,
@@ -1691,6 +2416,8 @@ const openClaimedTab = async (message = {}) => {
     runtime_id: readyItem?.runtime_id || null,
     runtime_key: runtimeKeyForTab(tabId),
     authorization_id: authorizationId,
+    agent_group_id: DEFAULT_SESSION_ID,
+    chrome_tab_group_id: chromeTabGroupId,
     url: tab.url || url,
     ready: Boolean(readyItem),
     registered,
@@ -1698,9 +2425,91 @@ const openClaimedTab = async (message = {}) => {
   };
 };
 
+const beforeUnloadRiskFromEvaluation = (evaluation = {}) => {
+  const value = evaluation?.result?.value;
+  const property_handler = Boolean(value?.property_handler);
+  const parsedListenerCount = Number(value?.listener_count);
+  const listener_count = Number.isFinite(parsedListenerCount)
+    ? Math.max(0, parsedListenerCount)
+    : 0;
+  return {
+    guarded: property_handler || listener_count > 0,
+    property_handler,
+    listener_count,
+  };
+};
+
+const detectBeforeUnloadGuard = async (tabId) => {
+  const target = { tabId };
+  await acquireDebugger(tabId);
+  try {
+    const windowEvaluation = await withTimeout(
+      debuggerSendCommand(target, "Runtime.evaluate", {
+        expression: "window",
+        returnByValue: false,
+      }),
+      8000,
+      "Runtime.evaluate window for beforeunload guard detection",
+    );
+    const objectId = windowEvaluation?.result?.objectId;
+    if (!objectId) {
+      throw new Error("Runtime.evaluate did not return a window object id.");
+    }
+    const [propertyEvaluation, listenerEvaluation] = await withTimeout(
+      Promise.all([
+        debuggerSendCommand(target, "Runtime.callFunctionOn", {
+          objectId,
+          functionDeclaration: "function () { return typeof this.onbeforeunload === 'function'; }",
+          returnByValue: true,
+        }),
+        debuggerSendCommand(target, "DOMDebugger.getEventListeners", {
+          objectId,
+          depth: 0,
+          pierce: false,
+        }),
+      ]),
+      8000,
+      "CDP beforeunload guard inspection",
+    );
+    const evaluation = {
+      result: {
+        value: {
+          property_handler: propertyEvaluation?.result?.value === true,
+          listener_count: Array.isArray(listenerEvaluation?.listeners)
+            ? listenerEvaluation.listeners.filter((listener) => listener?.type === "beforeunload").length
+            : 0,
+        },
+      },
+    };
+    return {
+      ...beforeUnloadRiskFromEvaluation(evaluation),
+      shared_debugger_session: true,
+    };
+  } finally {
+    await releaseDebugger(tabId);
+  }
+};
+
+const waitForTabToClose = async (tabId, timeoutMs = 5000) => {
+  const deadline = Date.now() + timeoutMs;
+  let missingSince = null;
+  while (Date.now() < deadline) {
+    try {
+      await chrome.tabs.get(tabId);
+      missingSince = null;
+    } catch (_error) {
+      missingSince ??= Date.now();
+      if (Date.now() - missingSince >= 150) return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+};
+
 // browser.close_tab: close a claimed tab (defaults to the active one). Refuses
-// to close the last remaining claimed tab. Removes the claim; the WS drop lets
-// the bridge reap the runtime.
+// to close the last remaining claimed tab and, by default, any tab whose active
+// document has a detectable beforeunload guard. Removes the claim only after
+// the safety gate passes; force=true explicitly accepts the hazardous close.
 const closeClaimedTab = async (message = {}) => {
   const totalClaimed = (async () => {
     const entries = await sessionStore.getSessionEntries();
@@ -1713,27 +2522,173 @@ const closeClaimedTab = async (message = {}) => {
   if ((await totalClaimed()) <= 1) {
     throw new Error("browser.close_tab refuses to close the last claimed tab.");
   }
-  const { session, tabId } = await resolveClaimedTarget(Number(message.tab_id ?? message.tabId));
+  const { session, tabId, claim } = await resolveClaimedTarget(Number(message.tab_id ?? message.tabId));
+  const metadataSnapshot = sessionStore.snapshotState();
+
+  // main's ownership-revision guard (PR #276): refuse to close a tab whose
+  // ownership changed out from under us before we begin the close sequence.
+  if (await delegatedGroupStore.releaseTabIfRevision(
+    DEFAULT_SESSION_ID,
+    tabId,
+    claim.ownershipRevision || null,
+  ) !== true) {
+    throw new Error(`Chrome tab ${tabId} ownership changed before it could be closed`);
+  }
+
+  if (message.force !== true) {
+    let beforeUnloadRisk;
+    try {
+      beforeUnloadRisk = await detectBeforeUnloadGuard(tabId);
+    } catch (error) {
+      return {
+        ok: false,
+        closed: false,
+        code: "beforeunload_guard_unknown",
+        tab_id: tabId,
+        force_required: true,
+        message:
+          "browser.close_tab could not determine whether this tab has unsaved-change protection, so it refused to close it. Retry only after inspecting the tab, or pass force=true to accept the risk.",
+        detection_error: String(error?.message || error),
+      };
+    }
+    if (beforeUnloadRisk.guarded) {
+      let dialogRecovery;
+      try {
+        dialogRecovery = await prepareJavaScriptDialogHandlingOnTabId(tabId);
+      } catch (error) {
+        dialogRecovery = {
+          armed: false,
+          error: String(error?.message || error),
+        };
+      }
+      return {
+        ok: false,
+        closed: false,
+        code: "beforeunload_guard_detected",
+        tab_id: tabId,
+        force_required: true,
+        dialog_recovery_armed: dialogRecovery.armed === true,
+        dialog_recovery: dialogRecovery,
+        message:
+          "browser.close_tab detected an active beforeunload guard that may represent unsaved changes. Save or discard the changes in the page, or pass force=true to accept the risk.",
+        beforeunload: beforeUnloadRisk,
+      };
+    }
+  }
+
+  // A beforeunload prompt is session-scoped in CDP: attaching only after the
+  // prompt opens is too late. Arm Page handling before the hazardous close so
+  // force=true can accept it without leaving Chrome in a modal absorbing state.
+  if (message.force === true) {
+    try {
+      await prepareJavaScriptDialogHandlingOnTabId(tabId);
+    } catch (error) {
+      return {
+        ok: false,
+        closed: false,
+        forced: true,
+        code: "forced_close_recovery_not_armed",
+        tab_id: tabId,
+        message:
+          "browser.close_tab force=true refused to begin because native-dialog recovery could not be armed before closing the tab.",
+        recovery_error: String(error?.message || error),
+      };
+    }
+  }
+
+  // Keep the claim and runtime routes intact until Chrome proves the tab is
+  // actually gone. chrome.tabs.remove can resolve after merely opening a
+  // beforeunload prompt; deleting first turns that prompt into an absorbing
+  // state and makes the still-live tab unreachable through claimed-tab tools.
+  const runtimeIds = runtimeIdsForTab(tabId);
+  let removeError = null;
+  const removeAttempt = chrome.tabs.remove(tabId).catch((error) => {
+    removeError = error;
+  });
+  // Chrome can keep this promise pending while its beforeunload dialog is
+  // open. Give an ordinary close a brief chance to settle, then inspect the
+  // actual tab state so force=true can reach the CDP dialog-recovery path.
+  await Promise.race([
+    removeAttempt,
+    new Promise((resolve) => setTimeout(resolve, 100)),
+  ]);
+  let closed = await waitForTabToClose(tabId, 300);
+  if (!closed && removeError) {
+    return {
+      ok: false,
+      closed: false,
+      forced: message.force === true,
+      code: "close_failed",
+      tab_id: tabId,
+      message:
+        "Chrome rejected the tab-removal request. The claim and runtime routes were preserved.",
+      remove_error: String(removeError?.message || removeError),
+    };
+  }
+  let dialogRecovery = null;
+  if (!closed && message.force === true) {
+    try {
+      dialogRecovery = await handleJavaScriptDialogOnTabId(tabId, { accept: true });
+    } catch (error) {
+      return {
+        ok: false,
+        closed: false,
+        forced: true,
+        code: "forced_close_dialog_recovery_failed",
+        tab_id: tabId,
+        message:
+          "browser.close_tab force=true opened or encountered a native dialog, but accepting that dialog failed. The claim was preserved for recovery.",
+        close_error: removeError ? String(removeError?.message || removeError) : null,
+        recovery_error: String(error?.message || error),
+      };
+    }
+    closed = await waitForTabToClose(tabId, 5000);
+  }
+  if (!closed) {
+    return {
+      ok: false,
+      closed: false,
+      forced: message.force === true,
+      code: message.force === true ? "forced_close_not_confirmed" : "close_blocked_by_unarmed_dialog",
+      tab_id: tabId,
+      manual_interaction_required: message.force !== true,
+      dialog_recovery_armed: false,
+      message:
+        "Chrome did not confirm that the tab closed, and dialog recovery was not armed before the modal opened. The claim and runtime routes were preserved; use the browser UI to choose Leave or Cancel.",
+      close_error: removeError ? String(removeError?.message || removeError) : null,
+      dialog_recovery: dialogRecovery,
+    };
+  }
 
   delete session.tabs[String(tabId)];
+  if (ownedDialogRecoveryTabs.delete(tabId)) {
+    await releaseDebugger(tabId);
+  }
   if (session.activeTabId === tabId) {
     const remaining = Object.keys(session.tabs || {});
     session.activeTabId = remaining.length ? Number(remaining[0]) : null;
   }
-  await sessionStore.save();
+  if (await sessionStore.save() !== true) {
+    sessionStore.restoreState(metadataSnapshot);
+    throw new Error("Released durable tab authority, but secondary session metadata did not persist");
+  }
   // Reap the runtime on the bridge NOW, BEFORE we wipe the routes. The route map
   // is the ONLY tabId -> runtime_id lookup, so forgetting it first makes the
   // onRemoved reap a silent no-op and the bridge keeps advertising the dead tab
   // until the TTL sweep ages it out ~30s later (live-caught 2026-07-09 on ext
   // 0.1.187: browser.close_tab did not reap instantly). Emit here rather than
   // relying on onRemoved, because THIS path clears the routes synchronously.
-  for (const runtimeId of runtimeIdsForTab(tabId)) {
+  for (const runtimeId of runtimeIds) {
     sendBridgeItem({ type: "runtime_removed", runtime_id: runtimeId });
   }
   forgetRuntimeRoutesForTab(tabId);
-  await chrome.tabs.remove(tabId).catch(() => {});
-
-  return { ok: true, closed: true, closed_tab_id: tabId, active_tab_id: session.activeTabId };
+  return {
+    ok: true,
+    closed: true,
+    forced: message.force === true,
+    closed_tab_id: tabId,
+    active_tab_id: session.activeTabId,
+  };
 };
 
 // browser.dismiss_dialog: dismiss a native JavaScript dialog (alert/confirm/prompt/
@@ -1750,32 +2705,63 @@ const withTimeout = (promise, ms, label) =>
     ),
   ]);
 
-const dismissDialogOnTab = async (message = {}) => {
-  const { tabId } = await resolveClaimedTarget(
-    Number(message.tab_id ?? message.tabId),
-  );
-  const accept = message.accept === undefined ? true : Boolean(message.accept);
+// Debugger ownership must survive the gap between a safe close refusal and a
+// later dialog action. Only sessions created here are detached by the recovery
+// handler; an already-attached session may belong to another extension/tool.
+const ownedDialogRecoveryTabs = new Set();
+
+const prepareJavaScriptDialogHandlingOnTabId = async (tabId) => {
   const target = { tabId };
-  // Always operate over OUR OWN fresh CDP session. If another debugger is already
-  // attached, force-detach it first: a wedge recovery must not inherit a stale
-  // session whose in-flight command (e.g. a Runtime.evaluate blocked by the very
-  // dialog we are dismissing) would make our commands queue behind it forever. CDP
-  // serializes commands per session, so reusing a busy session hangs. The tab is
-  // frozen anyway; whatever was attached is already stuck.
-  let forcedDetach = false;
-  try {
-    await debuggerAttach(target);
-  } catch (error) {
-    if (!/already attached/i.test(String(error?.message || error))) {
-      throw error;
-    }
-    await debuggerDetach(target).catch(() => {});
-    forcedDetach = true;
-    await debuggerAttach(target);
+  let ownedSession = ownedDialogRecoveryTabs.has(tabId);
+  if (!ownedSession) {
+    await acquireDebugger(tabId);
+    ownedDialogRecoveryTabs.add(tabId);
+    ownedSession = true;
   }
   try {
-    // handleJavaScriptDialog does not require Page.enable; keep the path minimal and
-    // bounded so a stuck CDP transport surfaces as an error instead of hanging.
+    await withTimeout(
+      debuggerSendCommand(target, "Page.enable"),
+      8000,
+      "Page.enable for proactive dialog recovery",
+    );
+  } catch (error) {
+    if (ownedSession) {
+      ownedDialogRecoveryTabs.delete(tabId);
+      await releaseDebugger(tabId);
+    }
+    throw error;
+  }
+  return {
+    armed: true,
+    tab_id: tabId,
+    owned_session: ownedSession,
+  };
+};
+
+const handleJavaScriptDialogOnTabId = async (tabId, message = {}) => {
+  const accept = message.accept === undefined ? true : Boolean(message.accept);
+  const target = { tabId };
+  const proactivelyArmed = ownedDialogRecoveryTabs.has(tabId);
+  if (!proactivelyArmed) {
+    return {
+      ok: false,
+      dismissed: false,
+      code: "dialog_recovery_not_armed",
+      tab_id: tabId,
+      accept,
+      message:
+        "Reliable native-dialog recovery was not armed before this dialog opened. browser.close_tab arms recovery when it detects a beforeunload guard; a dialog that opened independently may require manual browser interaction.",
+    };
+  }
+  // Reuse an existing extension-owned debugger session. Detaching and reattaching
+  // after javascriptDialogOpening loses the dialog context, producing a false
+  // "No dialog is showing" response. A fresh session is used only when attach
+  // succeeds; sessions we did not create here are left intact afterward.
+  const reusedSession = true;
+  let handled = false;
+  try {
+    // Initialize the Page domain on this exact session before asking it to handle
+    // a dialog that may have opened before the session was attached.
     await withTimeout(
       debuggerSendCommand(target, "Page.handleJavaScriptDialog", {
         accept,
@@ -1785,10 +2771,27 @@ const dismissDialogOnTab = async (message = {}) => {
       8000,
       "Page.handleJavaScriptDialog",
     );
-    return { ok: true, dismissed: true, tab_id: tabId, accept, forced_detach: forcedDetach };
+    handled = true;
+    return {
+      ok: true,
+      dismissed: true,
+      tab_id: tabId,
+      accept,
+      reused_session: reusedSession,
+    };
   } finally {
-    await debuggerDetach(target).catch(() => {});
+    if (handled && ownedDialogRecoveryTabs.has(tabId)) {
+      ownedDialogRecoveryTabs.delete(tabId);
+      await releaseDebugger(tabId);
+    }
   }
+};
+
+const dismissDialogOnTab = async (message = {}) => {
+  const { tabId } = await resolveClaimedTarget(
+    Number(message.tab_id ?? message.tabId),
+  );
+  return handleJavaScriptDialogOnTabId(tabId, message);
 };
 
 const reconnectClaimedTab = async (tabId, tab) => {
@@ -1812,10 +2815,16 @@ const reconnectClaimedTab = async (tabId, tab) => {
       withoutHash(previousUrl) === withoutHash(newUrl) &&
       previousUrl !== newUrl
     );
+    const metadataSnapshot = sessionStore.snapshotState();
     claim.url = tab?.url || claim.url || null;
     session.activeTabId = tabId;
-    await sessionStore.save();
     try {
+      await requireOrdinaryTabOwnership(tabId, claim.ownershipRevision || null);
+      if (await sessionStore.save() !== true) {
+        sessionStore.restoreState(metadataSnapshot);
+        throw new Error("Navigation metadata did not persist before reconnect");
+      }
+      await requireOrdinaryTabOwnership(tabId, claim.ownershipRevision || null);
       await connectClaimedTab(tabId, claim);
       await appendBackgroundDiagnosticEvent({
         type: "navigation",
@@ -1880,12 +2889,22 @@ if (chrome.tabs?.onUpdated?.addListener) {
 
 if (chrome.tabs?.onRemoved?.addListener) {
   chrome.tabs.onRemoved.addListener((tabId) => {
+    // Tab removal, unlike a transient debugger detach, ends every logical
+    // holder. Queue cleanup behind any in-flight debugger operation so it
+    // cannot recreate state after the tab has been forgotten.
+    debuggerSessionManager?.handleTabRemoved(tabId).catch((error) => {
+      console.warn("actions.json failed to clear debugger session for removed tab", error);
+    });
+    a11yDebuggerSessions?.delete(tabId);
     sessionStore
       .getSessionEntries()
       .then(async (entries) => {
+        const metadataSnapshot = sessionStore.snapshotState();
         let changed = false;
+        let removedClaim = null;
         for (const [_sessionId, session] of entries) {
           if (session.tabs && Object.prototype.hasOwnProperty.call(session.tabs, String(tabId))) {
+            removedClaim = session.tabs[String(tabId)];
             delete session.tabs[String(tabId)];
             if (session.activeTabId === tabId) {
               session.activeTabId = null;
@@ -1906,7 +2925,18 @@ if (chrome.tabs?.onRemoved?.addListener) {
         // externally-closed tabs (Incident 2026-07-03, inverse leak).
         forgetRuntimeRoutesForTab(tabId);
         if (changed) {
-          await sessionStore.save();
+          const ownership = await readOrdinaryTabOwnership(tabId);
+          if (ownershipMatchesOrdinaryClaim(ownership, removedClaim)) {
+            await delegatedGroupStore.releaseTabIfRevision(
+              DEFAULT_SESSION_ID,
+              tabId,
+              removedClaim?.ownershipRevision || null,
+            );
+          }
+          if (await sessionStore.save() !== true) {
+            sessionStore.restoreState(metadataSnapshot);
+            throw new Error("Removed-tab cleanup metadata did not persist");
+          }
         }
       })
       .catch((error) => {
@@ -1945,36 +2975,16 @@ const debuggerSendCommand = (target, method, params) =>
 // hands out a shared session; release() detaches only when the last holder
 // leaves. Long-lived holders (a11y.watch) and per-op holders (a key press)
 // share the same underlying attach.
-const debuggerRefcounts = new Map(); // tabId -> count
-const debuggerAdopted = new Set();   // tabIds we adopted (didn't cleanly attach; don't force-detach)
-const acquireDebugger = async (tabId) => {
-  const n = debuggerRefcounts.get(tabId) || 0;
-  if (n === 0) {
-    try {
-      await debuggerAttach({ tabId });
-    } catch (error) {
-      if (!/already attached/i.test(String(error?.message || error))) throw error;
-      debuggerAdopted.add(tabId); // someone outside the manager holds it; ride along
-    }
-  }
-  debuggerRefcounts.set(tabId, n + 1);
-};
-const releaseDebugger = async (tabId) => {
-  const n = debuggerRefcounts.get(tabId) || 0;
-  if (n <= 1) {
-    debuggerRefcounts.delete(tabId);
-    if (!debuggerAdopted.delete(tabId)) {
-      await debuggerDetach({ tabId }).catch(() => {});
-    }
-  } else {
-    debuggerRefcounts.set(tabId, n - 1);
-  }
-};
+const debuggerSessionManager = new DebuggerSessionManager({
+  attach: debuggerAttach,
+  detach: debuggerDetach,
+  sendCommand: debuggerSendCommand,
+});
+const acquireDebugger = (tabId) => debuggerSessionManager.acquire(tabId);
+const releaseDebugger = (tabId) => debuggerSessionManager.release(tabId);
 chrome.debugger.onDetach?.addListener((source) => {
   if (Number.isInteger(source?.tabId)) {
-    debuggerRefcounts.delete(source.tabId);
-    debuggerAdopted.delete(source.tabId);
-    a11yDebuggerSessions.delete(source.tabId);
+    debuggerSessionManager.handleDetach(source.tabId);
   }
 });
 
@@ -1983,10 +2993,33 @@ chrome.debugger.onDetach?.addListener((source) => {
 // so the session must OUTLIVE each batch. Held open (one refcount) while the
 // tab is watched, via the shared manager so trusted keys / debug JS coexist.
 const a11yDebuggerSessions = new Set(); // tabIds a11y.watch holds
+const a11yDebuggerSessionInitializers = new Map(); // tabId -> first-holder promise
 const ensureA11yDebuggerSession = async (tabId) => {
-  if (a11yDebuggerSessions.has(tabId)) return;
-  await acquireDebugger(tabId);       // one persistent refcount for a11y
-  a11yDebuggerSessions.add(tabId);
+  if (a11yDebuggerSessions.has(tabId)) {
+    // Re-attest an existing logical holder. Chrome can detach the real target
+    // independently of this Set/refcount state.
+    await debuggerSessionManager.attestHeld(tabId);
+    return;
+  }
+  const inFlight = a11yDebuggerSessionInitializers.get(tabId);
+  if (inFlight) return inFlight;
+
+  // A first a11y holder must increment even if another consumer already owns
+  // the shared session; otherwise that consumer's release can detach under us.
+  // Single-flight this transition so concurrent first watches create one
+  // persistent logical holder, not one refcount per caller.
+  const initialize = (async () => {
+    await acquireDebugger(tabId);
+    a11yDebuggerSessions.add(tabId);
+  })();
+  a11yDebuggerSessionInitializers.set(tabId, initialize);
+  try {
+    await initialize;
+  } finally {
+    if (a11yDebuggerSessionInitializers.get(tabId) === initialize) {
+      a11yDebuggerSessionInitializers.delete(tabId);
+    }
+  }
 };
 // Build a ShimTree over the shared session (no detach — a11y holds a refcount).
 const a11yTreeFromSession = async (tabId) => {
@@ -2013,7 +3046,7 @@ const CDP_MODIFIER_BITS = { alt: 1, option: 1, control: 2, ctrl: 2, meta: 4, cmd
 // Modifier keys pressed as REAL held keys around a chord. A combined `rawKeyDown`
 // carrying only a `modifiers` BITMASK reaches Google Docs but does NOT trigger its
 // shortcut/command layer — Ctrl+A / Ctrl+Home / Ctrl+Down (and Shift-extend
-// selection) all no-op (measured live: investigations/
+// selection) all no-op (measured in a live-browser investigation;
 // hosted-agent-debugger-not-attached-new-tab.md, X13). Docs needs the modifier
 // modeled as a genuinely-held keyDown across the chord. Shift is included: the
 // select-back path (dispatchTrustedText) hits the same class.
@@ -2099,7 +3132,7 @@ const cdpKeyInfo = (rawKey) => {
     // charCodeAt is NOT a VK for punctuation: "'" is 0x27 = VK_RIGHT, "." is
     // 0x2E = VK_DELETE, "!" is 0x21 = VK_PRIOR — an editor processes those as
     // caret navigation / deletion instead of typing (incident:
-    // actions.json.storage scopes/private/docs/investigations/
+    // a private storage scope
     // hosted-agent-docs-edit-corruption.md).
     if (CDP_PUNCT_KEYS[ch]) {
       const p = CDP_PUNCT_KEYS[ch];
@@ -2230,10 +3263,10 @@ const dispatchTrustedKey = async (tabId, rawKey, rawModifiers, rawRepeat) => {
 // Trusted, ANIMATED drag via CDP Input.dispatchMouseEvent (mirrors dispatchTrustedKey's
 // attach/dispatch/detach). The DEFAULT "animated" card move: a real pointer travels the
 // path so the browser renders the faded drag-image FOLLOWING the cursor — the beautiful
-// slide (investigations/drag-operations-primitive.md). Content.js pointer.drag (synthetic,
+// slide (the internal investigation record). Content.js pointer.drag (synthetic,
 // untrusted) can't produce the drag-ghost; native HTML5 draggable ignores it. Trusted CDP
 // mousePressed → MANY interpolated mouseMoved → mouseReleased is what a human drag is, so
-// the browser animates it. Choreography (per Yaniv's spec + DnD thresholds): press at
+// the browser animates it. Choreography (per the product owner spec + DnD thresholds): press at
 // source, a few small pickup jitters to cross the drag threshold, then LOTS of interpolated
 // move points along the (straight) path so the ghost glides smoothly, then release at the
 // end. Coordinates are viewport CSS pixels (same space as pointer.click). Returns
@@ -2338,6 +3371,87 @@ const readCurrentA11yValue = async (tabId) => {
   return "";
 };
 
+// Read the concrete selection created by a trusted keyboard action. Selection
+// is part of the mutation interface: "Control+A completed" is not useful or
+// safe unless the caller learns which editing host owns the range and exactly
+// what text would be replaced by the next write.
+const readSelectionSnapshot = async (tabId) => {
+  try {
+    const frameResults = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: () => {
+        const active = document.activeElement;
+        const identity = (element) => element ? {
+          tag_name: element.tagName?.toLowerCase?.() || null,
+          id: element.id || null,
+          class_name: typeof element.className === "string" ? element.className : null,
+          role: element.getAttribute?.("role") || null,
+          aria_label: element.getAttribute?.("aria-label") || null,
+          contenteditable: element.getAttribute?.("contenteditable") || null,
+        } : null;
+        let selectedText = "";
+        let selectionStart = null;
+        let selectionEnd = null;
+        let selectionKind = "none";
+        let editingHost = null;
+        if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+          selectionStart = Number.isInteger(active.selectionStart) ? active.selectionStart : null;
+          selectionEnd = Number.isInteger(active.selectionEnd) ? active.selectionEnd : null;
+          if (selectionStart !== null && selectionEnd !== null) {
+            selectedText = active.value.slice(selectionStart, selectionEnd);
+            selectionKind = "form-control";
+          }
+          editingHost = active;
+        } else {
+          const selection = document.getSelection?.();
+          selectedText = String(selection || "");
+          if (selection && selection.rangeCount > 0) {
+            selectionKind = "document-range";
+            const node = selection.anchorNode?.nodeType === Node.ELEMENT_NODE
+              ? selection.anchorNode
+              : selection.anchorNode?.parentElement;
+            editingHost = node?.closest?.("[contenteditable='true'], [contenteditable='plaintext-only']") ||
+              (active?.matches?.("[contenteditable='true'], [contenteditable='plaintext-only']") ? active : null);
+          }
+        }
+        return {
+          active_element: identity(active),
+          editing_host: identity(editingHost),
+          selection_kind: selectionKind,
+          selection_start: selectionStart,
+          selection_end: selectionEnd,
+          selected_text: selectedText,
+          selected_length: selectedText.length,
+          large_selection: selectedText.length >= 500,
+        };
+      },
+    });
+    const frames = frameResults
+      .map((entry) => ({ frame_id: entry.frameId, ...(entry.result || {}) }))
+      .filter((entry) => entry.selected_length > 0 || entry.active_element);
+    const selectedFrames = frames.filter((entry) => entry.selected_length > 0);
+    return {
+      frames,
+      selected_frame_count: selectedFrames.length,
+      selected_length: selectedFrames.reduce((sum, entry) => sum + entry.selected_length, 0),
+      selected_text: selectedFrames.map((entry) => entry.selected_text).join(""),
+      large_selection: selectedFrames.some((entry) => entry.large_selection),
+      ambiguous: selectedFrames.length > 1,
+    };
+  } catch (error) {
+    return {
+      unavailable: true,
+      error: error?.message || String(error),
+      frames: [],
+      selected_frame_count: 0,
+      selected_length: 0,
+      selected_text: "",
+      large_selection: false,
+      ambiguous: false,
+    };
+  }
+};
+
 // Accessibility-gated key-repeat (plan 2026-07-07-004): press a key/chord and
 // gate each repeat on the a11y layer's return, with count | until-regex |
 // path-of-regexes stop modes and positive/negative polarity. The DECISION logic
@@ -2394,7 +3508,8 @@ const dispatchGatedRepeat = async (tabId, rawArgs) => {
     };
     const read = async () => readCurrentA11yValue(tabId);
     const result = await runGatedRepeat(plan, { press, read });
-    return { ...result, fidelity: "trusted" };
+    const selection = await readSelectionSnapshot(tabId);
+    return { ...result, fidelity: "trusted", selection };
   } finally {
     if (acquired) await releaseDebugger(tabId);
   }
@@ -2663,6 +3778,68 @@ const loadBridgeUrl = async () => {
   return stored?.bridgeUrl || DEFAULT_BRIDGE_URL;
 };
 
+// U12. The bridge refuses /extension unless the caller proves it is this
+// extension: Chrome attests the origin (chrome-extension://<id>) automatically
+// on the socket, and this per-installation secret proves it is THIS machine's
+// bridge. Read the same way bridgeUrl is — chrome.storage.local, one key, a
+// benign empty default — so pairing is one storage write, not a new subsystem.
+//
+// The bridge prints the secret on startup and persists it in
+// .actions-json.local.json; paste it into storage as `bridgeHandshakeSecret`.
+//
+// The loader itself lives in `./agent/hosted-tool-executor.mjs`, beside the
+// bridge-URL loader it mirrors, and is SHARED rather than duplicated here: the
+// same secret now authenticates both the `/extension` socket below and the
+// gated HTTP tool routes that module calls. Two copies of the storage key would
+// let a rename leave one surface authenticated and the other silently 401ing.
+const loadBridgeHandshakeSecret = () => loadSharedBridgeHandshakeSecret(chrome);
+
+// The browser WebSocket API cannot set request headers, so the secret rides in
+// the query string — the only channel available at upgrade time, and the reason
+// the bridge reads it from there. An absent secret still attempts the connect:
+// the bridge then answers `handshake_secret_missing`, which is a far better
+// diagnostic than a connect the extension declined to make.
+const bridgeSocketUrl = (bridgeUrl, secret) => {
+  if (!secret) return bridgeUrl;
+  const url = new URL(bridgeUrl);
+  url.searchParams.set("secret", secret);
+  return url.toString();
+};
+
+const verifyBridgeAuthorization = async (bridgeUrl, secret) => {
+  const url = new URL("/extension/auth-check", `${bridgeHttpOrigin(bridgeUrl)}/`);
+  if (secret) url.searchParams.set("secret", secret);
+
+  let response;
+  try {
+    response = await fetch(url);
+  } catch (_error) {
+    throw new Error(
+      "The bridge could not verify this extension. Check that the bridge is running and that its URL is correct.",
+    );
+  }
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch (_error) {
+    // The status remains useful when an older bridge lacks the structured
+    // preflight route; never include the request URL because it carries the secret.
+  }
+  if (response.ok && payload?.authorized === true) return;
+
+  const code = payload?.error?.code || `bridge_auth_http_${response.status}`;
+  const messages = {
+    handshake_secret_missing:
+      "The bridge handshake secret is missing. Open Settings and paste the secret issued by this bridge.",
+    handshake_secret_mismatch:
+      "The saved handshake secret does not match this bridge. Open Settings and replace it with the current bridge secret.",
+    origin_rejected:
+      `This bridge does not allow extension ${chrome.runtime.id}. Rebuild the bridge with this extension ID.`,
+  };
+  throw new Error(messages[code] || payload?.error?.message || `Bridge authorization failed (${code}).`);
+};
+
 const hostedToolArguments = (call) => {
   const args = call?.arguments && typeof call.arguments === "object" ? call.arguments : {};
   if (call?.name !== "browser.screenshot") {
@@ -2718,7 +3895,7 @@ const publicBridgeResponseDetails = (body) => {
 const appendAgentMemoryEvent = async (event) => {
   // Fire-and-forget event logging on the background hot path. Route both storage
   // accesses through the bounded helper so a wedged chrome.storage under MV3
-  // recycling cannot hang this (F1, docs/plans/2026-07-07-001). On a bounded-get
+  // recycling cannot hang this (F1, the implementation plan). On a bounded-get
   // timeout we degrade to empty memory rather than skipping the append; on a
   // bounded-set timeout we drop the event — either way we never propagate a
   // rejection into the caller, matching the fire-and-forget intent.
@@ -2763,6 +3940,128 @@ const appendBackgroundDiagnosticEvent = async (event) =>
     console.warn("actions.json failed to append background diagnostic event", error);
   });
 
+const PROTOFACE_CONNECTION_FIELDS = Object.freeze([
+  "livekitUrl",
+  "roomName",
+  "participantToken",
+  "sessionId",
+  "avatarId",
+  "avatarIdentity",
+  "expiresAt",
+]);
+const endingDirectProtofaceSessions = new Map();
+const endedDirectProtofaceSessions = new Set();
+// Protoface cleanup is Bearer-key authenticated. Retain the credential snapshot
+// that created each session inside the service worker so an in-worker settings
+// rotation cannot orphan the old session. After worker restart, cleanup safely
+// falls back to the current credential record.
+const directProtofaceSessionCredentials = new Map();
+
+const boundedProtofaceConnection = (value) => {
+  if (!value || typeof value !== "object") {
+    throw new Error("invalid_connection");
+  }
+  const connection = {};
+  for (const field of PROTOFACE_CONNECTION_FIELDS) {
+    const text = typeof value[field] === "string" ? value[field].trim() : "";
+    if (!text) throw new Error("invalid_connection");
+    connection[field] = text;
+  }
+  return connection;
+};
+
+const appendProtofaceSessionDiagnostic = (status) => appendBackgroundDiagnosticEvent({
+  type: "provider_session",
+  name: "background.protoface.session",
+  ok: status === "created" || status === "ended",
+  summary: `Background Protoface direct session ${status}.`,
+  input: {
+    provider: "protoface",
+    mode: "direct",
+    status,
+  },
+});
+
+const runBoundedProtofaceOperation = async (timeoutMs, operation) => {
+  const abortController = new AbortController();
+  const timer = setTimeout(() => abortController.abort(), timeoutMs);
+  try {
+    return await operation(abortController.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const protofaceSessionError = (operation) => ({
+  ok: false,
+  error: {
+    code: `protoface_session_${operation}_failed`,
+    message: `Failed to ${operation} Protoface session.`,
+    recoverable: true,
+  },
+});
+
+const handleProtofaceSessionCreate = async (message = {}) => {
+  const avatarId = typeof message.avatarId === "string" ? message.avatarId.trim() : "";
+  if (!avatarId) {
+    await appendProtofaceSessionDiagnostic("create_failed");
+    return protofaceSessionError("create");
+  }
+  try {
+    const credentials = await loadProtofaceCredentials(chrome.storage.local);
+    const value = await runBoundedProtofaceOperation(
+      PROTOFACE_CREATE_CALLER_TIMEOUT_MS,
+      (signal) => createDirectProtofaceSession({ credentials, avatarId, signal }),
+    );
+    const connection = boundedProtofaceConnection(value);
+    endedDirectProtofaceSessions.delete(connection.sessionId);
+    directProtofaceSessionCredentials.set(connection.sessionId, Object.freeze({ ...credentials }));
+    await appendProtofaceSessionDiagnostic("created");
+    return { ok: true, connection };
+  } catch {
+    await appendProtofaceSessionDiagnostic("create_failed");
+    return protofaceSessionError("create");
+  }
+};
+
+const endProtofaceSessionOnce = async (sessionId) => {
+  if (endedDirectProtofaceSessions.has(sessionId)) return;
+  const existing = endingDirectProtofaceSessions.get(sessionId);
+  if (existing) return existing;
+  const operation = (async () => {
+    const credentials = directProtofaceSessionCredentials.get(sessionId)
+      || await loadProtofaceCredentials(chrome.storage.local);
+    await runBoundedProtofaceOperation(
+      PROTOFACE_END_CALLER_TIMEOUT_MS,
+      (signal) => endDirectProtofaceSession({ credentials, sessionId, signal }),
+    );
+    endedDirectProtofaceSessions.add(sessionId);
+    directProtofaceSessionCredentials.delete(sessionId);
+  })();
+  endingDirectProtofaceSessions.set(sessionId, operation);
+  try {
+    await operation;
+  } finally {
+    endingDirectProtofaceSessions.delete(sessionId);
+  }
+};
+
+const handleProtofaceSessionEnd = async (message = {}) => {
+  const sessionId = typeof message.sessionId === "string" ? message.sessionId.trim() : "";
+  if (!sessionId) {
+    await appendProtofaceSessionDiagnostic("end_failed");
+    return protofaceSessionError("end");
+  }
+  try {
+    await endProtofaceSessionOnce(sessionId);
+    await appendProtofaceSessionDiagnostic("ended");
+    return { ok: true };
+  } catch {
+    await appendProtofaceSessionDiagnostic("end_failed");
+    return protofaceSessionError("end");
+  }
+};
+
 const toolNames = (tools = []) =>
   (Array.isArray(tools) ? tools : [])
     .map((tool) => (typeof tool?.name === "string" ? tool.name : null))
@@ -2799,26 +4098,189 @@ const executePrimitiveInTab = async (tab, call = {}) => {
   };
 };
 
-const executeStateProjectionInTab = async (tab, { bundle, projectionName, summaryName, maxBytes } = {}, call = {}) => {
+const projectionCacheScopeForTab = async (tab) => {
+  await ensureOrdinaryAuthorityReady();
+  const ownership = await delegatedGroupStore.authoritativeClaimOfTab(tab.id);
+  if (ownership.state !== "owned" || typeof ownership.groupId !== "string" || !ownership.groupId) {
+    throw new Error(`Projection cache requires durable tab ownership for tab ${tab.id}.`);
+  }
+  let siteHost;
+  try {
+    siteHost = new URL(tab.url).hostname;
+  } catch {
+    throw new Error("Projection cache requires a valid tab URL.");
+  }
+  return { siteHost, groupId: ownership.groupId };
+};
+
+const persistProjectionCacheUpdates = async (scope, output) => {
+  const updates = Array.isArray(output?.cache_updates) ? output.cache_updates : [];
+  for (const update of updates) {
+    await projectionCacheStore.upsert({
+      ...scope,
+      namespace: update?.namespace,
+      entries: update?.entries,
+    });
+  }
+  if (!output || typeof output !== "object" || !("cache_updates" in output)) return output;
+  const { cache_updates: _cacheUpdates, ...publicOutput } = output;
+  return publicOutput;
+};
+
+const projectionCacheForTab = async (tab, namespaces = []) => {
+  const scope = await projectionCacheScopeForTab(tab);
+  return {
+    scope,
+    // Store reads without a namespace filter are an administrative all-read;
+    // this helper keeps an empty declaration from becoming ambient access.
+    values: await readDeclaredProjectionCache({ store: projectionCacheStore, scope, namespaces }),
+  };
+};
+
+const effectiveSiteCatalogRevision = (bundle, pageUrl) => {
+  const listed = listSiteActionsBoundedFromBundle(bundle, pageUrl, { page_size: 1, max_bytes: 64_000 });
+  return listed.ok ? listed.value.provenance.catalog_hash : "catalog-unavailable";
+};
+
+const applySiteActionCachePolicy = async (tab, cachePolicy, input = {}) => {
+  const scope = await projectionCacheScopeForTab(tab);
+  return applyProjectionCacheInvalidations({ store: projectionCacheStore, scope, policy: cachePolicy, input });
+};
+
+const executeStateProjectionInTab = async (
+  tab,
+  { bundle, projectionName, summaryName, summaryArguments, maxBytes, recordSnapshot = false } = {},
+  call = {},
+) => {
+  let cache;
+  try {
+    cache = await projectionCacheForTab(
+      tab,
+      stateProjectionCacheNamespaces(bundle, tab.url || "", projectionName),
+    );
+  } catch (error) {
+    return {
+      ok: false,
+      call_id: call.call_id,
+      error: { code: "projection_cache_unavailable", message: error.message || String(error) },
+    };
+  }
   const response = await chrome.tabs.sendMessage(tab.id, {
     type: "actions-json:execute-state-projection",
     call_id: call.call_id,
     bundle,
     projection_name: projectionName,
     summary_name: summaryName || null,
+    summary_arguments: summaryArguments || {},
     max_bytes: maxBytes,
+    record_snapshot: recordSnapshot,
+    projection_cache: cache.values,
+    catalog_revision: effectiveSiteCatalogRevision(bundle, tab.url || ""),
   });
+  if (response?.ok === false || response?.output?.ok === false) {
+    return {
+      ok: false,
+      call_id: call.call_id,
+      output: response?.output,
+      error: response?.error || response?.output?.error || null,
+    };
+  }
+  let output;
+  try {
+    output = await persistProjectionCacheUpdates(cache.scope, response?.output);
+  } catch (error) {
+    return {
+      ok: false,
+      call_id: call.call_id,
+      error: { code: "projection_cache_write_failed", message: error.message || String(error) },
+    };
+  }
+  return {
+    ok: true,
+    call_id: call.call_id,
+    output,
+    error: null,
+  };
+};
+
+const executeStatePostconditionInTab = async (
+  tab,
+  { bundle, projectionName, postcondition, input, maxBytes } = {},
+  call = {},
+) => {
+  let cache;
+  try {
+    cache = await projectionCacheForTab(
+      tab,
+      stateProjectionCacheNamespaces(bundle, tab.url || "", projectionName),
+    );
+  } catch (error) {
+    return { ok: false, call_id: call.call_id, error: { code: "projection_cache_unavailable", message: error.message || String(error) } };
+  }
+  const response = await chrome.tabs.sendMessage(tab.id, {
+    type: "actions-json:execute-state-postcondition",
+    call_id: call.call_id,
+    bundle,
+    projection_name: projectionName,
+    postcondition,
+    input: input || {},
+    max_bytes: maxBytes,
+    projection_cache: cache.values,
+  });
+  let output = response?.output;
+  if (response?.ok !== false && output?.ok !== false) {
+    try {
+      output = await persistProjectionCacheUpdates(cache.scope, output);
+    } catch (error) {
+      return { ok: false, call_id: call.call_id, error: { code: "projection_cache_write_failed", message: error.message || String(error) } };
+    }
+  }
   return {
     ok: response?.ok !== false,
     call_id: call.call_id,
-    output: response?.output,
+    output,
     error: response?.error || null,
   };
 };
 
-function stateSnapshotKey(tab, projectionName) {
-  return `${tab.id}:${projectionName}`;
-}
+const executeStateDiffInTab = async (
+  tab,
+  { bundle, projectionName, responseMaxBytes } = {},
+  call = {},
+) => {
+  let cache;
+  try {
+    cache = await projectionCacheForTab(
+      tab,
+      stateProjectionCacheNamespaces(bundle, tab.url || "", projectionName),
+    );
+  } catch (error) {
+    return { ok: false, call_id: call.call_id, error: { code: "projection_cache_unavailable", message: error.message || String(error) } };
+  }
+  const response = await chrome.tabs.sendMessage(tab.id, {
+    type: "actions-json:execute-state-diff",
+    call_id: call.call_id,
+    bundle,
+    projection_name: projectionName,
+    compute_max_bytes: INTERNAL_STATE_PROJECTION_MAX_BYTES,
+    response_max_bytes: responseMaxBytes,
+    projection_cache: cache.values,
+  });
+  let output = response?.output;
+  if (response?.ok !== false && output?.ok !== false) {
+    try {
+      output = await persistProjectionCacheUpdates(cache.scope, output);
+    } catch (error) {
+      return { ok: false, call_id: call.call_id, error: { code: "projection_cache_write_failed", message: error.message || String(error) } };
+    }
+  }
+  return {
+    ok: response?.ok !== false,
+    call_id: call.call_id,
+    output,
+    error: response?.error || null,
+  };
+};
 
 const executeStateProjectionModesInTab = async (tab, { bundle, mode, args = {}, call = {} } = {}) => {
   const projectionName = args.projection_name || args.projection;
@@ -2832,13 +4294,26 @@ const executeStateProjectionModesInTab = async (tab, { bundle, mode, args = {}, 
       },
     };
   }
+  if (mode === "state_diff") {
+    return executeStateDiffInTab(
+      tab,
+      {
+        bundle,
+        projectionName,
+        responseMaxBytes: args.max_bytes,
+      },
+      call,
+    );
+  }
   const stateResult = await executeStateProjectionInTab(
     tab,
     {
       bundle,
       projectionName,
       summaryName: mode === "state_summary" ? args.summary_name || "agent_context" : null,
+      summaryArguments: mode === "state_summary" ? args.summary_arguments || {} : {},
       maxBytes: args.max_bytes,
+      recordSnapshot: mode === "state_read",
     },
     call,
   );
@@ -2848,51 +4323,192 @@ const executeStateProjectionModesInTab = async (tab, { bundle, mode, args = {}, 
   if (mode === "state_summary") {
     return stateResult;
   }
-  const key = stateSnapshotKey(tab, projectionName);
-  if (mode === "state_diff") {
-    const previous = stateProjectionSnapshots.get(key);
-    const current = stateResult.output?.state;
-    if (current === undefined) {
+  return stateResult;
+};
+
+let projectionSemanticEmbeddingCache = null;
+
+const executeProjectionGraphModeInTab = async (tab, { bundle, mode, args = {}, call = {} } = {}) => {
+  const catalogRevision = effectiveSiteCatalogRevision(bundle, tab.url || "");
+  if (mode === "search" && (args.search_mode || "semantic") !== "lexical") {
+    if (args.continuation || args.cursor) {
+      const response = await chrome.tabs.sendMessage(tab.id, {
+        type: "actions-json:finalize-projection-semantic-search",
+        call_id: call.call_id,
+        arguments: args,
+        catalog_revision: catalogRevision,
+        page_size: args.page_size,
+        max_bytes: args.max_bytes,
+      });
+      return {
+        ok: response?.ok !== false,
+        call_id: call.call_id,
+        output: response?.output ?? response,
+        error: response?.error || response?.output?.error || null,
+      };
+    }
+    const preparedResponse = await chrome.tabs.sendMessage(tab.id, {
+      type: "actions-json:prepare-projection-semantic-search",
+      call_id: call.call_id,
+      bundle,
+      arguments: args,
+      catalog_revision: catalogRevision,
+    });
+    const prepared = preparedResponse?.output;
+    if (preparedResponse?.ok === false || prepared?.ok === false) {
       return {
         ok: false,
         call_id: call.call_id,
-        error: {
-          code: "state_diff_requires_full_state",
-          message: "actions.site state_diff requires a full state projection result.",
-        },
+        output: prepared,
+        error: preparedResponse?.error || prepared?.error || null,
       };
     }
-    const patches = previous?.state === undefined ? [] : diffStates(previous.state, current);
-    stateProjectionSnapshots.set(key, {
-      state: current,
-      state_hash: stateResult.output.state_hash || null,
-      observed_at: stateResult.output.observed_at || new Date().toISOString(),
+    const config = resolveStateProjectionSemanticConfig(bundle, tab.url || "", prepared.projection_name);
+    let cache = null;
+    try {
+      projectionSemanticEmbeddingCache ||= createProjectionEmbeddingCache({ adapter: createIndexedDbAdapter() });
+      cache = projectionSemanticEmbeddingCache;
+    } catch {
+      // IndexedDB denial is a lexical degradation, never loss of page access.
+    }
+    let host = "invalid.local";
+    try { host = new URL(tab.url || "").hostname; } catch {}
+    const output = await runProjectionSemanticSearch({
+      prepared,
+      config,
+      trustedCatalog: Boolean(config) && prepared.catalog_revision === catalogRevision,
+      query: args.query,
+      cache,
+      cacheScope: {
+        host,
+        semanticNamespace: config?.semantic_namespace || prepared.semantic_namespace || prepared.projection_name,
+        permissionRevision: "projection-semantic-v1",
+        catalogRevision,
+      },
+      loadApiKey: () => loadOpenAiApiKey(chrome.storage.local),
+      embedTexts,
+      evaluateJsonata: async ({ expression, candidates }) => jsonata(expression).evaluate({ candidates }),
+      pageSize: Number.isInteger(args.page_size) ? Math.min(args.page_size, 50) : 5,
+    });
+    if (output.mode === "lexical") {
+      const response = await chrome.tabs.sendMessage(tab.id, {
+        type: "actions-json:execute-projection-search",
+        call_id: call.call_id,
+        bundle,
+        arguments: { ...args, search_mode: "lexical" },
+        catalog_revision: catalogRevision,
+      });
+      const lexicalOutput = response?.output ?? response;
+      if (lexicalOutput && typeof lexicalOutput === "object") lexicalOutput.semantic = output.semantic;
+      return { ok: response?.ok !== false, call_id: call.call_id, output: lexicalOutput, error: response?.error || null };
+    }
+    const rankedMatches = output.internal_ranked_matches || output.matches || [];
+    const semanticMetadata = {
+      complete: output.semantic?.progress?.complete === true,
+      coverage: output.coverage,
+      semantic: output.semantic,
+    };
+    const response = await chrome.tabs.sendMessage(tab.id, {
+      type: "actions-json:finalize-projection-semantic-search",
+      call_id: call.call_id,
+      snapshot_id: prepared.snapshot_id,
+      arguments: args,
+      catalog_revision: catalogRevision,
+      page_size: args.page_size,
+      max_bytes: args.max_bytes,
+      ranked_matches: rankedMatches,
+      semantic: semanticMetadata,
     });
     return {
-      ok: true,
+      ok: response?.ok !== false,
       call_id: call.call_id,
-      output: {
-        ok: true,
-        projection: projectionName,
-        baseline: previous ? "previous_snapshot" : "initialized",
-        patch_format: "json_patch",
-        patches,
-        semantic_deltas: buildSemanticDeltas(patches),
-        previous_state_hash: previous?.state_hash || null,
-        state_hash: stateResult.output.state_hash || null,
-        observed_at: stateResult.output.observed_at || null,
-      },
-      error: null,
+      output: response?.output ?? response,
+      error: response?.error || response?.output?.error || null,
     };
   }
-  if (stateResult.output?.state !== undefined) {
-    stateProjectionSnapshots.set(key, {
-      state: stateResult.output.state,
-      state_hash: stateResult.output.state_hash || null,
-      observed_at: stateResult.output.observed_at || new Date().toISOString(),
-    });
+  const response = await chrome.tabs.sendMessage(tab.id, {
+    type: mode === "navigate"
+      ? "actions-json:execute-projection-navigate"
+      : "actions-json:execute-projection-search",
+    call_id: call.call_id,
+    bundle,
+    arguments: args,
+    catalog_revision: catalogRevision,
+  });
+  return {
+    ok: response?.ok !== false,
+    call_id: call.call_id,
+    output: response?.output,
+    error: response?.error || null,
+  };
+};
+
+const jsonBytes = (value) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
+
+const compactCatalogProjection = (projection) => ({
+  name: projection.name,
+  ...(projection.description ? { description: projection.description } : {}),
+  ...(projection.summaries?.length ? { summaries: projection.summaries } : {}),
+});
+
+const boundedSiteCatalog = (bundle, pageUrl, args = {}) => {
+  const maxBytes = Math.min(48_000, Math.max(256, Number.isInteger(args.max_bytes) ? args.max_bytes : 4_096));
+  const valueBudget = maxBytes - jsonBytes({ ok: true });
+  const actionsResult = listSiteActionsBoundedFromBundle(bundle, pageUrl, {
+    query: args.query,
+    page_size: args.page_size,
+    continuation: args.continuation,
+    target_url_contains: args.target_url_contains || pageUrl,
+    max_bytes: Math.max(256, valueBudget - 768),
+  });
+  if (!actionsResult.ok) return actionsResult;
+
+  const storage = listSiteStorageFilesFromBundle(bundle, pageUrl);
+  const projections = listStateProjectionsFromBundle(bundle, pageUrl).map(compactCatalogProjection);
+  const value = {
+    actions: actionsResult.value.actions,
+    page: actionsResult.value.page,
+    provenance: {
+      ...actionsResult.value.provenance,
+      bundle_protocol: typeof bundle?.protocol === "string" ? bundle.protocol : null,
+      bundle_version: bundle?.version ?? null,
+      synced_at: bundle?.synced_at ?? bundle?.sync_timestamp ?? null,
+      entry_count: Array.isArray(bundle?.entries) ? bundle.entries.length : 0,
+    },
+    state_projections: [],
+    files: [],
+    skills: [],
+    coverage: {
+      actions: { complete: !actionsResult.value.page.has_more },
+      state_projections: { complete: true, total: projections.length },
+      files: { complete: true, total: storage.files.length },
+      skills: { complete: true, total: storage.skills.length },
+    },
+  };
+  const appendBounded = (field, entries) => {
+    for (const entry of entries) {
+      const candidate = { ...value, [field]: [...value[field], entry] };
+      if (jsonBytes(candidate) > valueBudget) {
+        value.coverage[field].complete = false;
+        break;
+      }
+      value[field].push(entry);
+    }
+    value.coverage[field].returned = value[field].length;
+  };
+  appendBounded("state_projections", projections);
+  appendBounded("files", storage.files);
+  appendBounded("skills", storage.skills);
+  if (jsonBytes(value) > valueBudget) {
+    return {
+      ok: false,
+      error: {
+        code: "catalog_response_budget_too_small",
+        message: "The bounded catalog metadata does not fit within max_bytes.",
+      },
+    };
   }
-  return stateResult;
+  return { ok: true, value };
 };
 
 const bridgeStateProjectionBundle = (item) => {
@@ -2912,35 +4528,75 @@ const bridgeStateProjectionBundle = (item) => {
   };
 };
 
+// MCP graph calls intentionally carry only opaque snapshot arguments. Retain
+// the exact projection-scoped bundle that created each bridge snapshot so the
+// follow-up authority check compares like with like instead of falling back to
+// the extension's full (and therefore differently hashed) catalog.
+const bridgeProjectionSnapshotBundles = new Map();
+const MAX_BRIDGE_PROJECTION_SNAPSHOT_BUNDLES = 64;
+
 const executeBridgeStateProjectionItem = async (item, tab) => {
   const callId = item?.call_id || null;
   const mode = item?.mode;
-  if (mode !== "state_read" && mode !== "state_summary" && mode !== "state_diff") {
+  const isStateMode = mode === "state_read" || mode === "state_summary" || mode === "state_diff";
+  const isGraphMode = mode === "navigate" || mode === "search";
+  if (!isStateMode && !isGraphMode) {
     return {
       ok: false,
       call_id: callId,
       error: {
         code: "invalid_input",
-        message: "state_projection_call mode must be state_read, state_summary, or state_diff.",
+        message: "state_projection_call mode must be state_read, state_summary, state_diff, navigate, or search.",
         recoverable: true,
       },
     };
   }
-  let bundle = bridgeStateProjectionBundle(item);
+  const retainedSnapshot = isGraphMode && typeof item?.snapshot_id === "string"
+    ? bridgeProjectionSnapshotBundles.get(item.snapshot_id)
+    : null;
+  let bundle = retainedSnapshot?.tab_id === tab.id
+    ? retainedSnapshot.bundle
+    : bridgeStateProjectionBundle(item);
   if (!bundle) {
     const stored = await chrome.storage.local.get(EXTENSION_STORAGE_BUNDLE_KEY);
     bundle = stored?.[EXTENSION_STORAGE_BUNDLE_KEY];
   }
-  return executeStateProjectionModesInTab(tab, {
+  const args = {
+    projection_name: item.projection_name,
+    summary_name: item.summary_name || undefined,
+    summary_arguments: item.summary_arguments || {},
+    max_bytes: item.max_bytes || undefined,
+    snapshot_id: item.snapshot_id || undefined,
+    node_ref: item.node_ref || undefined,
+    operation: item.operation || undefined,
+    direction: item.direction || undefined,
+    edge_types: item.edge_types || undefined,
+    max_depth: item.max_depth || undefined,
+    measure_filter: item.measure_filter || undefined,
+    measure_order: item.measure_order || undefined,
+    query: item.query || undefined,
+    scope: item.scope || undefined,
+    cursor: item.cursor || undefined,
+    page_size: item.page_size || undefined,
+    search_mode: item.search_mode || undefined,
+  };
+  const execute = isGraphMode ? executeProjectionGraphModeInTab : executeStateProjectionModesInTab;
+  const result = await execute(tab, {
     bundle,
     mode,
-    args: {
-      projection_name: item.projection_name,
-      summary_name: item.summary_name || undefined,
-      max_bytes: item.max_bytes || undefined,
-    },
+    args,
     call: { call_id: callId },
   });
+  const snapshotId = result?.ok === true
+    ? result?.output?.graph_descriptor?.snapshot_id
+    : null;
+  if (isStateMode && typeof snapshotId === "string" && snapshotId) {
+    bridgeProjectionSnapshotBundles.set(snapshotId, { bundle, tab_id: tab.id });
+    while (bridgeProjectionSnapshotBundles.size > MAX_BRIDGE_PROJECTION_SNAPSHOT_BUNDLES) {
+      bridgeProjectionSnapshotBundles.delete(bridgeProjectionSnapshotBundles.keys().next().value);
+    }
+  }
+  return result;
 };
 
 const handleBridgeStateProjectionCall = async (item) => {
@@ -3062,12 +4718,31 @@ const handleBridgeSiteActionCall = async (item) => {
     });
     return;
   }
+  sendBridgeItem({
+    type: "action_progress",
+    call_id: callId,
+    runtime_id: runtimeId,
+    action: item?.action || null,
+    last_entered_content_phase: "site_action_execution",
+    last_completed_content_phase: null,
+    observed_at: new Date().toISOString(),
+  });
   const result = await executeBridgeSiteActionItem(item, tab);
+  sendBridgeItem({
+    type: "action_progress",
+    call_id: callId,
+    runtime_id: runtimeId,
+    action: item?.action || null,
+    last_entered_content_phase: "site_action_delivery",
+    last_completed_content_phase: "site_action_execution",
+    observed_at: new Date().toISOString(),
+  });
   if (result.ok === false || result.output?.ok === false) {
     const outputItem = {
       type: "action_error",
       call_id: callId,
       runtime_id: runtimeId,
+      ...(result.output !== undefined ? { output: result.output } : {}),
       error: result.error || result.output?.error || {
         code: "site_action_failed",
         message: "Site action execution failed in the extension runtime.",
@@ -3125,29 +4800,32 @@ const handleBridgeSiteActionCall = async (item) => {
 
 const getClaimedActiveTab = async () => {
   const entries = await sessionStore.getSessionEntries();
-  const claimedTabIds = [];
-  let activeTabId = null;
+  const claimedTabs = [];
+  let activeClaim = null;
   for (const [_sessionId, session] of entries) {
     if (Number.isInteger(session.activeTabId)) {
-      activeTabId = session.activeTabId;
+      const claim = session.tabs?.[String(session.activeTabId)] || null;
+      if (claim) activeClaim = { tabId: session.activeTabId, claim };
     }
-    for (const tabIdKey of Object.keys(session.tabs || {})) {
+    for (const [tabIdKey, claim] of Object.entries(session.tabs || {})) {
       const tabId = Number(tabIdKey);
       if (Number.isInteger(tabId)) {
-        claimedTabIds.push(tabId);
+        claimedTabs.push({ tabId, claim });
       }
     }
   }
 
-  const candidateIds = [
-    activeTabId,
-    claimedTabIds.length === 1 ? claimedTabIds[0] : null,
-  ].filter((tabId) => Number.isInteger(tabId));
+  const candidates = [
+    activeClaim,
+    claimedTabs.length === 1 ? claimedTabs[0] : null,
+  ].filter(Boolean);
 
-  for (const tabId of candidateIds) {
+  for (const { tabId, claim } of candidates) {
     try {
+      await requireOrdinaryTabOwnership(tabId, claim.ownershipRevision || null);
       const tab = await chrome.tabs.get(tabId);
       if (tab?.id) {
+        await requireOrdinaryTabOwnership(tabId, claim.ownershipRevision || null);
         return tab;
       }
     } catch (_error) {
@@ -3157,13 +4835,63 @@ const getClaimedActiveTab = async () => {
   return null;
 };
 
+// Schemes actions.json cannot operate. `<all_urls>` is http/https only, so
+// `chrome.scripting.executeScript` against any of these is refused by Chrome
+// with "Cannot access contents of url ... Extension manifest must request
+// permission to access this host."
+//
+// Investigated 2026-07-27:
+// the internal investigation record
+const UNOPERABLE_TAB_SCHEMES = Object.freeze([
+  "chrome://",
+  "chrome-extension://",
+  "devtools://",
+  "about:",
+]);
+
+const isOperableTabUrl = (url) =>
+  typeof url === "string" &&
+  url.length > 0 &&
+  !UNOPERABLE_TAB_SCHEMES.some((scheme) => url.startsWith(scheme));
+
 const getHostedToolDefaultTab = async () => {
   const claimedTab = await getClaimedActiveTab();
   if (claimedTab?.id) {
     return { tab: claimedTab, source: "claimed_active_tab" };
   }
+  // The browser-active fallback hands over a tab the user never authorized.
+  //
+  // The visible symptom was narrow: with the options page frontmost and nothing
+  // claimed, a hosted tool call reached injectContent and Chrome refused,
+  // surfacing a host-permission error the user then reported. But the refusal
+  // is Chrome being loud about ONE scheme. The same fallback would hand over a
+  // banking tab, a password manager, or a private document just as readily —
+  // and on https:// Chrome does NOT refuse. It would inject silently into a tab
+  // the user never clicked "take control of".
+  //
+  // Per-tab authorization is this product's whole security model, so a
+  // convenience default that bypasses it is the defect, not the scheme it
+  // happened to trip over. The fallback now yields a tab only when that tab is
+  // operable at all; an unoperable frontmost tab produces a NAMED refusal
+  // instead of an opaque Chrome error three frames away from the cause.
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  return { tab: tab || null, source: "browser_active_tab" };
+  if (!tab?.id) {
+    return { tab: null, source: "browser_active_tab" };
+  }
+  if (!isOperableTabUrl(tab.url)) {
+    return {
+      tab: null,
+      source: "browser_active_tab",
+      refused: {
+        code: "active_tab_not_operable",
+        url: tab.url || null,
+        message:
+          "The frontmost tab cannot be operated by actions.json (its scheme grants no host access), " +
+          "and no tab is claimed. Claim a tab with \"Take control of this tab\" first.",
+      },
+    };
+  }
+  return { tab, source: "browser_active_tab" };
 };
 
 // a11y.tree / a11y.query (U3, docs/a11y-shim-spec.md): build a fresh CDP-backed
@@ -3220,7 +4948,7 @@ const runA11yWatch = async (tabId, { enableScreenReader = true, screenReaderChor
   }
   // 2) Open the persistent a11y debugger session so the announcer's ShimTree
   //    CDP closure stays alive across the batch (the U8 drop was per-op detach).
-  try { await ensureA11yDebuggerSession(tabId); } catch (_e) { /* adopted or unavailable */ }
+  await ensureA11yDebuggerSession(tabId);
   // 3) Ensure the announcer is wired (lazy — first tree-change would also do it).
   await getA11yAnnouncer().catch(() => {});
   // 3) Enable the site screen-reader mode idempotently, if asked (canvas Docs
@@ -3327,6 +5055,7 @@ const executeBackgroundHostedToolCall = async (call = {}, routedTabId = null) =>
         state: node.state,
         backend_dom_node_id: node.backendDOMNodeId ?? null,
         visible_center: attestation.visible_center,
+        clickable_center: attestation.clickable_center,
         visible_rect: attestation.visible_rect,
         clickable: attestation.clickable,
         receives_events: attestation.receives_events,
@@ -3334,7 +5063,9 @@ const executeBackgroundHostedToolCall = async (call = {}, routedTabId = null) =>
         occluded_by: attestation.occluded_by,
       };
       if (attestation.clickable && attestation.receives_events === true) {
-        output.clickable_center = attestation.visible_center;
+        output.clickable_center = attestation.clickable_center || attestation.visible_center;
+      } else {
+        delete output.clickable_center;
       }
       return output;
     });
@@ -3399,13 +5130,20 @@ const executeBackgroundHostedToolCall = async (call = {}, routedTabId = null) =>
       error: null,
     };
   }
+  // Tab-targeted browser.* lifecycle tools MUST honor routedTabId, exactly like
+  // the a11y/trusted-input branches above. Before 2026-07-24 they dropped it and
+  // navigateClaimedTab/closeClaimedTab/dismissDialogOnTab fell back to the
+  // ACTIVE claimed tab, so a bridge call routed to runtime X navigated whatever
+  // tab happened to be active (route-or-refuse violation; twice clobbered live
+  // human tabs). With routedTabId forwarded, resolveClaimedTarget either hits
+  // exactly that tab or throws "not claimed" — it never silently retargets.
   if (call.name === "browser.claimed_tabs.activate") {
     const args = call.arguments && typeof call.arguments === "object" ? call.arguments : {};
     return {
       ok: true,
       call_id: call.call_id,
       output: await activateClaimedTab({
-        tabId: args.tab_id ?? args.tabId,
+        tabId: Number.isInteger(routedTabId) ? routedTabId : (args.tab_id ?? args.tabId),
         reconnectDelayMs: args.reconnect_delay_ms ?? args.reconnectDelayMs,
       }),
       error: null,
@@ -3416,7 +5154,9 @@ const executeBackgroundHostedToolCall = async (call = {}, routedTabId = null) =>
     return {
       ok: true,
       call_id: call.call_id,
-      output: await navigateClaimedTab(args),
+      output: await navigateClaimedTab(
+        Number.isInteger(routedTabId) ? { ...args, tab_id: routedTabId } : args
+      ),
       error: null,
     };
   }
@@ -3434,7 +5174,10 @@ const executeBackgroundHostedToolCall = async (call = {}, routedTabId = null) =>
     return {
       ok: true,
       call_id: call.call_id,
-      output: await closeClaimedTab(args),
+      output: await closeClaimedTab({
+        ...args,
+        tab_id: Number.isInteger(routedTabId) ? routedTabId : (args.tab_id ?? args.tabId),
+      }),
       error: null,
     };
   }
@@ -3443,9 +5186,23 @@ const executeBackgroundHostedToolCall = async (call = {}, routedTabId = null) =>
     return {
       ok: true,
       call_id: call.call_id,
-      output: await dismissDialogOnTab(args),
+      output: await dismissDialogOnTab({
+        ...args,
+        tab_id: Number.isInteger(routedTabId) ? routedTabId : (args.tab_id ?? args.tabId),
+      }),
       error: null,
     };
+  }
+  // Primitives that need no tab and no page — they read chrome.storage.local and
+  // compute. Delegating rather than duplicating means the DIRECT MCP path and
+  // the HOSTED AGENT path run the same code, which is the property that broke:
+  // adding a name to BRIDGE_BACKGROUND_ACTION_NAMES only INTERCEPTS the call,
+  // and this function returning null lands the caller in its error branch with
+  // output:undefined. That would have swapped `handler_failed` for a different
+  // failure — a fix that moves the symptom (2026-07-27).
+  if (call.name === "corpus.search" || call.name === "corpus.build") {
+    const tab = Number.isInteger(routedTabId) ? await chrome.tabs.get(routedTabId).catch(() => null) : null;
+    return executeLocalHostedToolCall({ url: tab?.url || "" }, call);
   }
   return null;
 };
@@ -3544,6 +5301,127 @@ const handleTransferBufferMessage = async (message = {}, sender = {}) => {
   }
 };
 
+const fileTransferErrorResult = (primitive, error, args = {}) => ({
+  ok: false,
+  primitive,
+  adapter: "extension",
+  error: {
+    code: error instanceof FileTransferError ? error.code : "file_transfer_failed",
+    message: error.message || String(error),
+    recoverable: true,
+    evidence: {
+      transfer_id: args.transfer_id || null,
+      ...(error instanceof FileTransferError ? error.evidence : {}),
+    },
+  },
+});
+
+const handleFileTransferMessageUnlocked = async (message = {}, sender = {}) => {
+  const primitive = message.primitive || message.name;
+  const args = message.arguments && typeof message.arguments === "object" ? message.arguments : {};
+  try {
+    let value;
+    if (primitive === "file.transfer.create") {
+      value = fileTransferStore.create(args);
+    } else if (primitive === "file.transfer.chunk") {
+      value = fileTransferStore.appendChunk(args);
+    } else if (primitive === "file.transfer.finalize") {
+      value = await fileTransferStore.finalize(args);
+    } else if (primitive === "file.transfer.status") {
+      value = fileTransferStore.status(args);
+    } else if (primitive === "file.transfer.cancel") {
+      value = fileTransferStore.cancel(args);
+    } else if (primitive === "file.transfer.upload.consume") {
+      const consumed = fileTransferStore.readUpload(args);
+      value = {
+        ...consumed.metadata,
+        base64: bytesToBase64(consumed.bytes),
+      };
+    } else if (primitive === "file.transfer.upload.complete") {
+      value = fileTransferStore.completeUpload(args);
+    } else if (primitive === "file.transfer.download.capture") {
+      value = await fileTransferStore.captureDownload({
+        ...args,
+        bytes: base64ToBytes(args.base64),
+      });
+    } else if (primitive === "file.transfer.download.read_chunk") {
+      const chunk = fileTransferStore.readChunk(args);
+      const { bytes: _bytes, ...metadata } = chunk;
+      value = metadata;
+    } else if (primitive === "file.transfer.download.complete") {
+      value = fileTransferStore.completeDownload(args);
+    } else {
+      throw new FileTransferError("file_transfer_primitive_unknown", `Unknown file transfer primitive: ${primitive || "unknown"}`);
+    }
+    appendAgentMemoryEvent({
+      type: "tool",
+      name: primitive,
+      ok: true,
+      summary: "Remote file transfer state changed.",
+      output: {
+        direction: value.direction,
+        transfer_id: value.transfer_id,
+        origin: value.origin,
+        size: value.size,
+        sha256: value.sha256,
+        state: value.state,
+        sender: transferSourceForSender(sender),
+      },
+    }).catch(() => {});
+    return {
+      ok: true,
+      result: {
+        ok: true,
+        primitive,
+        adapter: "extension",
+        value,
+      },
+    };
+  } catch (error) {
+    const interruptedPrimitives = new Set([
+      "file.transfer.chunk",
+      "file.transfer.finalize",
+      "file.transfer.upload.consume",
+      "file.transfer.upload.complete",
+      "file.transfer.download.read_chunk",
+      "file.transfer.download.complete",
+    ]);
+    const normalizedError =
+      error instanceof FileTransferError &&
+      error.code === "transfer_not_found" &&
+      interruptedPrimitives.has(primitive)
+        ? new FileTransferError(
+            "transfer_interrupted",
+            "Incomplete transfer state is unavailable, likely because the extension worker restarted.",
+            { transfer_id: args.transfer_id || null, interrupted_primitive: primitive },
+          )
+        : error;
+    return {
+      ok: true,
+      result: fileTransferErrorResult(primitive || "file.transfer.unknown", normalizedError, args),
+    };
+  }
+};
+
+const handleFileTransferMessage = (message = {}, sender = {}) => {
+  const operation = fileTransferLane.then(async () => {
+    await ensureFileTransferHydrated();
+    const result = await handleFileTransferMessageUnlocked(message, sender);
+    if (result?.result?.ok === true) await fileTransferPersistMutation(message.primitive || message.name, message.arguments || {});
+    return result;
+  });
+  fileTransferLane = operation.catch(() => {});
+  return operation;
+};
+
+// Inert test hook for the unpacked-extension live smoke. It exercises the same
+// handler as runtime messages while keeping one MV3 worker event alive across
+// a complete bounded transfer.
+self.__fileTransferTestCall = (primitive, args = {}) => handleFileTransferMessage({
+  primitive,
+  arguments: args,
+});
+
 const handleStorageReadFileMessage = async (message = {}, sender = {}) => {
   const stored = await chrome.storage.local.get(EXTENSION_STORAGE_BUNDLE_KEY);
   const bundle = stored?.[EXTENSION_STORAGE_BUNDLE_KEY];
@@ -3600,6 +5478,110 @@ const executeLocalHostedToolCall = async (tab, call = {}) => {
   const stored = await chrome.storage.local.get(EXTENSION_STORAGE_BUNDLE_KEY);
   const bundle = stored?.[EXTENSION_STORAGE_BUNDLE_KEY];
 
+  // corpus.search: meaning-based lookup over a corpus the site map declares.
+  // Lexical runs map-side (a normal site action); this is the semantic tier plus
+  // the refusal, so the map keeps its cheap path and the extension owns the part
+  // JSONata cannot express — the engine has no parse primitive, so a vector
+  // table can be READ by the model or by the extension but never INDEXED by a
+  // workflow expression (established with a tester, 2026-07-27).
+  if (call.name === "corpus.search") {
+    const query = typeof args.query === "string" ? args.query : "";
+    const indexPath = typeof args.index_path === "string" ? args.index_path : "";
+    if (!indexPath) {
+      return {
+        ok: false,
+        call_id: call.call_id,
+        error: {
+          code: "corpus_index_path_required",
+          message:
+            "corpus.search needs index_path: the map-relative path of the vector artifact declared in x_actions.files.",
+        },
+      };
+    }
+    const result = await searchCorpus(query, {
+      // No lexical tier here — the map owns that and calls this only when its
+      // own match is weak. Passing none means every call escalates, which is
+      // correct for a caller that already decided lexical was not enough.
+      lexicalSearch: null,
+      loadIndex: () => loadCorpusIndexFromBundle(bundle, { path: indexPath }),
+      embedQuery: async (text) => {
+        let apiKey = "";
+        try {
+          apiKey = await loadOpenAiApiKey(chrome.storage.local);
+        } catch (error) {
+          // Surfaced as a degradation with a hedge, never as an empty result.
+          return {
+            ok: false,
+            error: { code: "openai_api_key_missing", message: error.message },
+          };
+        }
+        return embedQuery(text, { apiKey });
+      },
+      limit: Number.isInteger(args.limit) ? args.limit : undefined,
+    });
+    if (!result.ok) {
+      return { ok: false, call_id: call.call_id, error: result.error };
+    }
+    return {
+      ok: true,
+      call_id: call.call_id,
+      output: {
+        ok: true,
+        primitive: "corpus.search",
+        adapter: "extension",
+        value: result,
+      },
+    };
+  }
+
+  // corpus.build: embed a text index the map already ships and return the
+  // vector artifact. Runs here, not as a CLI, so the OpenAI key never leaves the
+  // extension — the calling agent never handles a credential, and there is one
+  // resolution order rather than two that can drift.
+  if (call.name === "corpus.build") {
+    let apiKey = "";
+    try {
+      apiKey = await loadOpenAiApiKey(chrome.storage.local);
+    } catch (error) {
+      return {
+        ok: false,
+        call_id: call.call_id,
+        error: { code: "openai_api_key_missing", message: error.message },
+      };
+    }
+    const result = await buildCorpusArtifact({
+      bundle,
+      sourcePath: typeof args.source_path === "string" ? args.source_path : "",
+      recordsAt: typeof args.records_at === "string" ? args.records_at : null,
+      idField: typeof args.id_field === "string" ? args.id_field : "",
+      textFields: Array.isArray(args.text_fields) ? args.text_fields : [],
+      apiKey,
+    });
+    if (!result.ok) {
+      return { ok: false, call_id: call.call_id, error: result.error };
+    }
+    // The artifact is RETURNED, not written. Writing into the storage bundle
+    // would put a build step behind a mutation the caller cannot review; the
+    // caller commits it to the map's scope through the normal storage flow,
+    // where it is a reviewable diff like any other declared file.
+    return {
+      ok: true,
+      call_id: call.call_id,
+      output: {
+        ok: true,
+        primitive: "corpus.build",
+        adapter: "extension",
+        value: {
+          documents_embedded: result.documents_embedded,
+          source_path: result.source_path,
+          model: result.index.model,
+          dimensions: result.index.dimensions,
+          artifact: JSON.stringify(result.index),
+        },
+      },
+    };
+  }
+
   if (call.name === "storage.read_file") {
     const result = readSiteStorageFileFromBundle(bundle, tab.url || "", args);
     if (!result.ok) {
@@ -3627,21 +5609,16 @@ const executeLocalHostedToolCall = async (tab, call = {}) => {
   }
 
   const mode = args.mode;
-  const targetUrl = args.target_url_contains || tab.url || "";
 
   if (mode === "list") {
-    const storageFiles = listSiteStorageFilesFromBundle(bundle, tab.url || "");
+    const listed = boundedSiteCatalog(bundle, tab.url || "", args);
+    if (!listed.ok) {
+      return { ok: false, call_id: call.call_id, error: listed.error };
+    }
     return {
       ok: true,
       call_id: call.call_id,
-      output: {
-        ok: true,
-        target_url_contains: targetUrl,
-        actions: listSiteActionsFromBundle(bundle, tab.url || "", targetUrl),
-        state_projections: listStateProjectionsFromBundle(bundle, tab.url || ""),
-        files: storageFiles.files,
-        skills: storageFiles.skills,
-      },
+      output: { ok: true, ...listed.value },
       error: null,
     };
   }
@@ -3650,13 +5627,17 @@ const executeLocalHostedToolCall = async (tab, call = {}) => {
     return executeStateProjectionModesInTab(tab, { bundle, mode, args, call });
   }
 
+  if (mode === "navigate" || mode === "search") {
+    return executeProjectionGraphModeInTab(tab, { bundle, mode, args, call });
+  }
+
   if (mode !== "call") {
     return {
       ok: false,
       call_id: call.call_id,
       error: {
         code: "invalid_input",
-        message: "actions.site mode must be list, call, state_read, or state_summary.",
+        message: "actions.site mode must be list, call, state_read, state_summary, state_diff, navigate, or search.",
       },
     };
   }
@@ -3761,14 +5742,26 @@ const executeSiteActionCallInTab = async (tab, { bundle, args, call }) => {
         return { ok: true, output: payload };
       },
     });
+    // Invalidate immediately after completed workflow steps and before the
+    // independent postcondition projection. The postcondition can then
+    // rehydrate fresh maintained fields from the committed page. If the
+    // verifier later fails, the conservative invalidation still stands.
+    const cacheFreshness = workflowResult.ok !== false && resolved.cache
+      ? await applySiteActionCachePolicy(tab, resolved.cache, resolved.workflow.input)
+          .then((value) => ({ ok: true, ...value }))
+          .catch((error) => ({ ok: false, error: error.message || String(error) }))
+      : null;
     let postconditionResult = null;
     if (workflowResult.ok !== false && resolved.workflow.postcondition) {
       const projectionName = resolved.workflow.postcondition.projection_name;
-      const stateResult = await executeStateProjectionInTab(
+      const stateResult = await executeStatePostconditionInTab(
         tab,
         {
           bundle,
           projectionName,
+          postcondition: resolved.workflow.postcondition.definition,
+          input: resolved.workflow.input,
+          maxBytes: INTERNAL_STATE_PROJECTION_MAX_BYTES,
         },
         call,
       );
@@ -3781,24 +5774,52 @@ const executeSiteActionCallInTab = async (tab, { bundle, args, call }) => {
           },
         };
       } else {
-        postconditionResult = await verifyStatePostcondition({
-          postcondition: resolved.workflow.postcondition.definition,
-          state: stateResult.output.state,
-          input: resolved.workflow.input,
-        });
+        postconditionResult = stateResult.output?.verification || {
+          ok: false,
+          error: {
+            code: "state_postcondition_result_missing",
+            message: "State postcondition execution returned no verification result.",
+          },
+        };
       }
     }
     const workflowOk = workflowResult.ok !== false && (postconditionResult?.ok !== false);
-    const workflowOutput = postconditionResult
+    const verificationFailedAfterExecution = workflowResult.ok !== false && postconditionResult?.ok === false;
+    const outcome = verificationFailedAfterExecution
+      ? {
+          execution: "succeeded",
+          mutation: "uncertain_or_committed",
+          verification: "failed",
+          delivery: "pending",
+          retry_safe: false,
+          next_step:
+            "Read the current state through an independent bounded projection before any retry. Do not retry unless that read proves the mutation did not commit.",
+        }
+      : null;
+    const workflowOutputBase = postconditionResult
       ? {
           ...(workflowResult.output || {}),
           postcondition: {
             ok: postconditionResult.ok === true,
             projection: resolved.workflow.postcondition.projection_name,
           },
+          ...(outcome ? { outcome } : {}),
         }
       : workflowResult.output;
-    const workflowError = workflowResult.error || postconditionResult?.error || null;
+    const workflowOutput = cacheFreshness
+      ? { ...(workflowOutputBase || {}), projection_cache: cacheFreshness }
+      : workflowOutputBase;
+    const baseWorkflowError = workflowResult.error || postconditionResult?.error || null;
+    const workflowError = verificationFailedAfterExecution
+      ? {
+          ...(baseWorkflowError || {}),
+          recoverable: true,
+          retryable: false,
+          mutation_outcome: outcome.mutation,
+          verification_outcome: outcome.verification,
+          next_step: outcome.next_step,
+        }
+      : baseWorkflowError;
     await appendBackgroundDiagnosticEvent({
       type: "workflow",
       name: resolved.workflow.action_name,
@@ -3821,11 +5842,20 @@ const executeSiteActionCallInTab = async (tab, { bundle, args, call }) => {
       error: workflowError,
     };
   }
-  return executePrimitiveInTab(tab, {
+  const primitiveResult = await executePrimitiveInTab(tab, {
     ...call,
     name: resolved.resolved.name,
     arguments: resolved.resolved.arguments,
   });
+  if (primitiveResult?.ok !== false && resolved.cache) {
+    primitiveResult.projection_cache = await applySiteActionCachePolicy(
+      tab,
+      resolved.cache,
+      normalized.actionArguments,
+    ).then((value) => ({ ok: true, ...value }))
+      .catch((error) => ({ ok: false, error: error.message || String(error) }));
+  }
+  return primitiveResult;
 };
 
 // Background tools that operate on the hosted agent's active tab but don't
@@ -3850,7 +5880,44 @@ const executeHostedToolCallInner = async (call = {}) => {
   const isTrustedText = call.name === "text.type" && call.arguments && call.arguments.trusted === true;
   const argHasTab = call.arguments && (Number.isInteger(call.arguments.tab_id) || Number.isInteger(call.arguments.tabId));
   if (isTrustedKey || isTrustedText || (HOSTED_DEFAULT_TAB_TOOLS.has(call.name) && !argHasTab)) {
-    const { tab } = await getHostedToolDefaultTab();
+    const { tab, source } = await getHostedToolDefaultTab();
+    // An UNCLAIMED tab is not a target for these tools, and this is the only
+    // place that can tell. The four sinks downstream — runA11yTreeOp,
+    // runA11yWatch, dispatchTrustedKey, dispatchTrustedText — each guard with
+    // `Number.isInteger(tabId)` while their error text says "requires an
+    // authorized browser tab". The authorization LANGUAGE was there; the
+    // authorization CHECK never was.
+    //
+    // What they do with the tab: attach a debugger and read the whole
+    // accessibility tree (the page's rendered text), inject into all frames,
+    // and dispatch real isTrusted keystrokes (up to repeat=1000). Against the
+    // frontmost tab that is a bank, webmail, or a password manager — and on
+    // https:// Chrome does not refuse, so it succeeds SILENTLY.
+    //
+    // The reported incident was the loud version of this: Chrome refuses
+    // chrome-extension:// pages, so the user saw an error. Fixing only the
+    // scheme (commit 0452d01) handled the self-reporting failure and left the
+    // silent one, which is the worse of the two. This is the actual fix.
+    //
+    // Per-tab authorization is the product's security model: "Take control of
+    // this tab" IS the grant. A tool call that names no tab, with nothing
+    // claimed, has no target — and is refused rather than aimed at whatever the
+    // user happens to be looking at.
+    //
+    // the internal investigation record
+    if (source === "browser_active_tab") {
+      return {
+        ok: false,
+        call_id: call.call_id,
+        error: {
+          code: "no_claimed_tab",
+          message:
+            `${call.name} needs a claimed tab. Nothing is claimed and the call named no tab_id, ` +
+            "so there is no authorized target. Claim a tab with \"Take control of this tab\", " +
+            "or pass an explicit tab_id.",
+        },
+      };
+    }
     backgroundRoutedTabId = tab?.id ?? null;
   }
   const backgroundResult = await executeBackgroundHostedToolCall(call, backgroundRoutedTabId);
@@ -3922,10 +5989,11 @@ const executeHostedToolCallInner = async (call = {}) => {
   }
   try {
     const bridgeUrl = await loadBridgeUrl();
+    const bridgeSecret = await loadBridgeHandshakeSecret().catch(() => "");
     const bridgeTargetUrlContains = requestedTargetUrlContains || tab.url || undefined;
     const response = await fetch(`${bridgeHttpOrigin(bridgeUrl)}/mcp/tools/call`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: bridgeAuthHeaders(bridgeSecret, { "content-type": "application/json" }),
       body: JSON.stringify({
         name: call.name,
         target_url_contains: bridgeTargetUrlContains,
@@ -4074,12 +6142,102 @@ const ensureAgentOffscreenDocument = async () => {
   }
 };
 
+const hostedSessionTraceId = () =>
+  `hosted-start-${Date.now()}-${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}`;
+
 const sendAgentOffscreenCommand = async (message) => {
-  await ensureAgentOffscreenDocument();
-  return chrome.runtime.sendMessage({
-    ...(await withHostedSessionTools(message)),
-    target: AGENT_OFFSCREEN_TARGET,
+  const traceId = typeof message?.trace_id === "string" && message.trace_id
+    ? message.trace_id
+    : hostedSessionTraceId();
+  const startedAt = Date.now();
+  let phase = "offscreen_document.ensure";
+  await appendBackgroundDiagnosticEvent({
+    type: "session",
+    name: "background.hosted_session.start_checkpoint",
+    ok: true,
+    summary: "Hosted session start entered the background-to-offscreen boundary.",
+    output: { trace_id: traceId, phase: `${phase}.begin`, message_type: message?.type || null },
   });
+  try {
+    await ensureAgentOffscreenDocument();
+    await appendBackgroundDiagnosticEvent({
+      type: "session",
+      name: "background.hosted_session.start_checkpoint",
+      ok: true,
+      summary: "Hosted session offscreen document is available.",
+      output: {
+        trace_id: traceId,
+        phase: `${phase}.complete`,
+        offscreen_context_present: await hasAgentOffscreenDocument(),
+        elapsed_ms: Date.now() - startedAt,
+      },
+    });
+
+    phase = "tools.hydrate";
+    const hydratedMessage = await withHostedSessionTools(message);
+    await appendBackgroundDiagnosticEvent({
+      type: "session",
+      name: "background.hosted_session.start_checkpoint",
+      ok: true,
+      summary: "Hosted session tools were hydrated before offscreen dispatch.",
+      output: {
+        trace_id: traceId,
+        phase: `${phase}.complete`,
+        tool_count: Array.isArray(hydratedMessage?.tools) ? hydratedMessage.tools.length : 0,
+        elapsed_ms: Date.now() - startedAt,
+      },
+    });
+
+    phase = "offscreen_message.send";
+    await appendBackgroundDiagnosticEvent({
+      type: "session",
+      name: "background.hosted_session.start_checkpoint",
+      ok: true,
+      summary: "Background is dispatching the hosted session command to the offscreen document.",
+      output: { trace_id: traceId, phase: `${phase}.begin`, elapsed_ms: Date.now() - startedAt },
+    });
+    const response = await chrome.runtime.sendMessage({
+      ...hydratedMessage,
+      target: AGENT_OFFSCREEN_TARGET,
+      trace_id: traceId,
+    });
+    await appendBackgroundDiagnosticEvent({
+      type: "session",
+      name: "background.hosted_session.start_checkpoint",
+      ok: response?.ok === true,
+      summary: "Background received the hosted session offscreen response.",
+      output: {
+        trace_id: traceId,
+        phase: `${phase}.settled`,
+        response_present: response !== undefined && response !== null,
+        response_ok: response?.ok === true,
+        response_error_type: response?.error == null ? null : typeof response.error,
+        response_error_message:
+          typeof response?.error === "string"
+            ? response.error
+            : (response?.error?.message || null),
+        responder: response?.responder || null,
+        state_status: response?.state?.status || null,
+        elapsed_ms: Date.now() - startedAt,
+      },
+    });
+    return response;
+  } catch (error) {
+    await appendBackgroundDiagnosticEvent({
+      type: "error",
+      name: "background.hosted_session.start_checkpoint",
+      ok: false,
+      summary: "Hosted session failed at the background-to-offscreen boundary.",
+      output: {
+        trace_id: traceId,
+        phase: `${phase}.failed`,
+        error_name: error?.name || null,
+        error_message: error?.message || String(error),
+        elapsed_ms: Date.now() - startedAt,
+      },
+    });
+    throw error;
+  }
 };
 
 const loadDefaultHostedRealtimeTools = async () => {
@@ -4267,13 +6425,10 @@ const forwardAgentTextResponseToast = async (event = {}) => {
 // bridge. Resolved from the active claimed tab via the bridgeRuntimeRoutes map
 // (runtime_id -> tabId), inverted for the active tab.
 const activeHostedRuntimeId = async () => {
-  let activeTabId = null;
-  for (const [, session] of await sessionStore.getSessionEntries()) {
-    activeTabId = session.activeTabId || activeTabId;
-  }
-  if (activeTabId == null) return null;
+  const activeTab = await getClaimedActiveTab();
+  if (!activeTab?.id) return null;
   for (const [key, tabId] of bridgeRuntimeRoutes.entries()) {
-    if (tabId === activeTabId && key.startsWith("runtime_id:")) {
+    if (tabId === activeTab.id && key.startsWith("runtime_id:")) {
       return key.slice("runtime_id:".length);
     }
   }
@@ -4398,6 +6553,40 @@ const clearAgentCredential = async () => {
 
 const handleCredentialHydrationItem = async (item = {}) => {
   const provider = item.provider || "openai";
+  if (provider === "protoface") {
+    const result = await saveProtofaceCredentials(
+      chrome.storage.local,
+      {
+        protofaceApiKey: item.credential?.protoface_api_key,
+        livekitUrl: item.credential?.livekit_url,
+        livekitApiKey: item.credential?.livekit_api_key,
+        livekitApiSecret: item.credential?.livekit_api_secret,
+      },
+      { source: "sidecar" },
+    );
+    await appendBackgroundDiagnosticEvent({
+      type: "credential",
+      name: "background.credential_hydration",
+      ok: true,
+      summary: "Background accepted bridge-provided Protoface credential hydration.",
+      input: {
+        provider,
+        source: item.source || null,
+        configured: true,
+      },
+      output: {
+        configured: result.configured,
+        redacted: "configured",
+      },
+    });
+    return {
+      type: "credential_hydration_result",
+      provider,
+      ok: true,
+      configured: result.configured,
+      redacted: "configured",
+    };
+  }
   if (provider !== "openai") {
     throw new Error(`Unsupported credential provider: ${provider}`);
   }
@@ -4670,7 +6859,7 @@ self.__agentTest = {
   },
 };
 // Inert in normal operation; only a test reads self.__sessionStoreTest. Proves
-// the 504 fix live (investigations/bridge-504-timeouts.md): when
+// the 504 fix live (the internal investigation record): when
 // chrome.storage.local.get hangs (the MV3 SW-churn wedge), a session-store read
 // must DEGRADE (resolve to the in-memory default) instead of hanging forever and
 // 504-ing every claimed_tabs.* call. Drives the REAL SessionStore + listClaimedTabs
@@ -4689,6 +6878,44 @@ self.__sessionStoreTest = {
   },
   // The real handler the bridge calls for browser.claimed_tabs.list.
   listClaimedTabs: () => listClaimedTabs(),
+};
+// Inert in normal operation; only the projection-cache Playwright smoke reads
+// this hook. It exercises the real MV3 chrome.storage.local-backed store rather
+// than a Node mock, including the durable site/group/namespace boundary.
+self.__projectionCacheTest = {
+  upsert: (args) => projectionCacheStore.upsert(args),
+  read: (args) => projectionCacheStore.read(args),
+  invalidateNamespace: (args) => projectionCacheStore.invalidateNamespace(args),
+};
+// Inert in normal operation; only the corpus-search Playwright smoke reads this
+// hook. It drives the REAL executeLocalHostedToolCall dispatch — the same seam
+// the hosted agent reaches — against a bundle written into the real
+// chrome.storage.local, so the proof covers module resolution in a live MV3
+// service worker (an unresolvable import makes the worker INERT with no error),
+// bundle reading past the 64KB model-facing budget, and the refusal contract.
+// The embedder is injected, so no OpenAI key or network is involved.
+self.__corpusSearchTest = {
+  seedBundle: (bundle) => chrome.storage.local.set({ [EXTENSION_STORAGE_BUNDLE_KEY]: bundle }),
+  // Drives the REAL dispatch, including the real key lookup and the real
+  // degradation paths.
+  call: (args) => executeLocalHostedToolCall({ url: "https://example.com/" }, {
+    name: "corpus.search",
+    call_id: "corpus-live-smoke",
+    arguments: args,
+  }),
+  // Ranking with a KNOWN query vector, so the ranked-result proof does not
+  // depend on an OpenAI key. Deliberately separate from `call` rather than a
+  // secret argument to it: a test-only branch inside the shipping dispatch
+  // would be a path the smoke exercises and production never does.
+  rankWithVector: async ({ index_path: indexPath, vector, limit }) => {
+    const stored = await chrome.storage.local.get(EXTENSION_STORAGE_BUNDLE_KEY);
+    return searchCorpus("live smoke", {
+      lexicalSearch: null,
+      loadIndex: () => loadCorpusIndexFromBundle(stored?.[EXTENSION_STORAGE_BUNDLE_KEY], { path: indexPath }),
+      embedQuery: async () => ({ ok: true, vector }),
+      limit,
+    });
+  },
 };
 // Hosted-agent inject queue (KTD5) — drained onto hosted tool results.
 const hostedA11yInjectQueue = [];
@@ -4773,6 +7000,66 @@ const getA11yAnnouncer = () => {
 };
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "actions-json:bridge-pairing-updated") {
+    const verifyPairing = async () => {
+      const stored = await chrome.storage.local.get("bridgeUrl");
+      const bridgeUrl = String(message.bridgeUrl || stored?.bridgeUrl || bridgeState?.bridgeUrl || "").trim();
+      await appendBackgroundDiagnosticEvent({
+        type: "transport",
+        name: "background.bridge.pairing",
+        ok: true,
+        summary: "Secure bridge pairing requested from the settings page.",
+        input: {
+          bridge_url: bridgeUrl || null,
+          extension_id: chrome.runtime.id,
+          extension_version: chrome.runtime.getManifest().version,
+        },
+        output: { stage: "attempt" },
+      });
+      if (!bridgeUrl) {
+        await appendBackgroundDiagnosticEvent({
+          type: "transport",
+          name: "background.bridge.pairing.validation",
+          ok: false,
+          summary: "Bridge pairing stopped before opening a WebSocket.",
+          input: {
+            bridge_url: null,
+            extension_id: chrome.runtime.id,
+            extension_version: chrome.runtime.getManifest().version,
+          },
+          output: { error_message: "Enter the bridge URL before pairing this browser." },
+        });
+        return {
+          ok: false,
+          error: {
+            code: "bridge_not_configured",
+            message: "Enter the bridge URL before pairing this browser.",
+          },
+        };
+      }
+      await chrome.storage.local.set({ bridgeUrl });
+      await connectBackgroundBridge({
+        bridgeUrl,
+        tabId: null,
+        readyItem: null,
+        relayedReadyItems: [],
+      }, { reconnectAttempt: true });
+      return { ok: true, connected: true, ready_for_tab: true };
+    };
+    verifyPairing()
+      .then((result) => sendResponse(result))
+      .catch((error) =>
+        sendResponse({
+          ok: false,
+          error: {
+            code: "bridge_reconnect_failed",
+            message: error?.message || String(error),
+          },
+        }),
+      );
+    return true;
+  }
+
   if (message?.type === "actions-json:a11y-tree-changes") {
     const tabId = sender?.tab?.id;
     if (Number.isInteger(tabId)) {
@@ -4854,6 +7141,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "actions-json:delegated-agent-discovery") {
+    recordDelegatedDiscovery(message, sender)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message?.type === "actions-json:delegated-agent-proposals-list") {
+    listDelegatedProposals(Number(message.tabId))
+      .then((proposals) => sendResponse({ ok: true, proposals }))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error), proposals: [] }));
+    return true;
+  }
+
+  if (message?.type === "actions-json:delegated-agent-lifecycle") {
+    handleDelegatedLifecycle(message, sender)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message?.type === "actions-json:delegated-agent-call") {
+    handleDelegatedPageCall(message, sender)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: { code: "delegated_call_failed", message: error.message || String(error) } }));
+    return true;
+  }
+
   if (message?.type === "actions-json:authorize-tab") {
     claimAuthorizedTab(message)
       .then((result) => sendResponse(result))
@@ -4881,6 +7196,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "actions-json:transfer-buffer") {
     handleTransferBufferMessage(message, sender)
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    return true;
+  }
+
+  if (message?.type === "actions-json:file-transfer") {
+    handleFileTransferMessage(message, sender)
       .then((result) => sendResponse(result))
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
     return true;
@@ -4960,11 +7282,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then((result) => sendResponse(result))
       .catch((error) => sendResponse({
         ok: false,
-        error: {
-          code: "site_action_failed",
-          message: error.message || String(error),
-          recoverable: true,
-        },
+        error: siteActionExceptionEnvelope(error),
       }));
     return true;
   }
@@ -4988,6 +7306,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     }
     sendResponse({ ok: sent, connected: sent });
+    return true;
+  }
+
+  if (message?.type === "actions-json:protoface-session-create") {
+    handleProtofaceSessionCreate(message)
+      .then((result) => sendResponse(result))
+      .catch(() => sendResponse(protofaceSessionError("create")));
+    return true;
+  }
+
+  if (message?.type === "actions-json:protoface-session-end") {
+    handleProtofaceSessionEnd(message)
+      .then((result) => sendResponse(result))
+      .catch(() => sendResponse(protofaceSessionError("end")));
     return true;
   }
 
@@ -5019,11 +7351,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (
+    message?.type === "actions-json:agent-start-diagnostic" &&
+    message?.target === "background"
+  ) {
+    appendBackgroundDiagnosticEvent({
+      type: message.ok === false ? "error" : "session",
+      name: "background.hosted_session.offscreen_checkpoint",
+      ok: message.ok !== false,
+      summary: "Offscreen hosted-session startup checkpoint.",
+      output: {
+        trace_id: message.trace_id || null,
+        phase: message.phase || null,
+        error_name: message.error_name || null,
+        error_message: message.error_message || null,
+        state_status: message.state_status || null,
+        elapsed_ms: Number.isFinite(message.elapsed_ms) ? message.elapsed_ms : null,
+      },
+    });
+    sendResponse({ ok: true, responder: "background-diagnostic-sink" });
+    return false;
+  }
+
   if (message?.type === "actions-json:agent-memory-clear") {
     respondWithAgentMemoryClear()
       .then((result) => sendResponse(result))
       .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
     return true;
+  }
+
+  // Messages forwarded to the offscreen document are broadcast to every
+  // extension frame. Do not let this listener recursively handle its own
+  // forwarded command or race the offscreen listener to answer first.
+  if (message?.target === AGENT_OFFSCREEN_TARGET) {
+    return false;
   }
 
   if (

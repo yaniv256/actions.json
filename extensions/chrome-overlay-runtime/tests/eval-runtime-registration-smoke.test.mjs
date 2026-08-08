@@ -1,5 +1,5 @@
 // Token-free verification of the runtime-registration fix
-// (investigations/eval-extension-no-runtime-registration.md): after deploy + set-bridgeUrl +
+// (the internal investigation record): after deploy + set-bridgeUrl +
 // claim, the deployed extension must register a runtime on the RUN'S serve bridge (17346),
 // so runtime.agent.await_event has a channel. This is the exact gate that was failing
 // (/runtimes count:0). NO OpenAI tokens — it stops at "is the channel up?", before driving

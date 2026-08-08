@@ -1024,6 +1024,7 @@ test("locator.element_info center feeds pointer.click to change fixture state", 
                 style="position:absolute;left:240px;top:180px;width:160px;height:48px"
                 onclick="document.body.dataset.clicked = 'yes'; document.body.dataset.clickX = Math.round(event.clientX); document.body.dataset.clickY = Math.round(event.clientY);"
               >Launch sequence</button>
+              <div style="position:fixed;left:300px;top:160px;width:40px;height:88px;background:white;z-index:10000">Center cover</div>
             </main>
           </body>
         </html>
@@ -1045,6 +1046,11 @@ test("locator.element_info center feeds pointer.click to change fixture state", 
   });
   const locatorOutput = await readActionOutput(page, "locator-bridge-call");
   const center = locatorOutput.value.clickable_center;
+  expect(center).not.toEqual({ x: 320, y: 204 });
+  expect(locatorOutput.value.visibility).toEqual(expect.objectContaining({
+    receives_events: true,
+    action_point: center,
+  }));
 
   await page.evaluate((point) => {
     window.__actionsJsonFakeSockets[0].emit("message", {
@@ -1062,11 +1068,11 @@ test("locator.element_info center feeds pointer.click to change fixture state", 
     ok: true,
     primitive: "pointer.click",
     adapter: "embed",
-    value: { clicked: true, x: 320, y: 204 },
+    value: { clicked: true, x: center.x, y: center.y },
   });
   expect(await page.evaluate(() => document.body.dataset.clicked)).toBe("yes");
-  expect(await page.evaluate(() => document.body.dataset.clickX)).toBe("320");
-  expect(await page.evaluate(() => document.body.dataset.clickY)).toBe("204");
+  expect(await page.evaluate(() => document.body.dataset.clickX)).toBe(String(Math.round(center.x)));
+  expect(await page.evaluate(() => document.body.dataset.clickY)).toBe(String(Math.round(center.y)));
 });
 
 test("bookmarklet locator retargets hidden semantic identity to a visible control", async ({ page }) => {
@@ -1500,6 +1506,34 @@ test("bookmarklet dom.observe.visible omits clickable_center for an occluded mat
   expect(match.clickable_center).toBeUndefined();
   expect(match.visible_center).toEqual(expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }));
   expect(match.occluded_by).toEqual(expect.objectContaining({ tag_name: "div" }));
+});
+
+test("bookmarklet dom.observe.visible returns an exposed action point when only the center is occluded", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await installFakeBookmarkletSocket(page);
+  await page.route("https://example.test/partly-occluded", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><button id="partly-covered" style="position:absolute;left:20px;top:20px;width:220px;height:48px" onclick="document.body.dataset.partialClicked='yes'">Partly covered action</button><div style="position:fixed;left:90px;top:0;width:80px;height:120px;background:#fff;z-index:10000">Center cover</div>`,
+    });
+  });
+  await page.goto("https://example.test/partly-occluded");
+  await page.addScriptTag({ content: bookmarkletSource });
+  await page.evaluate(() => window.__actionsJsonFakeSockets[0].emit("open"));
+
+  await callBookmarkletAction(page, "partial-dom-observe", "dom.observe.visible", { selector: "#partly-covered" });
+  const match = (await readActionOutput(page, "partial-dom-observe")).value.matches[0];
+  expect(match.clickable).toBe(true);
+  expect(match.receives_events).toBe(true);
+  expect(match.clickable_center).not.toEqual(match.visible_center);
+
+  await callBookmarkletAction(page, "partial-dom-click", "pointer.click", match.clickable_center);
+  expect(await readActionOutput(page, "partial-dom-click")).toMatchObject({
+    ok: true,
+    primitive: "pointer.click",
+    value: { clicked: true },
+  });
+  expect(await page.evaluate(() => document.body.dataset.partialClicked)).toBe("yes");
 });
 
 async function installFakeBookmarkletSocket(page) {

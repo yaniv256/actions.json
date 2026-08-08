@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { globSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import jsonata from "jsonata";
@@ -82,12 +84,8 @@ function projectionExpressionsOf(projection) {
 }
 
 function storedMaps() {
-  try {
-    return execSync("ls /home/agent-zara/actions.json.storage/scopes/*/sites/*/*/actions.json")
-      .toString().trim().split("\n").filter(Boolean);
-  } catch {
-    return [];
-  }
+  const storageRoot = process.env.ACTIONS_JSON_STORAGE_ROOT ?? join(homedir(), "actions.json.storage");
+  return globSync(join(storageRoot, "scopes", "*", "sites", "*", "*", "actions.json"));
 }
 
 test("every JSONata expression in every stored map compiles", (t) => {

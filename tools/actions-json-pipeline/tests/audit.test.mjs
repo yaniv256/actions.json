@@ -6,7 +6,13 @@ import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import { auditBroadSelectors, auditFallbacksShareDeadScope, runAudit } from "../src/audit.mjs";
+import {
+  auditBroadSelectors,
+  auditFallbacksShareDeadScope,
+  auditLossyProjections,
+  auditUnadvertisedProjections,
+  runAudit,
+} from "../src/audit.mjs";
 import { loadPipelineTarget } from "../src/storage-loader.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -992,7 +998,7 @@ test("audit ignores primitives whose output shape is not modelled", () => {
 });
 
 // AP-1, found by the Phase-9 anti-pattern search of
-// investigations/trello-delete-confirm-anchor-and-silent-noop-family.md.
+// the internal investigation record.
 //
 // "Bind the container, not the control." A locator whose only anchor is a wrapper
 // plus a bare tag — `[data-testid='popover'] button`, `[role='dialog'] button`,
@@ -1100,7 +1106,7 @@ test("audit accepts a bare container-scoped selector that carries text_contains"
 // popover absent, `[role='dialog'] button` + text_contains "Delete" resolved to exactly one
 // element: the card's <button aria-label="Delete checklist">. trello.card.delete's clickDelete
 // carries on_error:null and would have clicked it — destroying the checklist, sparing the card,
-// and reporting success. See investigations/trello-delete-confirm-anchor-and-silent-noop-family.md.
+// and reporting success. See the internal investigation record.
 //
 // A comma-list is an OR. Its breadth is the breadth of its broadest alternative.
 test("broad_selector fires on a broad alternative hiding inside a comma-list", () => {
@@ -1373,5 +1379,114 @@ test("auditFallbacksShareDeadScope is wired into runAudit", async () => {
   assert.ok(
     injected.findings.some((f) => f.code === "fallbacks_share_a_dead_scope"),
     "runAudit must surface the rule; declared is not reachable",
+  );
+});
+
+// Known-answer test in BOTH directions. A rule that only ever fires cannot tell
+// you it fires correctly, and a false positive here makes someone "fix" a map
+// that was already right by deleting a working advertisement.
+test("audit flags a state projection the agent is never told about", () => {
+  const unadvertised = auditUnadvertisedProjections({
+    prompt: { role: "guide", reading_order: "(5) RE-READ the destination page." },
+    tools: [{ name: "site.thing.read", description: "Reads a thing." }],
+    state_projections: [{ name: "site.page" }],
+  });
+  assert.equal(unadvertised.length, 1);
+  assert.equal(unadvertised[0].code, "unadvertised_projection");
+  assert.equal(unadvertised[0].severity, "high");
+  assert.equal(unadvertised[0].evidence.projection, "site.page");
+});
+
+test("audit stays silent when a projection is advertised anywhere the agent reads", () => {
+  const inPrompt = auditUnadvertisedProjections({
+    prompt: { READING_THE_PAGE: "Call actions.site with projection_name='site.page'." },
+    tools: [{ name: "site.thing.read", description: "Reads a thing." }],
+    state_projections: [{ name: "site.page" }],
+  });
+  assert.deepEqual(inPrompt, []);
+
+  const inToolDescription = auditUnadvertisedProjections({
+    prompt: { role: "guide" },
+    tools: [{ name: "site.thing.read", description: "Verify with the site.page projection." }],
+    state_projections: [{ name: "site.page" }],
+  });
+  assert.deepEqual(inToolDescription, []);
+
+  // A fixture/fragment with no agent-facing prose has nowhere for an
+  // advertisement to live, so "unadvertised" is not a meaningful claim about it.
+  const fixtureWithoutProse = auditUnadvertisedProjections({
+    tools: [{ name: "site.thing.read" }],
+    state_projections: [{ name: "site.page" }],
+  });
+  assert.deepEqual(fixtureWithoutProse, []);
+});
+
+// A lossy projection extracts records and emits only a scalar about them. Both
+// directions matter more here than almost anywhere: the false-positive case
+// (rows AND a count -- the trello.board shape) is CORRECT authoring, and a rule
+// that flags it makes someone break a working map.
+const lossyFixture = (expression) => ({
+  state_projections: [
+    {
+      name: "site.page",
+      snapshot: {
+        extract: [{ id: "crumbs", many: true }],
+        projection: { expression },
+      },
+    },
+  ],
+});
+
+test("audit flags a projection that extracts records and emits only a count", () => {
+  const findings = auditLossyProjections(
+    lossyFixture(
+      "{% {'title': records.heading.title, 'breadcrumb_count': $count(records.crumbs)} %}",
+    ),
+  );
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].code, "lossy_projection");
+  assert.equal(findings[0].evidence.extract, "crumbs");
+});
+
+test("audit stays silent when a projection emits the records alongside a count", () => {
+  // rows + count: the trello.board shape. Correct, and must never be flagged.
+  assert.deepEqual(
+    auditLossyProjections(
+      lossyFixture(
+        "{% {'cards': $append([], $map(records.crumbs, function($c){ {'t': $c.label} })), 'card_count': $count(records.crumbs)} %}",
+      ),
+    ),
+    [],
+  );
+
+  // emission through an intermediate binding
+  assert.deepEqual(
+    auditLossyProjections(
+      lossyFixture(
+        "{% ( $all := records.crumbs[$exists(label)]; {'links': $append([], $map($all[[0..39]], function($c){ {'l': $c.label} })), 'n': $count($all)} ) %}",
+      ),
+    ),
+    [],
+  );
+
+  // bare $append of the record set
+  assert.deepEqual(
+    auditLossyProjections(
+      lossyFixture("{% {'n': $count(records.crumbs), 'articles': $append([], records.crumbs)} %}"),
+    ),
+    [],
+  );
+
+  // no many:true extract at all
+  assert.deepEqual(
+    auditLossyProjections({
+      state_projections: [
+        {
+          name: "site.page",
+          snapshot: { extract: [{ id: "heading" }], projection: { expression: "{% {'t': records.heading.title} %}" } },
+        },
+      ],
+    }),
+    [],
   );
 });

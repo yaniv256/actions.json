@@ -9,7 +9,7 @@ import test from "node:test";
 // (loadReturningSessionContext). During the Lloyd acceptance test this silently
 // injected a previous run's wrong conclusion into "fresh" sessions — the agent
 // executed its remembered answer instead of re-reasoning. The only clear path
-// was a sidepanel button, unreachable for the bridge. v0.1.142 adds
+// was an agent-surface button, unreachable for the bridge. v0.1.142 adds
 // runtime.agent.memory_clear so acceptance tests can start truly clean.
 //
 // Separately, background.js kept its own copy of the memory-append logic with

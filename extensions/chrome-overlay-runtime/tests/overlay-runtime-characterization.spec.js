@@ -5,6 +5,19 @@ const path = require("path");
 
 const contentScriptPath = path.join(__dirname, "../src/content.js");
 const backgroundScriptPath = path.join(__dirname, "../src/background.js");
+const trelloBoardMapPath = path.join(
+  __dirname,
+  "../../../examples/actions.json.storage/scopes/public/sites/trello.com/board/actions.json",
+);
+const tabOwnershipAuthorityScriptPath = path.join(
+  __dirname,
+  "../src/agent/tab-ownership-authority.mjs",
+);
+
+function tabOwnershipAuthorityScriptForBrowserTest() {
+  const source = fs.readFileSync(tabOwnershipAuthorityScriptPath, "utf8");
+  return `${source.replace(/^export\s+/m, "")}\nwindow.claimTabWithDurableAuthority = claimTabWithDurableAuthority;`;
+}
 
 function backgroundScriptForBrowserTest() {
   // Browser tests inject the service worker as a classic inline script, so
@@ -55,7 +68,12 @@ function backgroundScriptForBrowserTest() {
 
 async function addBackgroundScript(page) {
   const { body, importedBindings } = backgroundScriptForBrowserTest();
+  await page.addScriptTag({ content: tabOwnershipAuthorityScriptForBrowserTest() });
   await page.evaluate(() => {
+    window.chrome.tabs = {
+      ...window.chrome.tabs,
+      onRemoved: window.chrome.tabs?.onRemoved || { addListener() {} },
+    };
     window.chrome.debugger = {
       onDetach: { addListener() {} },
       onEvent: { addListener() {} },
@@ -88,6 +106,7 @@ async function addBackgroundScript(page) {
       path: patch.path,
       patch,
     })));
+    window.INTERNAL_STATE_PROJECTION_MAX_BYTES = window.INTERNAL_STATE_PROJECTION_MAX_BYTES || 4_000_000;
     window.verifyStatePostcondition = window.verifyStatePostcondition || (async () => ({ ok: true }));
     window.readSiteStorageFileFromBundle = window.readSiteStorageFileFromBundle || (() => ({
       ok: true,
@@ -158,6 +177,96 @@ async function addBackgroundScript(page) {
         });
       }),
     }));
+    window.DebuggerSessionManager = window.DebuggerSessionManager || class DebuggerSessionManager {
+      async acquire() {}
+      async release() {}
+      async attestHeld() {}
+      handleDetach() {}
+      async handleTabRemoved() {}
+    };
+    window.createGroupStore = window.createGroupStore || (() => {
+      const ordinaryGroupId = "extension:default";
+      const ownership = new Map();
+      let nextRevision = 0;
+      const clone = (value) => value === undefined ? undefined : structuredClone(value);
+      const revisionOf = (lease) => lease?.ownershipRevision || null;
+      return {
+        initialize: async () => true,
+        adoptOrdinaryGroup: async (ordinary) => {
+          for (const [tabKey, rawLease] of Object.entries(ordinary?.tabs || {})) {
+            const lease = clone(rawLease);
+            ownership.set(Number(tabKey), { groupId: ordinaryGroupId, lease });
+          }
+          return { group: clone(ordinary), conflicts: [] };
+        },
+        authoritativeClaimOfTab: async (tabId) => {
+          const entry = ownership.get(Number(tabId));
+          return entry
+            ? { state: "owned", groupId: entry.groupId, lease: clone(entry.lease) }
+            : { state: "unowned", groupId: null, lease: null };
+        },
+        claimTabWithReceipt: async (groupId, rawLease) => {
+          const tabId = Number(rawLease.tabId);
+          const previous = ownership.get(tabId);
+          const claimedLease = {
+            ...clone(rawLease),
+            ownershipRevision: `test-revision-${++nextRevision}`,
+          };
+          ownership.set(tabId, { groupId, lease: clone(claimedLease) });
+          return {
+            groupId,
+            tabId,
+            claimedRevision: claimedLease.ownershipRevision,
+            claimedLease: clone(claimedLease),
+            previousLease: clone(previous?.lease || null),
+          };
+        },
+        rollbackTabClaim: async (receipt) => {
+          const current = ownership.get(Number(receipt.tabId));
+          if (
+            current?.groupId !== receipt.groupId
+            || revisionOf(current?.lease) !== receipt.claimedRevision
+          ) return false;
+          if (receipt.previousLease) {
+            ownership.set(Number(receipt.tabId), {
+              groupId: receipt.groupId,
+              lease: clone(receipt.previousLease),
+            });
+          } else {
+            ownership.delete(Number(receipt.tabId));
+          }
+          return true;
+        },
+        releaseTabIfRevision: async (groupId, tabId, expectedRevision = null) => {
+          const current = ownership.get(Number(tabId));
+          if (current?.groupId !== groupId) return false;
+          if (expectedRevision !== null && revisionOf(current.lease) !== expectedRevision) return false;
+          ownership.delete(Number(tabId));
+          return true;
+        },
+        isTabReserved: async (tabId) => ownership.has(Number(tabId)),
+      };
+    });
+    window.deriveDiscoveryProposal = window.deriveDiscoveryProposal || ((message, sender) => ({
+      valid: true,
+      href: message?.href || "https://example.test/agent.json",
+      source: {
+        tabId: sender?.tab?.id ?? 0,
+        documentId: sender?.documentId || "test-document",
+        origin: sender?.origin || "https://example.test",
+      },
+    }));
+    window.classifyProposalState = window.classifyProposalState || (() => "unapproved");
+    window.deriveHomeLease = window.deriveHomeLease || ((sender, { portNonce } = {}) => ({
+      schemaVersion: 1,
+      tabId: sender?.tab?.id ?? 0,
+      frameId: 0,
+      documentId: sender?.documentId || "test-document",
+      origin: sender?.origin || "https://example.test",
+      portNonce: portNonce || "test-port-nonce",
+      leasedAt: new Date().toISOString(),
+    }));
+    window.senderMatchesLease = window.senderMatchesLease || (() => false);
     window.captureTabSurface = window.captureTabSurface || (async (browser, tab, options = {}) => {
       const tabId = Number(tab?.id);
       const windowId = Number(tab?.windowId);
@@ -188,6 +297,29 @@ async function addBackgroundScript(page) {
     window.reconcileDay = window.reconcileDay || (async () => ({ ok: true }));
     window.agentEventFromSessionEvent = window.agentEventFromSessionEvent || ((event) => event);
     window.DEFAULT_MODEL = window.DEFAULT_MODEL || "test-model";
+    window.loadProtofaceCredentials = window.loadProtofaceCredentials || (async () => {
+      throw new Error("Protoface credentials are unavailable in this test harness.");
+    });
+    window.saveProtofaceCredentials = window.saveProtofaceCredentials || (async (storage, value, options = {}) => {
+      const credentials = {
+        protofaceApiKey: String(value?.protofaceApiKey || "").trim(),
+        livekitUrl: new URL(String(value?.livekitUrl || "").trim()).toString(),
+        livekitApiKey: String(value?.livekitApiKey || "").trim(),
+        livekitApiSecret: String(value?.livekitApiSecret || "").trim(),
+        source: options.source || null,
+      };
+      if (Object.entries(credentials).some(([key, entry]) => key !== "source" && !entry)) {
+        throw new Error("Missing Protoface credentials.");
+      }
+      await storage.set({ ACTIONS_JSON_PROTOFACE_CREDENTIALS_V1: credentials });
+      return { configured: true, source: credentials.source };
+    });
+    window.createDirectProtofaceSession = window.createDirectProtofaceSession || (async () => {
+      throw new Error("Protoface direct sessions are unavailable in this test harness.");
+    });
+    window.endDirectProtofaceSession = window.endDirectProtofaceSession || (async () => {
+      throw new Error("Protoface direct sessions are unavailable in this test harness.");
+    });
     window.executeWorkflowAction = window.executeWorkflowAction || (async () => ({
       ok: false,
       error: { code: "workflow_unavailable_in_harness", message: "Workflow executor is not loaded in this harness." },
@@ -215,6 +347,79 @@ async function addBackgroundScript(page) {
       render() {
         return { rendered_text: "test transfer" };
       }
+    };
+    window.BridgeOutputDeliveryQueue = window.BridgeOutputDeliveryQueue || class BridgeOutputDeliveryQueue {
+      constructor() {
+        this.pending = [];
+      }
+      get size() {
+        return this.pending.length;
+      }
+      deliver(item, send) {
+        if (send(item)) return true;
+        this.pending.push(item);
+        return false;
+      }
+      flush(send) {
+        const remaining = [];
+        let sent = 0;
+        for (const item of this.pending) {
+          if (send(item)) sent += 1;
+          else remaining.push(item);
+        }
+        this.pending = remaining;
+        return { sent, remaining: remaining.length, expired: 0 };
+      }
+    };
+    window.ShimTree = window.ShimTree || class ShimTree {};
+    window.Announcer = window.Announcer || class Announcer {};
+    window.normalizeGatedRepeatArgs = window.normalizeGatedRepeatArgs || ((args) => args);
+    window.runGatedRepeat = window.runGatedRepeat || (async () => ({ ok: true }));
+    window.createChromeScreenshotBrowser = window.createChromeScreenshotBrowser || ((chromeApi) => ({
+      focusWindow: (windowId) => new Promise((resolve) => chromeApi.windows.update(windowId, { focused: true }, resolve)),
+      activateTab: (tabId) => new Promise((resolve) => chromeApi.tabs.update(tabId, { active: true }, resolve)),
+      captureVisibleTab: (windowId, options) => new Promise((resolve) => chromeApi.tabs.captureVisibleTab(windowId, options, resolve)),
+      delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    }));
+    window.captureTabSurface = window.captureTabSurface || (async (browser, tab, options = {}) => {
+      await browser.focusWindow(tab.windowId);
+      await browser.activateTab(tab.id);
+      if (options.delayMs > 0) await browser.delay(options.delayMs);
+      const dataUrl = await browser.captureVisibleTab(tab.windowId, {
+        format: options.format === "jpeg" ? "jpeg" : "png",
+        quality: Number.isInteger(options.quality) ? options.quality : undefined,
+      });
+      return { ok: true, dataUrl };
+    });
+    window.createCloudStore = window.createCloudStore || (() => ({
+      appendLine: async () => ({ ok: true }),
+      flush: async () => ({ ok: true }),
+    }));
+    window.reconcileDay = window.reconcileDay || (async () => ({ ok: true }));
+    window.agentEventFromSessionEvent = window.agentEventFromSessionEvent || ((event) => event);
+    window.DEFAULT_MODEL = window.DEFAULT_MODEL || "gpt-realtime";
+    window.FileTransferError = window.FileTransferError || class FileTransferError extends Error {
+      constructor(code, message, evidence = {}) {
+        super(message);
+        this.code = code;
+        this.evidence = evidence;
+      }
+    };
+    window.base64ToBytes = window.base64ToBytes || ((value) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0)));
+    window.bytesToBase64 = window.bytesToBase64 || ((bytes) => btoa(String.fromCharCode(...bytes)));
+    window.FileTransferStore = window.FileTransferStore || class FileTransferStore {
+      exportSnapshot() { return []; }
+      importSnapshot() {}
+      create(args) { return { ...args, state: "streaming", size: 0 }; }
+      appendChunk(args) { return { transfer_id: args.transfer_id, state: "streaming", next_index: args.index + 1 }; }
+      async finalize(args) { return { transfer_id: args.transfer_id, state: "ready" }; }
+      status(args) { return { transfer_id: args.transfer_id, state: "ready" }; }
+      cancel(args) { return { transfer_id: args.transfer_id, state: "cancelled" }; }
+      readUpload(args) { return { metadata: { transfer_id: args.transfer_id, state: "ready" }, bytes: new Uint8Array() }; }
+      completeUpload(args) { return { transfer_id: args.transfer_id, state: "complete" }; }
+      async captureDownload(args) { return { transfer_id: args.transfer_id, state: "ready", size: args.bytes.length }; }
+      readChunk(args) { return { transfer_id: args.transfer_id, index: args.index, base64: "", bytes: new Uint8Array() }; }
+      completeDownload(args) { return { transfer_id: args.transfer_id, state: "complete" }; }
     };
     window.buildRealtimeToolCatalog = window.buildRealtimeToolCatalog || (() => [
       {
@@ -244,8 +449,35 @@ async function addBackgroundScript(page) {
       throw new Error(`Browser VM loader is missing imported bindings: ${missing.join(", ")}`);
     }
   }, importedBindings);
+  const pageErrors = [];
+  const capturePageError = (error) => pageErrors.push(error);
+  page.on("pageerror", capturePageError);
   await page.addScriptTag({ content: body });
+  await page.waitForTimeout(0);
+  page.off("pageerror", capturePageError);
+  if (pageErrors.length) throw pageErrors[0];
 }
+
+test("Trello board projection preserves compact-card label extraction", () => {
+  const map = JSON.parse(fs.readFileSync(trelloBoardMapPath, "utf8"));
+  const board = map.state_projections.find((projection) => projection.name === "trello.board");
+  expect(board).toBeTruthy();
+
+  const lists = board.snapshot.extract.find((extractor) => extractor.id === "lists");
+  const labels = lists?.fields?.cards?.fields?.labels;
+  expect(labels).toMatchObject({
+    many: true,
+    selector: "[data-testid='card-label'], [data-testid='compact-card-label'], .card-label",
+    fields: {
+      name: { property: "ariaLabel" },
+      text: { property: "innerText" },
+    },
+  });
+
+  const listPage = board.summaries.find((summary) => summary.name === "list_page");
+  expect(listPage?.expression).toContain("$count($card.labels) > 0");
+  expect(listPage?.expression).toContain("$label.text ? $label.text : $label.name");
+});
 
 async function installRuntime(page, manifestOverride, options = {}) {
   await page.addInitScript(() => {
@@ -1370,6 +1602,14 @@ test("content runtime renders agent text responses as toast notifications", asyn
 
 test("cost meter lives in the overlay panel and follows collapse", async ({ page }) => {
   await installRuntime(page);
+  await page.evaluate(() => {
+    window.__actionsJsonStorage.ACTIONS_JSON_OVERLAY_SETTINGS_V1 = {
+      showCost: true,
+      devMode: false,
+      restingCorner: "bottom-right",
+      reducedMotion: "system",
+    };
+  });
 
   // Meter update BEFORE the menu exists: cached, applied when the menu opens.
   await page.evaluate(async () => {
@@ -1390,6 +1630,9 @@ test("cost meter lives in the overlay panel and follows collapse", async ({ page
     await new Promise((resolve) =>
       listener({ type: "actions-json:open-menu-overlay" }, {}, resolve)
     );
+  });
+  await page.locator("#__actions_json_menu_overlay_host").evaluate((host) => {
+    host.__actionsJsonMenuControl.setDisclosureState("opened");
   });
 
   const menu = page.locator("#__actions_json_menu_overlay_host");
@@ -1416,9 +1659,9 @@ test("cost meter lives in the overlay panel and follows collapse", async ({ page
   await expect(meter).toContainText("session $0.62");
 
   // Collapse hides the meter with the body; expand restores it.
-  await menu.locator("[data-minimize]").click();
+  await menu.evaluate((host) => host.__actionsJsonMenuControl.setCollapsed(true));
   await expect(meter).toBeHidden();
-  await menu.locator("[data-minimize]").click();
+  await menu.evaluate((host) => host.__actionsJsonMenuControl.setCollapsed(false));
   await expect(meter).toBeVisible();
 });
 
@@ -1440,20 +1683,317 @@ test("extension menu opens a single agent pane in the page overlay shell", async
   await expect(menu.locator("iframe")).toHaveCount(1);
   await expect(menu.locator("iframe").first()).toHaveAttribute(
     "src",
-    "https://actions-json.test/sidepanel.html?surface=overlay&tab=agent"
+    "https://actions-json.test/agent-surface.html?surface=overlay&tab=agent&parentOrigin=null"
   );
   await expect(menu.locator(".title")).toHaveText("actions.json agent");
   await expect(menu.locator("[data-tab]")).toHaveCount(0);
   await expect(menu.locator("[data-panel='agent']")).toHaveClass(/active/);
   await expect(menu.locator("[data-panel='config']")).toHaveCount(0);
 
-  await menu.locator("[data-minimize]").click();
+  await menu.evaluate((host) => host.__actionsJsonMenuControl.setCollapsed(true));
   await expect(menu.locator("[data-minimize]")).toBeVisible();
   await expect(menu.locator(".title")).toBeHidden();
   await expect(menu.locator("[data-close]")).toBeHidden();
   await expect
     .poll(() => menu.evaluate((node) => Math.round(node.getBoundingClientRect().width)))
     .toBeLessThanOrEqual(48);
+});
+
+test("fresh menu overlay rests as a horizontal pill and consumes restingCorner", async ({ page }) => {
+  await installRuntime(page);
+  await page.evaluate(() => {
+    window.__actionsJsonStorage.ACTIONS_JSON_OVERLAY_SETTINGS_V1 = {
+      showCost: false,
+      devMode: false,
+      restingCorner: "bottom-left",
+      reducedMotion: "system",
+    };
+  });
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener({ type: "actions-json:open-menu-overlay" }, {}, resolve)
+    );
+  });
+
+  const host = page.locator("#__actions_json_menu_overlay_host");
+  await expect(host).toHaveCSS("width", "340px");
+  await expect(host).toHaveCSS("height", "76px");
+  await expect.poll(() => host.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    return {
+      disclosure: node.dataset.disclosureState,
+      left: Math.round(rect.left),
+      bottom: Math.round(window.innerHeight - rect.bottom),
+    };
+  })).toEqual({ disclosure: "resting", left: 24, bottom: 24 });
+  await expect(host.locator("iframe")).toHaveCount(1);
+  await expect(host.locator(".bar")).toBeHidden();
+});
+
+test("iframe disclosure messages switch resting controls and opened geometry without reloading", async ({ page }) => {
+  await installRuntime(page);
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener({ type: "actions-json:open-menu-overlay" }, {}, resolve)
+    );
+  });
+
+  const host = page.locator("#__actions_json_menu_overlay_host");
+  const srcBefore = await host.locator("iframe").getAttribute("src");
+  const iframeIdentityBefore = await host.evaluate((node) => {
+    const iframe = node.shadowRoot.querySelector("iframe");
+    iframe.dataset.identity = "original";
+    return iframe.dataset.identity;
+  });
+
+  const disclose = (state) => host.evaluate((node, nextState) => {
+    const iframe = node.shadowRoot.querySelector("iframe");
+    window.dispatchEvent(new MessageEvent("message", {
+      data: {
+        type: "actions-json:overlay-disclosure",
+        version: 1,
+        state: nextState,
+      },
+      origin: new URL(iframe.src).origin,
+      source: iframe.contentWindow,
+    }));
+  }, state);
+
+  await host.evaluate((node) => {
+    const iframe = node.shadowRoot.querySelector("iframe");
+    window.dispatchEvent(new MessageEvent("message", {
+      data: {
+        type: "actions-json:overlay-disclosure",
+        version: 1,
+        state: "opened",
+      },
+      origin: "https://attacker.invalid",
+      source: iframe.contentWindow,
+    }));
+    window.dispatchEvent(new MessageEvent("message", {
+      data: {
+        type: "actions-json:overlay-disclosure",
+        version: 2,
+        state: "opened",
+      },
+      origin: new URL(iframe.src).origin,
+      source: iframe.contentWindow,
+    }));
+  });
+  await expect(host).toHaveAttribute("data-disclosure-state", "resting");
+  await expect(host).toHaveCSS("height", "76px");
+
+  await disclose("controls");
+  await expect(host).toHaveCSS("width", "340px");
+  await expect(host).toHaveCSS("height", "130px");
+  await expect(host).toHaveAttribute("data-disclosure-state", "controls");
+
+  await disclose("opened");
+  await expect(host).toHaveCSS("width", "340px");
+  await expect(host).toHaveCSS("height", "420px");
+  await expect(host).toHaveAttribute("data-disclosure-state", "opened");
+  await expect(host.locator(".bar")).toBeVisible();
+
+  await disclose("resting");
+  await expect(host).toHaveCSS("width", "340px");
+  await expect(host).toHaveCSS("height", "76px");
+  await expect(host).toHaveAttribute("data-disclosure-state", "resting");
+  await expect(host.locator(".bar")).toBeHidden();
+  await expect(host.locator("iframe")).toHaveAttribute("src", srcBefore);
+  await expect(host.locator("iframe")).toHaveAttribute("data-identity", iframeIdentityBefore);
+});
+
+test("restored explicit coordinates win over restingCorner and collapse restores disclosure geometry", async ({ page }) => {
+  await installRuntime(page);
+  await page.evaluate(() => {
+    window.__actionsJsonStorage.ACTIONS_JSON_OVERLAY_SETTINGS_V1 = {
+      showCost: false,
+      devMode: false,
+      restingCorner: "bottom-left",
+      reducedMotion: "system",
+    };
+    window.__actionsJsonStorage["actionsJsonMenuOverlayState.v1"] = {
+      version: 1,
+      open: true,
+      collapsed: false,
+      disclosure_state: "controls",
+      geometry: {
+        left: "173px",
+        top: "91px",
+        width: "340px",
+        height: "118px",
+        minWidth: "220px",
+        minHeight: "42px",
+        resize: "none",
+        right: "auto",
+        bottom: "auto",
+      },
+      opened_geometry: {
+        left: "173px",
+        top: "91px",
+        width: "390px",
+        height: "460px",
+        minWidth: "220px",
+        minHeight: "42px",
+        resize: "both",
+        right: "auto",
+        bottom: "auto",
+      },
+    };
+  });
+
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener(
+        {
+          type: "actions-json:connect",
+          bridgeUrl: "ws://127.0.0.1:17345/extension",
+          runtimeKey: "test-tab",
+          authorizationId: "test-auth",
+          extensionVersion: "test",
+        },
+        {},
+        resolve
+      )
+    );
+  });
+
+  const host = page.locator("#__actions_json_menu_overlay_host");
+  await expect(host).toHaveCSS("left", "173px");
+  await expect(host).toHaveCSS("top", "91px");
+  await expect(host).toHaveCSS("width", "340px");
+  await expect(host).toHaveCSS("height", "130px");
+  await expect(host).toHaveAttribute("data-disclosure-state", "controls");
+
+  await host.evaluate((node) => node.__actionsJsonMenuControl.setDisclosureState("opened"));
+  await expect(host).toHaveCSS("width", "390px");
+  await expect(host).toHaveCSS("height", "460px");
+  await host.evaluate((node) => node.__actionsJsonMenuControl.setCollapsed(true));
+  await expect(host).toHaveCSS("width", "42px");
+  await expect(host).toHaveCSS("height", "42px");
+  await host.evaluate((node) => node.__actionsJsonMenuControl.setCollapsed(false));
+  await expect(host).toHaveCSS("width", "390px");
+  await expect(host).toHaveCSS("height", "460px");
+  await expect(host).toHaveAttribute("data-disclosure-state", "opened");
+});
+
+test("real iframe boot preserves a collapsed overlay's restored opened disclosure", async ({ page }) => {
+  await routeAgentSurfaceAssets(page);
+  await page.route("https://host.test/", (route) => route.fulfill({
+    contentType: "text/html",
+    body: "<main><h1>Host surface</h1></main>",
+  }));
+  await installRuntime(page, undefined, { pageUrl: "https://host.test/" });
+  await page.evaluate(() => {
+    window.__actionsJsonStorage["actionsJsonMenuOverlayState.v1"] = {
+      version: 1,
+      open: true,
+      collapsed: true,
+      disclosure_state: "opened",
+      geometry: {
+        left: "173px",
+        top: "91px",
+        width: "390px",
+        height: "460px",
+        minWidth: "220px",
+        minHeight: "42px",
+        resize: "both",
+        right: "auto",
+        bottom: "auto",
+      },
+      opened_geometry: {
+        left: "173px",
+        top: "91px",
+        width: "390px",
+        height: "460px",
+        minWidth: "220px",
+        minHeight: "42px",
+        resize: "both",
+        right: "auto",
+        bottom: "auto",
+      },
+    };
+  });
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) => listener({
+      type: "actions-json:connect",
+      bridgeUrl: "ws://127.0.0.1:17345/extension",
+      runtimeKey: "test-tab",
+      authorizationId: "test-auth",
+      extensionVersion: "test",
+    }, {}, resolve));
+  });
+
+  const host = page.locator("#__actions_json_menu_overlay_host");
+  const surface = page.frameLocator("#__actions_json_menu_overlay_host iframe");
+  await expect(host).toHaveCSS("width", "42px");
+  await expect(host).toHaveCSS("height", "42px");
+  await expect(host).toHaveAttribute("data-disclosure-state", "opened");
+  await expect(host.locator("iframe")).toHaveAttribute("src", /disclosure=opened/);
+  await expect(surface.locator("#agentPanel")).toHaveAttribute("data-disclosure", "opened");
+
+  await host.evaluate((node) => node.__actionsJsonMenuControl.setCollapsed(false));
+  await expect(host).toHaveCSS("width", "390px");
+  await expect(host).toHaveCSS("height", "460px");
+  await expect(host).toHaveAttribute("data-disclosure-state", "opened");
+});
+
+test("late resting-corner settings cannot override an interacted-with overlay", async ({ page }) => {
+  await installRuntime(page);
+  await page.evaluate(() => {
+    const originalGet = window.chrome.storage.local.get;
+    window.__resolveOverlaySettingsRead = null;
+    window.chrome.storage.local.get = (key, callback) => {
+      if (key !== "ACTIONS_JSON_OVERLAY_SETTINGS_V1") {
+        originalGet(key, callback);
+        return;
+      }
+      window.__resolveOverlaySettingsRead = () => callback({
+        ACTIONS_JSON_OVERLAY_SETTINGS_V1: {
+          restingCorner: "bottom-left",
+          showCost: false,
+        },
+      });
+    };
+  });
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener({ type: "actions-json:open-menu-overlay" }, {}, resolve)
+    );
+  });
+
+  const host = page.locator("#__actions_json_menu_overlay_host");
+  await host.evaluate((node) => node.__actionsJsonMenuControl.place(111, 133));
+  await page.evaluate(() => window.__resolveOverlaySettingsRead());
+  await expect.poll(() => host.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    return { left: Math.round(rect.left), top: Math.round(rect.top) };
+  })).toEqual({ left: 111, top: 133 });
+});
+
+test("Protoface setting adds avatar mode only to the enabled menu overlay", async ({ page }) => {
+  await installRuntime(page);
+  await page.evaluate(() => {
+    window.__actionsJsonStorage.ACTIONS_JSON_PROTOFACE_SETTINGS_V1 = {
+      enabled: true,
+      brokerUrl: "https://broker.example/protoface/session-token",
+      avatarId: "av_demo",
+    };
+  });
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) => listener({ type: "actions-json:open-menu-overlay" }, {}, resolve));
+  });
+
+  await expect(page.locator("#__actions_json_menu_overlay_host iframe")).toHaveAttribute(
+    "src",
+    "https://actions-json.test/agent-surface.html?surface=overlay&tab=agent&parentOrigin=null&avatar=protoface",
+  );
 });
 
 test("runtime reconnects when the bridge WebSocket closes", async ({ page }) => {
@@ -2351,6 +2891,57 @@ test("background transfer buffer handles write and read messages", async ({ page
   });
 });
 
+test("background routes file transfer state messages without logging bytes", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.chrome = {
+      runtime: {
+        lastError: null,
+        getManifest: () => ({ version: "test-version" }),
+        onInstalled: { addListener() {} },
+        onMessage: { addListener(listener) { window.__actionsJsonBackgroundMessageListener = listener; } },
+      },
+      storage: { local: { async get() { return {}; }, async set() {} } },
+      scripting: { async executeScript() {} },
+      tabGroups: { async get(id) { return { id }; }, async update() {} },
+      tabs: {
+        async get(id) { return { id, windowId: 77, url: "https://trello.com/c/test" }; },
+        async group() { return 42; },
+        async sendMessage() {},
+        update(_tabId, _props, callback) { callback?.(); },
+      },
+      windows: { update(_windowId, _props, callback) { callback?.(); } },
+    };
+  });
+  await page.route("http://background.test/**", (route) => route.fulfill({ contentType: "text/html", body: "<main>File transfer background</main>" }));
+  await page.goto("http://background.test/");
+  await addBackgroundScript(page);
+  const result = await page.evaluate(() => new Promise((resolve) => {
+    window.__actionsJsonBackgroundMessageListener({
+      type: "actions-json:file-transfer",
+      primitive: "file.transfer.create",
+      arguments: {
+        transfer_id: "background-proof",
+        direction: "upload",
+        filename: "proof.txt",
+        mime_type: "text/plain",
+        expected_size: 4,
+        expected_sha256: "a".repeat(64),
+        origin: "https://trello.com",
+      },
+    }, { tab: { id: 321, url: "https://trello.com/c/test" }, frameId: 0 }, resolve);
+  }));
+  expect(result).toMatchObject({
+    ok: true,
+    result: {
+      ok: true,
+      primitive: "file.transfer.create",
+      adapter: "extension",
+      value: { transfer_id: "background-proof", state: "streaming" },
+    },
+  });
+  expect(JSON.stringify(result)).not.toContain("base64");
+});
+
 test("background storage.read_file handles read messages", async ({ page }) => {
   await page.addInitScript(() => {
     window.chrome = {
@@ -2805,6 +3396,29 @@ test("background hosted agent tools prefer the claimed active tab over the foreg
               error: null,
             };
           }
+          if (message.type === "actions-json:execute-state-diff") {
+            return {
+              ok: true,
+              output: {
+                ok: true,
+                projection: message.projection_name,
+                baseline: "previous_snapshot",
+                patch_format: "json_patch",
+                patches: [
+                  {
+                    op: "add",
+                    path: "/board/lists/0/cards/1",
+                    value: { title: "New follow-up card" },
+                  },
+                ],
+                semantic_deltas: [],
+                previous_state_hash: "test-hash-1",
+                state_hash: "test-hash-3",
+                observed_at: "2026-06-10T00:00:00.000Z",
+              },
+              error: null,
+            };
+          }
           return { ok: true };
         },
       },
@@ -2967,6 +3581,51 @@ test("background hosted agent tools prefer the claimed active tab over the foreg
               type: "actions-json:agent-tool-execute",
               call: {
                 name: "actions.site",
+                call_id: "call-state-summary",
+                arguments: {
+                  mode: "state_summary",
+                  projection_name: "trello.board",
+                  summary_name: "list_page",
+                  summary_arguments: { list_name: "Next", offset: 20, limit: 10 },
+                  max_bytes: 8000,
+                },
+              },
+            },
+            {},
+            resolve,
+          );
+        }),
+    ),
+  ).resolves.toMatchObject({
+    ok: true,
+    result: {
+      ok: true,
+      call_id: "call-state-summary",
+      output: { ok: true, projection: "trello.board" },
+    },
+  });
+  await expect(page.evaluate(() => window.__actionsJsonBackgroundCalls)).resolves.toContainEqual({
+    method: "tabs.sendMessage",
+    tabId: 202,
+    message: expect.objectContaining({
+      type: "actions-json:execute-state-projection",
+      projection_name: "trello.board",
+      summary_name: "list_page",
+      summary_arguments: { list_name: "Next", offset: 20, limit: 10 },
+      max_bytes: 8000,
+    }),
+  });
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              target: "background",
+              type: "actions-json:agent-tool-execute",
+              call: {
+                name: "actions.site",
                 call_id: "call-state-diff",
                 arguments: {
                   mode: "state_diff",
@@ -2997,7 +3656,234 @@ test("background hosted agent tools prefer the claimed active tab over the foreg
           },
         ],
         previous_state_hash: "test-hash-1",
-        state_hash: "test-hash-2",
+        state_hash: "test-hash-3",
+      },
+    },
+  });
+  await expect(page.evaluate(() => window.__actionsJsonBackgroundCalls)).resolves.toContainEqual({
+    method: "tabs.sendMessage",
+    tabId: 202,
+    message: expect.objectContaining({
+      type: "actions-json:execute-state-diff",
+      projection_name: "trello.board",
+      compute_max_bytes: 4_000_000,
+    }),
+  });
+});
+
+test("background site-action postconditions use the internal projection working budget", async ({ page }) => {
+  await page.addInitScript(() => {
+    const projectedStateBytes = 57_231;
+    window.__actionsJsonBackgroundCalls = [];
+    window.__actionsJsonStorage = {
+      ACTIONS_JSON_OVERLAY_SESSION_STATE: {
+        sessions: {
+          "actions-json-default": {
+            activeTabId: 202,
+            tabs: {
+              202: {
+                bridgeUrl: "ws://127.0.0.1:17345/extension",
+                authorizationId: "auth-202",
+                runtimeKey: "chrome-tab:202",
+                url: "https://trello.com/b/example/actions-json",
+              },
+            },
+          },
+        },
+      },
+      actionsJsonStorageBundle: {
+        "scopes/public/sites/trello.com/board/actions.json": { tools: [] },
+      },
+    };
+    window.resolveSiteActionFromBundle = (_bundle, _pageUrl, request) => ({
+      ok: true,
+      workflow: {
+        action_name: request.action,
+        definition: { version: 1, expression_language: "jsonata", steps: [] },
+        input: request.arguments,
+        postcondition: {
+          projection_name: "trello.board",
+          definition: {
+            projection: "trello.board",
+            verify: { language: "jsonata", expression: "{% true %}" },
+          },
+        },
+      },
+    });
+    window.executeWorkflowAction = async (request) => ({
+      ok: true,
+      output: {
+        ok: true,
+        primitive: "actions.workflow",
+        action: request.actionName,
+        value: { created: request.input.title },
+      },
+      steps: [],
+    });
+    window.chrome = {
+      runtime: {
+        lastError: null,
+        getManifest() {
+          return { version: "test-version" };
+        },
+        onInstalled: { addListener() {} },
+        onMessage: {
+          addListener(listener) {
+            window.__actionsJsonBackgroundMessageListener = listener;
+          },
+        },
+      },
+      storage: {
+        local: {
+          async get(key) {
+            if (typeof key === "string") return { [key]: window.__actionsJsonStorage[key] };
+            return { ...window.__actionsJsonStorage };
+          },
+          async set(values) {
+            Object.assign(window.__actionsJsonStorage, values);
+          },
+        },
+      },
+      tabs: {
+        async get(id) {
+          if (id !== 202) throw new Error(`missing tab ${id}`);
+          return {
+            id,
+            windowId: 88,
+            title: "Trello Board",
+            url: "https://trello.com/b/example/actions-json",
+            active: true,
+          };
+        },
+        async sendMessage(tabId, message) {
+          window.__actionsJsonBackgroundCalls.push({ method: "tabs.sendMessage", tabId, message });
+          if (message.type !== "actions-json:execute-state-postcondition") {
+            return {
+              ok: false,
+              error: { code: "unexpected_message", message: `Unexpected ${message.type}` },
+            };
+          }
+          if (!Number.isFinite(message.max_bytes) || message.max_bytes < projectedStateBytes) {
+            return {
+              ok: false,
+              error: {
+                code: "state_payload_too_large",
+                message: "State projection output exceeded the configured payload budget.",
+              },
+            };
+          }
+          return {
+            ok: true,
+            output: {
+              ok: true,
+              projection: message.projection_name,
+              state_hash: "test-large-board",
+              observed_at: "2026-07-16T00:00:00.000Z",
+              diagnostics: { schema_valid: true },
+              verification: message.input.title === "Unverified card"
+                ? {
+                    ok: false,
+                    error: {
+                      code: "state_postcondition_failed",
+                      message: "State postcondition did not pass.",
+                    },
+                  }
+                : { ok: true },
+            },
+          };
+        },
+      },
+    };
+  });
+
+  await page.goto("data:text/html,<main><h1>Postcondition budget test</h1></main>");
+  await addBackgroundScript(page);
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              target: "background",
+              type: "actions-json:agent-tool-execute",
+              call: {
+                name: "actions.site",
+                call_id: "call-large-postcondition",
+                arguments: {
+                  mode: "call",
+                  action: "trello.card.create",
+                  arguments: { list_name: "Next", title: "Created card" },
+                },
+              },
+            },
+            {},
+            resolve,
+          );
+        }),
+    ),
+  ).resolves.toMatchObject({
+    ok: true,
+    result: {
+      ok: true,
+      call_id: "call-large-postcondition",
+      output: {
+        postcondition: { ok: true, projection: "trello.board" },
+      },
+    },
+  });
+
+  const projectionCall = await page.evaluate(() =>
+    window.__actionsJsonBackgroundCalls.find(
+      (entry) => entry.message?.type === "actions-json:execute-state-postcondition",
+    ),
+  );
+  expect(projectionCall.message.max_bytes).toBeGreaterThanOrEqual(57_231);
+  expect(projectionCall.message.postcondition.verify.expression).toBe("{% true %}");
+  expect(projectionCall.message.input).toEqual({ list_name: "Next", title: "Created card" });
+
+  await expect(
+    page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          window.__actionsJsonBackgroundMessageListener(
+            {
+              target: "background",
+              type: "actions-json:agent-tool-execute",
+              call: {
+                name: "actions.site",
+                call_id: "call-unverified-postcondition",
+                arguments: {
+                  mode: "call",
+                  action: "trello.card.create",
+                  arguments: { list_name: "Next", title: "Unverified card" },
+                },
+              },
+            },
+            {},
+            resolve,
+          );
+        }),
+    ),
+  ).resolves.toMatchObject({
+    ok: true,
+    result: {
+      ok: false,
+      call_id: "call-unverified-postcondition",
+      output: {
+        outcome: {
+          execution: "succeeded",
+          mutation: "uncertain_or_committed",
+          verification: "failed",
+          delivery: "pending",
+          retry_safe: false,
+        },
+      },
+      error: {
+        code: "state_postcondition_failed",
+        mutation_outcome: "uncertain_or_committed",
+        verification_outcome: "failed",
+        retryable: false,
       },
     },
   });
@@ -4463,6 +5349,132 @@ test("extension implements advertised point and input primitives", async ({ page
   await expect(page.evaluate(() => document.body.dataset.modelBackedEditorDomText)).resolves.toBe("model value");
 });
 
+test("clipboard.paste fails closed on implicit scope and confines textarea writes", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      {
+        name: "clipboard.paste",
+        description: "Paste into an explicit editable target.",
+        input_schema: { type: "object", properties: {} },
+      },
+    ],
+  });
+
+  await page.setContent(`
+    <div class="ProseMirror" role="textbox" aria-label="Article editor content" contenteditable="true">
+      <p data-testid="article-body">Original article body</p>
+      <figure>
+        <textarea class="article-editor-figure-caption" aria-label="Add a caption (optional)"></textarea>
+      </figure>
+    </div>
+  `);
+  await page.evaluate(() => {
+    const editor = document.querySelector(".ProseMirror");
+    editor.addEventListener("paste", (event) => {
+      event.preventDefault();
+      document.querySelector("[data-testid='article-body']").textContent =
+        event.clipboardData?.getData("text/plain") || "";
+    });
+  });
+  await connectRuntime(page);
+
+  await page.locator(".article-editor-figure-caption").focus();
+  await callRuntimeAction(page, "implicit-caption-paste", "clipboard.paste", {
+    text: "Unsafe caption",
+  });
+  await expect.poll(() => actionOutput(page, "implicit-caption-paste")).toMatchObject({
+    output: {
+      ok: false,
+      primitive: "clipboard.paste",
+      error: { code: "paste_target_required" },
+    },
+  });
+  await expect(page.locator("[data-testid='article-body']")).toHaveText("Original article body");
+  await expect(page.locator(".article-editor-figure-caption")).toHaveValue("");
+
+  await callRuntimeAction(page, "explicit-caption-paste", "clipboard.paste", {
+    text: "Scoped caption",
+    target: { selector: ".article-editor-figure-caption" },
+  });
+  await expect.poll(() => actionOutput(page, "explicit-caption-paste")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "clipboard.paste",
+      value: {
+        pasted: true,
+        scoped_write: "native-control",
+        target_kind: "resolved-locator",
+        target_identity: {
+          tag_name: "textarea",
+          class_name: "article-editor-figure-caption",
+          focus_attested: true,
+        },
+      },
+    },
+  });
+  await expect(page.locator(".article-editor-figure-caption")).toHaveValue("Scoped caption");
+  await expect(page.locator("[data-testid='article-body']")).toHaveText("Original article body");
+});
+
+test("clipboard.paste rejects sibling mutation for explicit targets even when active-element opt-in is also supplied", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [{
+      name: "clipboard.paste",
+      description: "Paste into an explicit editable target.",
+      input_schema: { type: "object", properties: {} },
+    }],
+  });
+
+  await page.setContent(`
+    <div class="editor-shell">
+      <div class="caption" contenteditable="true" aria-label="Image caption">Original caption</div>
+      <div data-testid="article-body">Original article body</div>
+    </div>
+  `);
+  await page.evaluate(() => {
+    document.querySelector(".editor-shell").addEventListener("paste", (event) => {
+      event.preventDefault();
+      document.querySelector("[data-testid='article-body']").textContent =
+        event.clipboardData?.getData("text/plain") || "";
+    });
+  });
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "explicit-contenteditable-paste", "clipboard.paste", {
+    text: "Misdirected value",
+    target: { selector: ".caption" },
+  });
+  await expect.poll(() => actionOutput(page, "explicit-contenteditable-paste")).toMatchObject({
+    output: {
+      ok: false,
+      primitive: "clipboard.paste",
+      error: {
+        code: "paste_unverified",
+      },
+    },
+  });
+  await expect(page.locator(".caption")).toHaveText("Original caption");
+  await expect(page.locator("[data-testid='article-body']")).toHaveText("Misdirected value");
+
+  await page.locator("[data-testid='article-body']").evaluate((node) => {
+    node.textContent = "Original article body";
+  });
+  await callRuntimeAction(page, "dual-field-contenteditable-paste", "clipboard.paste", {
+    text: "Dual-field misdirection",
+    target: { selector: ".caption" },
+    use_active_element: true,
+  });
+  await expect.poll(() => actionOutput(page, "dual-field-contenteditable-paste")).toMatchObject({
+    output: {
+      ok: false,
+      primitive: "clipboard.paste",
+      error: { code: "paste_unverified" },
+    },
+  });
+  await expect(page.locator(".caption")).toHaveText("Original caption");
+  await expect(page.locator("[data-testid='article-body']")).toHaveText("Dual-field misdirection");
+});
+
 test("extension executes supported primitives declared only in primitive dictionary", async ({ page }) => {
   await installRuntime(page, {
     tools: [],
@@ -4735,6 +5747,116 @@ test("extension transfer buffer writes, reads, and inserts rendered data through
   );
 });
 
+test("remote file actions attach upload bytes and capture same-origin downloads", async ({ page }) => {
+  const uploadText = "remote browser upload";
+  const downloadText = "remote browser download";
+  await page.route("http://localhost/**", (route) => {
+    if (new URL(route.request().url()).pathname === "/attachment.txt") {
+      return route.fulfill({ contentType: "text/plain", body: downloadText });
+    }
+    return route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><input data-testid="attachment-input" type="file"><script>
+        document.querySelector('[data-testid="attachment-input"]').addEventListener('change', (event) => {
+          const file = event.target.files[0];
+          document.body.dataset.uploadName = file?.name || '';
+          document.body.dataset.uploadSize = String(file?.size || 0);
+        });
+      </script>`,
+    });
+  });
+  await installRuntime(page, {
+    tools: [
+      { name: "file.transfer.upload.consume", input_schema: { type: "object" } },
+      { name: "file.transfer.upload.complete", input_schema: { type: "object" } },
+      { name: "file.transfer.download.capture", input_schema: { type: "object" } },
+    ],
+  }, { pageUrl: "http://localhost/c/test" });
+  await page.evaluate((uploadBase64) => {
+    window.__capturedDownload = null;
+    window.__downloadChunks = [];
+    window.__actionsJsonRuntimeMessageHandler = async (message) => {
+      if (message.type !== "actions-json:file-transfer") return { ok: true };
+      if (message.primitive === "file.transfer.upload.consume") {
+        return {
+          ok: true,
+          result: {
+            ok: true,
+            primitive: message.primitive,
+            adapter: "extension",
+            value: {
+              transfer_id: message.arguments.transfer_id,
+              filename: "upload.txt",
+              mime_type: "text/plain",
+              size: 21,
+              sha256: "a".repeat(64),
+              state: "ready",
+              base64: uploadBase64,
+            },
+          },
+        };
+      }
+      if (message.primitive === "file.transfer.upload.complete") {
+        return { ok: true, result: { ok: true, primitive: message.primitive, adapter: "extension", value: { transfer_id: message.arguments.transfer_id, state: "complete" } } };
+      }
+      if (message.primitive === "file.transfer.create") {
+        window.__capturedDownload = message.arguments;
+        return { ok: true, result: { ok: true, primitive: message.primitive, adapter: "extension", value: { transfer_id: message.arguments.transfer_id, state: "streaming", next_index: 0 } } };
+      }
+      if (message.primitive === "file.transfer.chunk") {
+        window.__downloadChunks[message.arguments.index] = message.arguments.base64;
+        return { ok: true, result: { ok: true, primitive: message.primitive, adapter: "extension", value: { transfer_id: message.arguments.transfer_id, state: "streaming", next_index: message.arguments.index + 1 } } };
+      }
+      if (message.primitive === "file.transfer.finalize") {
+        return {
+          ok: true,
+          result: {
+            ok: true,
+            primitive: message.primitive,
+            adapter: "extension",
+            value: {
+              transfer_id: message.arguments.transfer_id,
+              filename: window.__capturedDownload.filename,
+              mime_type: window.__capturedDownload.mime_type,
+              size: 23,
+              sha256: "b".repeat(64),
+              state: "ready",
+              chunk_count: 1,
+            },
+          },
+        };
+      }
+      return { ok: false, error: "unexpected file transfer primitive" };
+    };
+  }, Buffer.from(uploadText).toString("base64"));
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "file-upload", "file.transfer.upload.consume", {
+    transfer_id: "upload-proof",
+    origin: "http://localhost",
+    file_input: { selector: "[data-testid='attachment-input']" },
+  });
+  await expect.poll(() => actionOutput(page, "file-upload")).toMatchObject({
+    output: { ok: true, value: { transfer_id: "upload-proof", attached: true } },
+  });
+  await expect(page.evaluate(() => document.body.dataset.uploadName)).resolves.toBe("upload.txt");
+  await expect(page.evaluate(() => document.body.dataset.uploadSize)).resolves.toBe(String(Buffer.byteLength(uploadText)));
+
+  await callRuntimeAction(page, "file-download", "file.transfer.download.capture", {
+    transfer_id: "download-proof",
+    origin: "http://localhost",
+    url: "http://localhost/attachment.txt",
+    filename: "attachment.txt",
+  });
+  await expect.poll(() => actionOutput(page, "file-download")).toMatchObject({
+    output: { ok: true, value: { transfer_id: "download-proof", state: "ready" } },
+  });
+  const captured = await page.evaluate(() => window.__capturedDownload);
+  const downloaded = await page.evaluate(() => window.__downloadChunks.map((value) => atob(value)).join(""));
+  expect(downloaded).toBe(downloadText);
+  expect(captured.origin).toBe("http://localhost");
+});
+
 test("extension storage.read_file reads declared files through the action path", async ({ page }) => {
   await installRuntime(page, {
     tools: [
@@ -4963,6 +6085,41 @@ test("dom.observe.visible omits clickable_center for an occluded match", async (
   expect(match.clickable_center).toBeUndefined();
   expect(match.visible_center).toEqual(expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }));
   expect(match.occluded_by).toEqual(expect.objectContaining({ tag_name: "div" }));
+});
+
+test("dom.observe.visible returns an exposed action point when only the center is occluded", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "dom.observe.visible", input_schema: { type: "object" } },
+      { name: "pointer.click", input_schema: { type: "object" } },
+    ],
+  });
+  await page.setContent(`
+    <button
+      id="partly-covered"
+      style="position:absolute;left:20px;top:20px;width:220px;height:48px"
+      onclick="document.body.dataset.partialClicked = 'yes'"
+    >Partly covered action</button>
+    <div style="position:fixed;left:90px;top:0;width:80px;height:120px;background:#fff;z-index:10000">Center cover</div>
+  `);
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "partial-dom-observe", "dom.observe.visible", { selector: "#partly-covered" });
+  const match = (await actionOutput(page, "partial-dom-observe")).output.value.matches[0];
+  expect(match.clickable).toBe(true);
+  expect(match.receives_events).toBe(true);
+  expect(match.clickable_center).toEqual(expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }));
+  expect(match.clickable_center).not.toEqual(match.visible_center);
+
+  await callRuntimeAction(page, "partial-dom-click", "pointer.click", match.clickable_center);
+  await expect.poll(() => actionOutput(page, "partial-dom-click")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "pointer.click",
+      value: { clicked: true },
+    },
+  });
+  await expect(page.evaluate(() => document.body.dataset.partialClicked)).resolves.toBe("yes");
 });
 
 test("dom.observe.visible refuses oversized broad payloads with narrowing hints", async ({ page }) => {
@@ -5291,6 +6448,47 @@ test("background bridge credential hydration stores OpenAI key without logging t
   await expect(
     page.evaluate(() => JSON.stringify(window.__actionsJsonStorage.ACTIONS_JSON_AGENT_MEMORY_V1 || {})),
   ).resolves.not.toContain("sk-test-hydration-1234567890");
+
+  await page.evaluate(() => {
+    window.__actionsJsonBackgroundWebSocket.dispatchEvent(
+      new MessageEvent("message", {
+        data: JSON.stringify({
+          type: "credential_hydration",
+          provider: "protoface",
+          source: "mcp_bridge_local",
+          credential: {
+            protoface_api_key: "pf-sidecar-secret",
+            livekit_url: "wss://livekit.example",
+            livekit_api_key: "lk-sidecar-key",
+            livekit_api_secret: "lk-sidecar-secret",
+          },
+          redacted: "configured",
+        }),
+      }),
+    );
+  });
+
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonStorage.ACTIONS_JSON_PROTOFACE_CREDENTIALS_V1 || null))
+    .toMatchObject({
+      protofaceApiKey: "pf-sidecar-secret",
+      livekitUrl: "wss://livekit.example/",
+      livekitApiKey: "lk-sidecar-key",
+      livekitApiSecret: "lk-sidecar-secret",
+      source: "sidecar",
+    });
+  await expect
+    .poll(() => page.evaluate(() => window.__actionsJsonBridgeSends.find((item) => item.type === "credential_hydration_result" && item.provider === "protoface") || null))
+    .toMatchObject({
+      type: "credential_hydration_result",
+      provider: "protoface",
+      ok: true,
+      configured: true,
+      redacted: "configured",
+    });
+  await expect(
+    page.evaluate(() => JSON.stringify(window.__actionsJsonStorage.ACTIONS_JSON_AGENT_MEMORY_V1 || {})),
+  ).resolves.not.toContain("pf-sidecar-secret");
 });
 
 test("background bridge rejects malformed credential hydration without storing a key", async ({ page }) => {
@@ -5426,6 +6624,190 @@ test("background bridge rejects malformed credential hydration without storing a
       },
     });
   await expect(page.evaluate(() => window.__actionsJsonStorage.ACTIONS_JSON_OPENAI_API_KEY || null)).resolves.toBeNull();
+});
+
+test("Protoface direct session stays background-owned and secret-free", async ({ page }) => {
+  await page.addInitScript(() => {
+    const credentials = {
+      protofaceApiKey: "pf-background-only-secret",
+      livekitUrl: "wss://livekit.example/",
+      livekitApiKey: "livekit-background-key",
+      livekitApiSecret: "livekit-background-only-secret",
+    };
+    window.__actionsJsonStorage = {
+      ACTIONS_JSON_PROTOFACE_CREDENTIALS_V1: { ...credentials, source: "manual" },
+    };
+    window.__protofaceSessionCalls = [];
+    window.loadProtofaceCredentials = async (storage) => {
+      if (window.__protofaceCredentialFailure) {
+        throw new Error("credential load failed with pf-background-only-secret");
+      }
+      const stored = await storage.get("ACTIONS_JSON_PROTOFACE_CREDENTIALS_V1");
+      return stored.ACTIONS_JSON_PROTOFACE_CREDENTIALS_V1;
+    };
+    window.createDirectProtofaceSession = async (options) => {
+      window.__protofaceSessionCalls.push({
+        operation: "create",
+        avatarId: options.avatarId,
+        credentials: options.credentials,
+        hasSignal: Boolean(options.signal),
+      });
+      return {
+        livekitUrl: "wss://livekit.example/",
+        roomName: "room-1",
+        participantToken: "bounded-viewer-token",
+        sessionId: "session-1",
+        avatarId: options.avatarId,
+        avatarIdentity: "protoface-avatar-1",
+        expiresAt: "2026-07-16T19:10:00.000Z",
+        internalCredential: credentials.livekitApiSecret,
+      };
+    };
+    window.endDirectProtofaceSession = async (options) => {
+      window.__protofaceSessionCalls.push({
+        operation: "end",
+        sessionId: options.sessionId,
+        credentials: options.credentials,
+        hasSignal: Boolean(options.signal),
+      });
+      return { ok: true };
+    };
+    window.chrome = {
+      runtime: {
+        lastError: null,
+        getManifest() { return { version: "test-version" }; },
+        onInstalled: { addListener() {} },
+        onMessage: {
+          addListener(listener) {
+            window.__actionsJsonBackgroundMessageListener = listener;
+          },
+        },
+      },
+      storage: {
+        local: {
+          async get(key) {
+            if (typeof key === "string") {
+              return { [key]: window.__actionsJsonStorage[key] };
+            }
+            return { ...window.__actionsJsonStorage };
+          },
+          async set(values) { Object.assign(window.__actionsJsonStorage, values); },
+          async remove(key) { delete window.__actionsJsonStorage[key]; },
+        },
+      },
+      scripting: { async executeScript() {} },
+      tabGroups: {
+        async get(id) { return { id }; },
+        async update() {},
+      },
+      tabs: {
+        async get(id) { return { id, windowId: 77, url: "https://example.test/" }; },
+        async group() { return 42; },
+        async sendMessage() { return { ok: true }; },
+      },
+    };
+  });
+
+  await page.goto("data:text/html,<main><h1>Protoface direct session test</h1></main>");
+  await addBackgroundScript(page);
+
+  const responses = await page.evaluate(async () => {
+    const invoke = (message) => new Promise((resolve) => {
+      let settled = false;
+      const finish = (response) => {
+        if (settled) return;
+        settled = true;
+        resolve(response ?? null);
+      };
+      const keepAlive = window.__actionsJsonBackgroundMessageListener(message, {}, finish);
+      if (!keepAlive) finish(null);
+    });
+    const created = await invoke({
+      type: "actions-json:protoface-session-create",
+      avatarId: "av_stock_001",
+    });
+    window.__actionsJsonStorage.ACTIONS_JSON_PROTOFACE_CREDENTIALS_V1 = {
+      ...window.__actionsJsonStorage.ACTIONS_JSON_PROTOFACE_CREDENTIALS_V1,
+      protofaceApiKey: "pf-rotated-secret",
+      livekitApiSecret: "livekit-rotated-secret",
+    };
+    const ended = await invoke({
+      type: "actions-json:protoface-session-end",
+      sessionId: "session-1",
+    });
+    const endedAgain = await invoke({
+      type: "actions-json:protoface-session-end",
+      sessionId: "session-1",
+    });
+    window.__protofaceCredentialFailure = true;
+    const failed = await invoke({
+      type: "actions-json:protoface-session-create",
+      avatarId: "av_stock_002",
+    });
+    return { created, ended, endedAgain, failed };
+  });
+
+  expect(responses.created).toEqual({
+    ok: true,
+    connection: {
+      livekitUrl: "wss://livekit.example/",
+      roomName: "room-1",
+      participantToken: "bounded-viewer-token",
+      sessionId: "session-1",
+      avatarId: "av_stock_001",
+      avatarIdentity: "protoface-avatar-1",
+      expiresAt: "2026-07-16T19:10:00.000Z",
+    },
+  });
+  expect(responses.ended).toEqual({ ok: true });
+  expect(responses.endedAgain).toEqual({ ok: true });
+  expect(responses.failed).toEqual({
+    ok: false,
+    error: {
+      code: "protoface_session_create_failed",
+      message: "Failed to create Protoface session.",
+      recoverable: true,
+    },
+  });
+
+  const evidence = await page.evaluate(() => ({
+    calls: window.__protofaceSessionCalls,
+    diagnostics: (window.__actionsJsonStorage.ACTIONS_JSON_AGENT_MEMORY_V1?.events || [])
+      .filter((event) => event.name === "background.protoface.session"),
+  }));
+  expect(evidence.calls).toEqual([
+    {
+      operation: "create",
+      avatarId: "av_stock_001",
+      credentials: expect.objectContaining({
+        protofaceApiKey: "pf-background-only-secret",
+        livekitApiSecret: "livekit-background-only-secret",
+      }),
+      hasSignal: true,
+    },
+    {
+      operation: "end",
+      sessionId: "session-1",
+      credentials: expect.objectContaining({
+        protofaceApiKey: "pf-background-only-secret",
+        livekitApiSecret: "livekit-background-only-secret",
+      }),
+      hasSignal: true,
+    },
+  ]);
+  expect(evidence.diagnostics.map((event) => event.input)).toEqual([
+    { provider: "protoface", mode: "direct", status: "created" },
+    { provider: "protoface", mode: "direct", status: "ended" },
+    { provider: "protoface", mode: "direct", status: "ended" },
+    { provider: "protoface", mode: "direct", status: "create_failed" },
+  ]);
+  const diagnosticsText = JSON.stringify(evidence.diagnostics);
+  expect(diagnosticsText).not.toContain("pf-background-only-secret");
+  expect(diagnosticsText).not.toContain("livekit-background-key");
+  expect(diagnosticsText).not.toContain("livekit-background-only-secret");
+  expect(diagnosticsText).not.toContain("pf-rotated-secret");
+  expect(diagnosticsText).not.toContain("livekit-rotated-secret");
+  expect(diagnosticsText).not.toContain("bounded-viewer-token");
 });
 
 test("debug.run_javascript delegates arbitrary evaluation to the privileged background fallback", async ({ page }) => {
@@ -5764,6 +7146,7 @@ test("actions.json menu overlay restores after content script reload", async ({ 
   });
 
   await page.locator("#__actions_json_menu_overlay_host").evaluate((host) => {
+    host.__actionsJsonMenuControl.setDisclosureState("opened");
     host.style.left = "118px";
     host.style.top = "77px";
     host.style.right = "auto";
@@ -5771,12 +7154,38 @@ test("actions.json menu overlay restores after content script reload", async ({ 
     host.style.width = "300px";
     host.style.height = "260px";
   });
+
+  // R6: the collapsed square is anchored to the PRESSED CONTROL, not to the
+  // panel's own top-left. Record where the control is before the press so the
+  // assertion below is about the user's finger and not about a constant.
+  const pressedCentre = await page
+    .locator("#__actions_json_menu_overlay_host")
+    .evaluate((host) => {
+      const rect = host.shadowRoot.querySelector("[data-minimize]").getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    });
+
   await page.locator("#__actions_json_menu_overlay_host").evaluate((host) => {
     host.shadowRoot.querySelector("[data-minimize]").click();
   });
   await expect
     .poll(() => page.evaluate(() => window.__actionsJsonStorage["actionsJsonMenuOverlayState.v1"]?.collapsed))
     .toBe(true);
+
+  // The collapsed box CONTAINS the point that was pressed. This is the whole
+  // fix: the shipped build pinned the panel's top-left, so a 300px-wide panel
+  // collapsed away from the right-edge control the user had just touched and
+  // left empty page under the cursor.
+  const collapsedRect = await page
+    .locator("#__actions_json_menu_overlay_host")
+    .evaluate((host) => host.getBoundingClientRect().toJSON());
+  expect(collapsedRect.left).toBeLessThanOrEqual(pressedCentre.x);
+  expect(collapsedRect.right).toBeGreaterThanOrEqual(pressedCentre.x);
+  expect(collapsedRect.top).toBeLessThanOrEqual(pressedCentre.y);
+  expect(collapsedRect.bottom).toBeGreaterThanOrEqual(pressedCentre.y);
+  // ...and it did NOT stay at the panel's old top-left, which is where the
+  // replaced implementation put it.
+  expect(collapsedRect.left).toBeGreaterThan(118);
 
   await page.evaluate(() => {
     window.__actionsJsonOverlayRuntime.disconnect();
@@ -5803,13 +7212,13 @@ test("actions.json menu overlay restores after content script reload", async ({ 
   });
 
   await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCount(1);
-  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("left", "118px");
-  await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("top", "77px");
   await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("width", "42px");
   await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("height", "42px");
   await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("min-width", "42px");
   await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("min-height", "42px");
 
+  // Expanding restores the EXACT pre-collapse geometry, including the position
+  // the panel had before it was anchored away to the pressed control.
   await page.locator("#__actions_json_menu_overlay_host").evaluate((host) => {
     host.shadowRoot.querySelector("[data-minimize]").click();
   });
@@ -5824,6 +7233,390 @@ test("actions.json menu overlay restores after content script reload", async ({ 
       host.shadowRoot.querySelector(".title").textContent
     )
   ).resolves.toBe("actions.json agent");
+});
+
+// ---------------------------------------------------------------------------
+// R6 — the collapse contract, rewritten after a live install failed on it.
+//
+// The user pressed the header's hamburger expecting a menu, got a collapse,
+// and could not find the 42px square because it had been pinned to the wide
+// panel's TOP-LEFT while his finger was on the panel's RIGHT edge. Two defects:
+// an icon that promised the wrong thing, and geometry that moved the target
+// away from the press.
+//
+// Everything below is the de-facto spec for the replacement. It is deliberately
+// the ONLY place the collapse geometry is asserted — a parallel test that still
+// expected the old top-left pinning would encode the reported bug as a
+// permanent expectation.
+// ---------------------------------------------------------------------------
+test("collapsing the menu overlay lands the collapsed box on the pressed control", async ({ page }) => {
+  await installRuntime(page);
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener({ type: "actions-json:open-menu-overlay" }, {}, resolve)
+    );
+  });
+
+  const host = page.locator("#__actions_json_menu_overlay_host");
+  await host.evaluate((node) => node.__actionsJsonMenuControl.setDisclosureState("opened"));
+
+  // The control's accessible name must describe COLLAPSING, not a menu. A
+  // hamburger glyph is what produced the "it closed and I can't find it"
+  // reading in the live install.
+  const control = await host.evaluate((node) => {
+    const button = node.shadowRoot.querySelector("[data-minimize]");
+    return {
+      title: button.title,
+      ariaLabel: button.getAttribute("aria-label"),
+      glyph: button.textContent.trim(),
+    };
+  });
+  expect(control.title.toLowerCase()).toContain("collapse");
+  expect(control.ariaLabel.toLowerCase()).toContain("collapse");
+  expect(control.title.toLowerCase()).not.toContain("menu");
+  expect(control.ariaLabel.toLowerCase()).not.toContain("menu");
+  expect(control.glyph).not.toBe("☰"); // ☰ promises a menu; this control collapses.
+
+  // A WIDE panel is what made the old behaviour visibly wrong: with the
+  // control near the right edge, top-left pinning threw the collapsed square
+  // hundreds of pixels away from the press.
+  await host.evaluate((node) => {
+    node.style.left = "120px";
+    node.style.top = "90px";
+    node.style.right = "auto";
+    node.style.bottom = "auto";
+    node.style.width = "420px";
+    node.style.height = "300px";
+  });
+
+  const pressed = await host.evaluate((node) => {
+    const rect = node.shadowRoot.querySelector("[data-minimize]").getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  });
+  await host.evaluate((node) => node.shadowRoot.querySelector("[data-minimize]").click());
+
+  const collapsed = await host.evaluate((node) => node.getBoundingClientRect().toJSON());
+  expect(Math.round(collapsed.width)).toBe(42);
+  expect(Math.round(collapsed.height)).toBe(42);
+  expect(collapsed.left).toBeLessThanOrEqual(pressed.x);
+  expect(collapsed.right).toBeGreaterThanOrEqual(pressed.x);
+  expect(collapsed.top).toBeLessThanOrEqual(pressed.y);
+  expect(collapsed.bottom).toBeGreaterThanOrEqual(pressed.y);
+  // The press was far to the RIGHT of the panel's left edge. Top-left pinning
+  // would have produced left === 120.
+  expect(collapsed.left).toBeGreaterThan(300);
+});
+
+test("collapsing from every viewport corner keeps the collapsed box on screen", async ({ page }) => {
+  await installRuntime(page);
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener({ type: "actions-json:open-menu-overlay" }, {}, resolve)
+    );
+  });
+
+  const host = page.locator("#__actions_json_menu_overlay_host");
+  const viewport = await page.evaluate(() => ({ width: window.innerWidth, height: window.innerHeight }));
+  const panelWidth = 320;
+  const panelHeight = 240;
+  // Anchoring to the press must not be allowed to defeat clamping: `place`
+  // owns the viewport constraint and setCollapsed routes through it.
+  const corners = [
+    { name: "top-left", left: -80, top: -60 },
+    { name: "top-right", left: viewport.width - panelWidth + 90, top: -60 },
+    { name: "bottom-left", left: -80, top: viewport.height - panelHeight + 90 },
+    { name: "bottom-right", left: viewport.width - panelWidth + 90, top: viewport.height - panelHeight + 90 },
+  ];
+
+  for (const corner of corners) {
+    await host.evaluate((node, geometry) => {
+      const control = node.__actionsJsonMenuControl;
+      if (control.isCollapsed()) control.setCollapsed(false);
+      node.style.left = `${geometry.left}px`;
+      node.style.top = `${geometry.top}px`;
+      node.style.right = "auto";
+      node.style.bottom = "auto";
+      node.style.width = `${geometry.width}px`;
+      node.style.height = `${geometry.height}px`;
+    }, { ...corner, width: panelWidth, height: panelHeight });
+
+    await host.evaluate((node) => node.shadowRoot.querySelector("[data-minimize]").click());
+
+    const rect = await host.evaluate((node) => node.getBoundingClientRect().toJSON());
+    expect(Math.round(rect.width), `${corner.name} width`).toBe(42);
+    expect(Math.round(rect.height), `${corner.name} height`).toBe(42);
+    expect(rect.left, `${corner.name} left edge on screen`).toBeGreaterThanOrEqual(0);
+    expect(rect.top, `${corner.name} top edge on screen`).toBeGreaterThanOrEqual(0);
+    expect(rect.right, `${corner.name} right edge on screen`).toBeLessThanOrEqual(viewport.width);
+    expect(rect.bottom, `${corner.name} bottom edge on screen`).toBeLessThanOrEqual(viewport.height);
+  }
+});
+
+test("collapsed menu overlay keeps the agent iframe mounted and rendered", async ({ page }) => {
+  await installRuntime(page);
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener({ type: "actions-json:open-menu-overlay" }, {}, resolve)
+    );
+  });
+
+  const host = page.locator("#__actions_json_menu_overlay_host");
+  const srcBefore = await host.evaluate((node) => node.shadowRoot.querySelector("iframe").src);
+
+  await host.evaluate((node) => node.shadowRoot.querySelector("[data-minimize]").click());
+
+  // REGRESSION GUARD. `.panel[data-collapsed="true"] .body { display: none }`
+  // is what the shipped build did, and it would hide the live-status pill —
+  // which renders INSIDE this iframe because page-world shadow DOM cannot
+  // request microphone permission (docs/chrome-extension.md:78-80). If this
+  // assertion is ever satisfied by an unmounted or display:none iframe, the
+  // collapsed overlay has stopped being able to say the session is live.
+  const mounted = await host.evaluate((node) => {
+    const iframe = node.shadowRoot.querySelector("iframe");
+    if (!iframe) return { present: false };
+    const body = node.shadowRoot.querySelector(".body");
+    const iframeRect = iframe.getBoundingClientRect();
+    return {
+      present: true,
+      src: iframe.src,
+      bodyDisplay: getComputedStyle(body).display,
+      iframeDisplay: getComputedStyle(iframe).display,
+      iframeVisibility: getComputedStyle(iframe).visibility,
+      width: iframeRect.width,
+      height: iframeRect.height,
+    };
+  });
+  expect(mounted.present).toBe(true);
+  expect(mounted.bodyDisplay).not.toBe("none");
+  expect(mounted.iframeDisplay).not.toBe("none");
+  expect(mounted.iframeVisibility).toBe("visible");
+  expect(mounted.width).toBeGreaterThan(0);
+  expect(mounted.height).toBeGreaterThan(0);
+  // Not reloaded: re-assigning src would tear down the live voice session the
+  // collapsed pill exists to report on.
+  expect(mounted.src).toBe(srcBefore);
+});
+
+test("collapsed menu overlay shrinks the agent surface to the compact pill viewport", async ({ page }) => {
+  await installRuntime(page);
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener({ type: "actions-json:open-menu-overlay" }, {}, resolve)
+    );
+  });
+
+  const host = page.locator("#__actions_json_menu_overlay_host");
+  await host.evaluate((node) => {
+    node.style.left = "100px";
+    node.style.top = "100px";
+    node.style.right = "auto";
+    node.style.bottom = "auto";
+    node.style.width = "320px";
+    node.style.height = "260px";
+  });
+
+  const expandedWidth = await host.evaluate(
+    (node) => node.shadowRoot.querySelector("iframe").getBoundingClientRect().width
+  );
+  expect(expandedWidth).toBeGreaterThan(60);
+
+  await host.evaluate((node) => node.shadowRoot.querySelector("[data-minimize]").click());
+
+  // This is the CHANNEL that tells the agent surface it is collapsed: the
+  // iframe's own viewport becomes 42px wide, which agent-surface.html's
+  // `@media (max-width: 60px)` block reads to render the waveform compact
+  // pill. No state is copied into content.js, and nothing is reloaded.
+  const collapsedIframe = await host.evaluate((node) => {
+    const rect = node.shadowRoot.querySelector("iframe").getBoundingClientRect();
+    return { width: rect.width, height: rect.height };
+  });
+  expect(Math.round(collapsedIframe.width)).toBe(42);
+  expect(Math.round(collapsedIframe.height)).toBe(42);
+  expect(collapsedIframe.width).toBeLessThanOrEqual(60);
+});
+
+// The two tests below load the REAL agent-surface document into the overlay's
+// iframe, because "the collapsed state shows the session is live" is a claim
+// about what that document renders at a 42px viewport. Asserting it against a
+// stub would prove nothing about the shipped pill.
+async function routeAgentSurfaceAssets(page) {
+  const extensionRoot = path.join(__dirname, "..");
+  await page.route("https://actions-json.test/agent-surface.html*", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: fs.readFileSync(path.join(extensionRoot, "agent-surface.html")),
+    });
+  });
+  await page.route("https://actions-json.test/src/**", async (route) => {
+    const url = new URL(route.request().url());
+    await route.fulfill({
+      contentType: "text/javascript",
+      body: fs.readFileSync(path.join(extensionRoot, url.pathname.slice(1))),
+    });
+  });
+  await page.route("https://actions-json.test/vendor/**", async (route) => {
+    const url = new URL(route.request().url());
+    await route.fulfill({
+      contentType: "text/javascript",
+      body: fs.readFileSync(path.join(extensionRoot, url.pathname.slice(1))),
+    });
+  });
+}
+
+test("the collapsed overlay shows a live-state indicator, not a static glyph", async ({ page }) => {
+  await routeAgentSurfaceAssets(page);
+  await installRuntime(page);
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener({ type: "actions-json:open-menu-overlay" }, {}, resolve)
+    );
+  });
+
+  const host = page.locator("#__actions_json_menu_overlay_host");
+  const surface = page.frameLocator("#__actions_json_menu_overlay_host iframe");
+  await expect(surface.locator("#agentPill")).toBeVisible();
+
+  await host.evaluate((node) => node.shadowRoot.querySelector("[data-minimize]").click());
+
+  // The compact variant is the SAME pill element, re-presented — not a second
+  // widget and not a copy of the state in content.js's shadow DOM. The live
+  // waveform is the indicator; the words move to the accessible name.
+  await expect(surface.locator("#agentPill")).toBeVisible();
+  await expect(surface.locator("#agentPillWave canvas")).toBeVisible();
+  await expect(surface.locator("#agentPillAction")).toBeHidden();
+
+  const compact = await surface.locator("#agentPill").evaluate((pill) => {
+    const rect = pill.getBoundingClientRect();
+    const wave = pill.querySelector(".agent-pill-wave");
+    const action = pill.querySelector(".agent-pill-action");
+    return {
+      state: pill.dataset.state,
+      waveWidth: wave.getBoundingClientRect().width,
+      canvasDisplay: getComputedStyle(wave.querySelector("canvas")).display,
+      actionDisplay: getComputedStyle(action).display,
+      radius: getComputedStyle(pill).borderRadius,
+      width: rect.width,
+      height: rect.height,
+    };
+  });
+  // It reports A STATE.
+  expect(compact.state).toBeTruthy();
+  expect(compact.canvasDisplay).toBe("block");
+
+  // These four discriminate a DESIGNED compact variant from the expanded pill
+  // merely crushed by a 42px viewport. Measured: with the compact rules removed
+  // the pill renders 26x40, radius 20px, and .agent-pill-action still
+  // display:block (its box just squeezes to zero width, which alone would read
+  // as "hidden" and let this test pass vacuously).
+  expect(Math.round(compact.width)).toBe(42);
+  expect(Math.round(compact.height)).toBe(42);
+  expect(compact.radius).toBe("50%");
+  expect(Math.round(compact.waveWidth)).toBe(36);
+  expect(compact.actionDisplay).toBe("none");
+});
+
+test("a session state change while collapsed updates the compact indicator", async ({ page }) => {
+  await routeAgentSurfaceAssets(page);
+  await installRuntime(page);
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener({ type: "actions-json:open-menu-overlay" }, {}, resolve)
+    );
+  });
+
+  const host = page.locator("#__actions_json_menu_overlay_host");
+  const surface = page.frameLocator("#__actions_json_menu_overlay_host iframe");
+  await expect(surface.locator("#agentPill")).toBeVisible();
+
+  await host.evaluate((node) => node.shadowRoot.querySelector("[data-minimize]").click());
+  // An indicator nobody can see does not report anything. Without this, the
+  // test below still passes against a display:none body, because dataset and
+  // getComputedStyle keep working on a hidden element — which is exactly the
+  // vacuous green this suite has been catching.
+  await expect(surface.locator("#agentPill")).toBeVisible();
+  await expect(surface.locator("#agentPillWave canvas")).toBeVisible();
+  // display:none, not merely squeezed to zero width — see the discriminating
+  // assertions in the test above.
+  await expect(
+    surface.locator("#agentPill").evaluate((pill) =>
+      getComputedStyle(pill.querySelector(".agent-pill-action")).display
+    )
+  ).resolves.toBe("none");
+
+  const before = await surface.locator("#agentPill").evaluate((pill) => ({
+    state: pill.dataset.state,
+    hue: getComputedStyle(pill).getPropertyValue("--pill-hue"),
+  }));
+
+  // Deliver a session event AFTER the collapse. If the collapsed presentation
+  // were a static glyph — or a snapshot content.js copied at collapse time —
+  // this would not move. It moves because the compact variant is the same
+  // element the same presenter writes on every event.
+  await surface.locator("#agentPill").evaluate(async (pill) => {
+    const { resolvePillState, PILL_STATE_TOKENS } =
+      await import("https://actions-json.test/src/agent/pill-presentation.mjs");
+    const resolved = resolvePillState({ type: "input_audio_buffer.speech_started" });
+    pill.dataset.state = resolved.state;
+    for (const property of ["--pill-hue", "--pill-rim"]) {
+      pill.style.setProperty(property, PILL_STATE_TOKENS[resolved.state].hue);
+    }
+    pill.setAttribute("aria-label", `Agent status: ${resolved.label}`);
+  });
+
+  const after = await surface.locator("#agentPill").evaluate((pill) => ({
+    state: pill.dataset.state,
+    hue: getComputedStyle(pill).getPropertyValue("--pill-hue"),
+    ariaLabel: pill.getAttribute("aria-label"),
+  }));
+
+  expect(after.state).toBe("listening");
+  expect(after.state).not.toBe(before.state);
+  // The waveform hue changed while collapsed — the indicator is live, not inert.
+  expect(after.hue).not.toBe(before.hue);
+  // The words are not lost, they moved to the accessible name.
+  expect(after.ariaLabel).toContain("Listening");
+});
+
+test("collapsing twice does not overwrite the stored expanded geometry", async ({ page }) => {
+  await installRuntime(page);
+  await page.evaluate(async () => {
+    const listener = window.__actionsJsonRuntimeListeners[0];
+    await new Promise((resolve) =>
+      listener({ type: "actions-json:open-menu-overlay" }, {}, resolve)
+    );
+  });
+
+  const host = page.locator("#__actions_json_menu_overlay_host");
+  await host.evaluate((node) => {
+    node.style.left = "140px";
+    node.style.top = "96px";
+    node.style.right = "auto";
+    node.style.bottom = "auto";
+    node.style.width = "340px";
+    node.style.height = "250px";
+  });
+
+  // The no-op guard in setCollapsed is what makes this safe. Without it the
+  // second collapse re-captures the ALREADY-COLLAPSED 42x42 box as the
+  // geometry to restore, and expand can never bring the panel back —
+  // Wait for a terminal outcome after a UI mutation.
+  await host.evaluate((node) => node.__actionsJsonMenuControl.setCollapsed(true));
+  await host.evaluate((node) => node.__actionsJsonMenuControl.setCollapsed(true));
+  await host.evaluate((node) => node.__actionsJsonMenuControl.setCollapsed(true));
+
+  await expect(host).toHaveCSS("width", "42px");
+
+  await host.evaluate((node) => node.__actionsJsonMenuControl.setCollapsed(false));
+  await expect(host).toHaveCSS("width", "340px");
+  await expect(host).toHaveCSS("height", "250px");
+  await expect(host).toHaveCSS("left", "140px");
+  await expect(host).toHaveCSS("top", "96px");
 });
 
 test("actions.json menu overlay collapse action leaves a tiny expandable affordance", async ({ page }) => {
@@ -5842,6 +7635,7 @@ test("actions.json menu overlay collapse action leaves a tiny expandable afforda
     );
   });
   await page.locator("#__actions_json_menu_overlay_host").evaluate((host) => {
+    host.__actionsJsonMenuControl.setDisclosureState("opened");
     host.style.left = "118px";
     host.style.top = "77px";
     host.style.right = "auto";
@@ -5850,35 +7644,64 @@ test("actions.json menu overlay collapse action leaves a tiny expandable afforda
     host.style.height = "260px";
   });
 
+  // R6: the programmatic path anchors to the visible collapse affordance too,
+  // so the collapsed square lands where the user would have pressed rather
+  // than at the panel's own top-left. Record that control before collapsing.
+  const affordanceCentre = await page
+    .locator("#__actions_json_menu_overlay_host")
+    .evaluate((host) => {
+      const rect = host.shadowRoot.querySelector("[data-minimize]").getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    });
+
   await callRuntimeAction(page, "collapse-menu", "overlay.menu.collapse");
-  const collapsedOutput = await actionOutput(page, "collapse-menu");
-  expect(collapsedOutput.output).toMatchObject({
+  const collapsedOutput = await readExtensionActionOutput(page, "collapse-menu");
+  expect(collapsedOutput).toMatchObject({
     ok: true,
     collapsed: true,
-    geometry: { left: 118, top: 77, width: 42, height: 42 },
+    geometry: { width: 42, height: 42 },
   });
+  expect(collapsedOutput.geometry.left).toBeLessThanOrEqual(affordanceCentre.x);
+  expect(collapsedOutput.geometry.left + 42).toBeGreaterThanOrEqual(affordanceCentre.x);
+  expect(collapsedOutput.geometry.top).toBeLessThanOrEqual(affordanceCentre.y);
+  expect(collapsedOutput.geometry.top + 42).toBeGreaterThanOrEqual(affordanceCentre.y);
   await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("width", "42px");
   await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("height", "42px");
   await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("min-width", "42px");
   await expect(page.locator("#__actions_json_menu_overlay_host")).toHaveCSS("min-height", "42px");
-  await expect(
-    page.locator("#__actions_json_menu_overlay_host").evaluate((host) => {
+  const collapsedAffordance = await page
+    .locator("#__actions_json_menu_overlay_host")
+    .evaluate((host) => {
       const button = host.shadowRoot.querySelector("[data-minimize]");
       return {
         title: button.title,
-        visibleText: button.textContent,
+        ariaLabel: button.getAttribute("aria-label"),
+        visibleText: button.textContent.trim(),
         rect: button.getBoundingClientRect().toJSON(),
       };
-    })
-  ).resolves.toMatchObject({
-    title: "Expand",
-    visibleText: "☰",
-    rect: { width: 30, height: 30 },
+    });
+  // Collapsed, the control must promise EXPANDING — and must never read as a
+  // menu, which is the misreading that lost the overlay during a live install.
+  expect(collapsedAffordance.title.toLowerCase()).toContain("expand");
+  expect(collapsedAffordance.ariaLabel.toLowerCase()).toContain("expand");
+  expect(collapsedAffordance.title.toLowerCase()).not.toContain("menu");
+  expect(collapsedAffordance.visibleText).not.toBe("☰");
+  expect(collapsedAffordance.rect).toMatchObject({ width: 30, height: 30 });
+
+  const geometryAfterFirstCollapse = collapsedOutput.geometry;
+  await callRuntimeAction(page, "collapse-menu-again", "overlay.menu.collapse");
+  const repeatedCollapseOutput = await readExtensionActionOutput(page, "collapse-menu-again");
+  // Idempotent: the second collapse is a no-op and must not re-anchor or
+  // re-capture geometry.
+  expect(repeatedCollapseOutput).toMatchObject({
+    ok: true,
+    collapsed: true,
+    geometry: geometryAfterFirstCollapse,
   });
 
   await callRuntimeAction(page, "expand-menu", "overlay.menu.expand");
-  const expandedOutput = await actionOutput(page, "expand-menu");
-  expect(expandedOutput.output).toMatchObject({
+  const expandedOutput = await readExtensionActionOutput(page, "expand-menu");
+  expect(expandedOutput).toMatchObject({
     ok: true,
     collapsed: false,
     geometry: { left: 118, top: 77, width: 300, height: 260 },
@@ -5891,6 +7714,14 @@ test("actions.json menu overlay collapse action leaves a tiny expandable afforda
       host.shadowRoot.querySelector(".title").textContent
     )
   ).resolves.toBe("actions.json agent");
+
+  await callRuntimeAction(page, "expand-menu-again", "overlay.menu.expand");
+  const repeatedExpandOutput = await readExtensionActionOutput(page, "expand-menu-again");
+  expect(repeatedExpandOutput).toMatchObject({
+    ok: true,
+    collapsed: false,
+    geometry: { left: 118, top: 77, width: 300, height: 260 },
+  });
 });
 
 test("locator.element_info center feeds pointer.click through the extension action path", async ({ page }) => {
@@ -5991,6 +7822,75 @@ test("locator.element_info center feeds pointer.click through the extension acti
   await expect(page.evaluate(() => document.body.dataset.clicked)).resolves.toBe("yes");
   await expect(page.evaluate(() => document.body.dataset.clickX)).resolves.toBe("320");
   await expect(page.evaluate(() => document.body.dataset.clickY)).resolves.toBe("204");
+});
+
+test("pointer.click resolves locator identity after a control moves and selects an exact retargeted match", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [{ name: "pointer.click", input_schema: { type: "object" } }],
+  });
+  await connectRuntime(page);
+
+  await page.setContent(`
+    <main>
+      <button
+        data-testid="moving-save"
+        style="position:absolute;left:240px;top:100px;width:160px;height:48px"
+        onclick="document.body.dataset.movingSaveClicked = 'yes'"
+      >Save</button>
+      <article data-testid="comment-container">Exact duplicate<button onclick="document.body.dataset.deleted = 'first'">Delete</button></article>
+      <article data-testid="comment-container">Exact duplicate<button onclick="document.body.dataset.deleted = 'second'">Delete</button></article>
+    </main>
+  `);
+
+  await page.locator("[data-testid='moving-save']").evaluate((button) => {
+    button.style.top = "300px";
+  });
+  await callRuntimeAction(page, "moving-save-click", "pointer.click", {
+    locator: {
+      selector: "[data-testid='moving-save']",
+      text_equals: "Save",
+    },
+  });
+  const movingSave = await readExtensionActionOutput(page, "moving-save-click");
+  expect(movingSave).toMatchObject({
+    ok: true,
+    primitive: "pointer.click",
+    value: {
+      clicked: true,
+      x: 320,
+      y: 324,
+      geometry: { source: "locator" },
+      target: { data_testid: "moving-save", text: "Save" },
+    },
+  });
+  await expect(page.evaluate(() => document.body.dataset.movingSaveClicked)).resolves.toBe("yes");
+
+  await callRuntimeAction(page, "second-delete-click", "pointer.click", {
+    locator: {
+      selector: "[data-testid='comment-container']",
+      text_contains: "Exact duplicate",
+      retarget: {
+        selector: "button",
+        closest: "[data-testid='comment-container']",
+        text_equals: "Delete",
+      },
+      match_index: 1,
+    },
+  });
+  const secondDelete = await readExtensionActionOutput(page, "second-delete-click");
+  expect(secondDelete).toMatchObject({
+    ok: true,
+    primitive: "pointer.click",
+    value: {
+      clicked: true,
+      geometry: {
+        source: "locator",
+        locator: { match_index: 1 },
+      },
+      target: { text: "Delete" },
+    },
+  });
+  await expect(page.evaluate(() => document.body.dataset.deleted)).resolves.toBe("second");
 });
 
 test("locator.element_info filters selector candidates by text through the extension action path", async ({ page }) => {
@@ -6321,6 +8221,46 @@ test("locator.element_info scrolls a geometrically visible target clear of a sti
   expect(result.hitTestId).toBe("clickable-checkbox");
 });
 
+test("locator.element_info returns an exposed action point when only the center is occluded", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "locator.element_info", input_schema: { type: "object" } },
+      { name: "pointer.click", input_schema: { type: "object" } },
+    ],
+  });
+  await page.setViewportSize({ width: 800, height: 600 });
+  await page.setContent(`
+    <button
+      data-testid="partial-locator-target"
+      style="position:absolute;left:240px;top:180px;width:160px;height:48px"
+      onclick="document.body.dataset.locatorPartialClicked = 'yes'"
+    >Partial locator target</button>
+    <div style="position:fixed;left:300px;top:160px;width:40px;height:88px;background:white;z-index:10000">Center cover</div>
+  `);
+  await connectRuntime(page);
+
+  await callRuntimeAction(page, "partial-locator-info", "locator.element_info", {
+    locator: { selector: "[data-testid='partial-locator-target']" },
+  });
+  const output = await readExtensionActionOutput(page, "partial-locator-info");
+  expect(output.value.clickable).toBe(true);
+  expect(output.value.clickable_center).not.toEqual({ x: 320, y: 204 });
+  expect(output.value.visibility).toEqual(expect.objectContaining({
+    receives_events: true,
+    action_point: output.value.clickable_center,
+  }));
+
+  await callRuntimeAction(page, "partial-locator-click", "pointer.click", output.value.clickable_center);
+  await expect.poll(() => actionOutput(page, "partial-locator-click")).toMatchObject({
+    output: {
+      ok: true,
+      primitive: "pointer.click",
+      value: { clicked: true },
+    },
+  });
+  await expect(page.evaluate(() => document.body.dataset.locatorPartialClicked)).resolves.toBe("yes");
+});
+
 test("locator.element_info retargets hidden semantic identity to its visible control", async ({ page }) => {
   await installRuntime(page, {
     tools: [{ name: "locator.element_info", input_schema: { type: "object" } }],
@@ -6373,17 +8313,38 @@ async function readExtensionActionOutput(page, callId) {
     .poll(() =>
       page.evaluate((id) =>
         window.__actionsJsonMessages.find(
-          (item) => item.type === "action_call_output" && item.call_id === id
-        )?.output || null,
+          (item) => (item.type === "action_call_output" || item.type === "action_error") && item.call_id === id
+        ) || null,
       callId)
     )
     .not.toBeNull();
-  return page.evaluate((id) =>
+  const result = await page.evaluate((id) =>
     window.__actionsJsonMessages.find(
-      (item) => item.type === "action_call_output" && item.call_id === id
-    )?.output || null,
+      (item) => (item.type === "action_call_output" || item.type === "action_error") && item.call_id === id
+    ) || null,
   callId);
+  if (result.type === "action_error") {
+    throw new Error(`Action ${callId} failed: ${result.error?.code || "unknown_error"}: ${result.error?.message || "Unknown action error"}`);
+  }
+  return result.output;
 }
+
+test("extension action output reader preserves terminal action error details", async ({ page }) => {
+  await page.setContent("<main>action error fixture</main>");
+  await page.evaluate(() => {
+    window.__actionsJsonMessages = [{
+      type: "action_error",
+      call_id: "diagnostic-error",
+      error: {
+        code: "handler_failed",
+        message: "geometry serialization failed",
+      },
+    }];
+  });
+
+  await expect(readExtensionActionOutput(page, "diagnostic-error"))
+    .rejects.toThrow("Action diagnostic-error failed: handler_failed: geometry serialization failed");
+});
 
 test("bridge state_projection_call forwards to the background executor and returns output", async ({ page }) => {
   await installRuntime(page);
@@ -6412,8 +8373,11 @@ test("bridge state_projection_call forwards to the background executor and retur
         data: JSON.stringify({
           type: "state_projection_call",
           call_id: "state-call-1",
-          mode: "state_read",
+          mode: "state_summary",
           projection_name: "trello.board",
+          summary_name: "list_page",
+          summary_arguments: { list_name: "Next", offset: 20, limit: 10 },
+          max_bytes: 8000,
           map_path: "scopes/private/sites/trello.com/board/actions.json",
           projection: {
             name: "trello.board",
@@ -6443,8 +8407,11 @@ test("bridge state_projection_call forwards to the background executor and retur
   expect(forwarded).toHaveLength(1);
   expect(forwarded[0]).toMatchObject({
     type: "state_projection_call",
-    mode: "state_read",
+    mode: "state_summary",
     projection_name: "trello.board",
+    summary_name: "list_page",
+    summary_arguments: { list_name: "Next", offset: 20, limit: 10 },
+    max_bytes: 8000,
     map_path: "scopes/private/sites/trello.com/board/actions.json",
   });
   expect(forwarded[0].projection.snapshot.version).toBe(1);
@@ -6560,6 +8527,14 @@ test("bridge site_action_call returns a structured action_error when execution f
       if (message?.type === "actions-json:bridge-site-action-call") {
         return {
           ok: false,
+          output: {
+            outcome: {
+              execution: "succeeded",
+              mutation: "uncertain_or_committed",
+              verification: "failed",
+              retry_safe: false,
+            },
+          },
           error: {
             code: "workflow_step_failed",
             message: "Step findList failed: list not visible.",
@@ -6586,6 +8561,13 @@ test("bridge site_action_call returns a structured action_error when execution f
   await expect.poll(() => actionError(page, "site-action-call-2")).toMatchObject({
     type: "action_error",
     call_id: "site-action-call-2",
+    output: {
+      outcome: {
+        mutation: "uncertain_or_committed",
+        verification: "failed",
+        retry_safe: false,
+      },
+    },
     error: { code: "workflow_step_failed" },
   });
 });

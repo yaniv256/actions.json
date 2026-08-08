@@ -4,7 +4,7 @@ import test from "node:test";
 import { executeWorkflowAction } from "../src/agent/workflow-actions.mjs";
 
 // FAILURE-PATH TESTS for `settle_after` (Level-1 finding, incident
-// investigations/trello-delete-confirm-anchor-and-silent-noop-family.md).
+// the internal investigation record).
 //
 // `runSettle` returns { ok:false, reason:"timeout" } when its locator never
 // resolves. The caller then does:

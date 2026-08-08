@@ -110,6 +110,9 @@ const ALLOWED_WORKFLOW_KEYS = new Set(["version", "expression_language", "steps"
 const ALLOWED_STEP_KEYS = new Set([
   "id",
   "primitive",
+  "effect",
+  "target_guard",
+  "target_guards",
   "args",
   "when",
   "for_each",
@@ -120,13 +123,21 @@ const ALLOWED_STEP_KEYS = new Set([
   "on_error",
   "settle_after",
 ]);
+const ALLOWED_STEP_EFFECTS = new Set([
+  "observation",
+  "readiness",
+  "cleanup",
+  "reversible_mutation",
+  "irreversible_mutation",
+  "verification",
+]);
 
 // `after_each` runs between retry attempts to let the page settle. It is a WAIT
 // slot. Validating only "is this a known primitive" let two defects ship:
 //   after_each: keyboard.press Shift   -> waits for nothing; attempts run back-to-back
 //   after_each: pointer.click          -> a MUTATION, fired up to max_attempts-1 times
 // Both were live in the Trello map. Restrict to primitives that observe or are
-// idempotent. See investigations/trello-delete-confirm-anchor-and-silent-noop-family.md
+// idempotent. See the internal investigation record
 const AFTER_EACH_PRIMITIVES = new Set([
   "locator.wait_for",
   "locator.element_info",
@@ -141,7 +152,7 @@ function unknownPrimitiveError(stepId, primitiveName) {
     ok: false,
     error: {
       code: "invalid_workflow",
-      message: `Workflow step ${stepId} uses unknown primitive ${primitiveName}; it is not in the runtime primitive dictionary.`,
+      message: `Workflow step ${stepId} uses unknown primitive ${primitiveName}; it is not in the runtime executable action catalog.`,
     },
   };
 }
@@ -202,6 +213,29 @@ export function validateWorkflow(workflow, limits = DEFAULT_LIMITS) {
     }
     if (typeof step.primitive !== "string" || !step.primitive) {
       return { ok: false, error: { code: "invalid_workflow", message: `Workflow step ${step.id} needs primitive.` } };
+    }
+    if (step.effect !== undefined && !ALLOWED_STEP_EFFECTS.has(step.effect)) {
+      return {
+        ok: false,
+        error: {
+          code: "invalid_workflow",
+          message: `Workflow step ${step.id} effect must be one of ${[...ALLOWED_STEP_EFFECTS].join(", ")}.`,
+        },
+      };
+    }
+    if (step.target_guard !== undefined || step.target_guards !== undefined) {
+      const guards = step.target_guards ?? [step.target_guard];
+      if (!Array.isArray(guards) || guards.length === 0 || guards.some((guard) => (
+        !guard || typeof guard !== "object" || Array.isArray(guard)
+          || typeof guard.source_step !== "string" || !STEP_ID_PATTERN.test(guard.source_step)
+          || !ids.has(guard.source_step) || guard.source_step === step.id
+          || guard.candidate_count !== 1
+      ))) {
+        return {
+          ok: false,
+          error: { code: "invalid_workflow", message: `Workflow step ${step.id} target guards require earlier source_step values and candidate_count: 1.` },
+        };
+      }
     }
     if (knownPrimitives && !knownPrimitives.has(step.primitive)) {
       return unknownPrimitiveError(step.id, step.primitive);
@@ -306,10 +340,25 @@ export function validateWorkflow(workflow, limits = DEFAULT_LIMITS) {
   return { ok: true };
 }
 
+const POTENTIAL_MUTATION_PRIMITIVE_PATTERN = /^(pointer\.(click|double_click|drag)|keyboard\.|text\.insert|input\.|form\.|clipboard\.)/;
+
+function resolveStepEffect(step) {
+  if (ALLOWED_STEP_EFFECTS.has(step?.effect)) {
+    return step.effect;
+  }
+  // Compatibility authority while maps migrate to explicit effects. This is
+  // intentionally the same conservative primitive family the runtime used
+  // before step-aware effects existed.
+  return POTENTIAL_MUTATION_PRIMITIVE_PATTERN.test(String(step?.primitive || ""))
+    ? "irreversible_mutation"
+    : "observation";
+}
+
 function summarizeStep({ step, result, startedAt, skipped = false, settle = undefined }) {
   const summary = {
     id: step.id,
     primitive: step.primitive,
+    effect: resolveStepEffect(step),
     ok: result?.ok !== false,
     skipped,
     duration_ms: Math.max(0, Math.round(performance.now() - startedAt)),
@@ -320,7 +369,18 @@ function summarizeStep({ step, result, startedAt, skipped = false, settle = unde
   return summary;
 }
 
-function classifyWorkflowFailure({ step, result }) {
+function completedMutationBeforeFailure(steps = []) {
+  return steps.some(
+    (summary) =>
+      summary?.ok === true &&
+      summary?.skipped !== true &&
+      (summary?.effect === "irreversible_mutation" ||
+        summary?.effect === "reversible_mutation" ||
+        (summary?.effect == null && POTENTIAL_MUTATION_PRIMITIVE_PATTERN.test(String(summary?.primitive || "")))),
+  );
+}
+
+function classifyWorkflowFailure({ step, result, steps = [] }) {
   const cause = result?.error || {};
   const causeCode = String(cause.code || "");
   const message = String(cause.message || result?.error?.message || "");
@@ -343,6 +403,23 @@ function classifyWorkflowFailure({ step, result }) {
       retryable: false,
       recoverable: true,
       safe_recovery: "Read the current state projection before retrying; the mutation may have partially landed.",
+    };
+  }
+  if (
+    completedMutationBeforeFailure(steps) &&
+    (causeCode.startsWith("workflow_retry_") ||
+      causeCode === "workflow_settle_timeout" ||
+      /verify|confirm/i.test(stepId))
+  ) {
+    return {
+      failure_class: "mutation_outcome_indeterminate",
+      failed_state: "postcondition",
+      outcome: "indeterminate",
+      mutation_may_have_committed: true,
+      retryable: false,
+      recoverable: true,
+      safe_recovery:
+        "Read the current state through an independent projection before any retry. Do not retry unless that read proves the mutation did not commit.",
     };
   }
   if (
@@ -370,7 +447,7 @@ function classifyWorkflowFailure({ step, result }) {
 function workflowFailure({ step, result, steps }) {
   const causeCode = result?.error?.code || "";
   const code = causeCode.startsWith("workflow_retry_") ? causeCode : "workflow_step_failed";
-  const classification = classifyWorkflowFailure({ step, result });
+  const classification = classifyWorkflowFailure({ step, result, steps });
   return {
     ok: false,
     error: {
@@ -456,6 +533,32 @@ export async function executeWorkflowAction({
     index: null,
   };
   const stepSummaries = [];
+  const guardedExecute = async (step, args, executionContext) => {
+    const targetGuards = step.target_guards ?? (step.target_guard ? [step.target_guard] : []);
+    for (const targetGuard of targetGuards) {
+      const source = executionContext.steps[targetGuard.source_step];
+      const candidateCount = source?.output?.value?.candidate_count
+        ?? source?.output?.candidate_count
+        ?? source?.value?.candidate_count
+        ?? source?.candidate_count;
+      const ambiguous = source?.output?.value?.ambiguous
+        ?? source?.output?.ambiguous
+        ?? source?.value?.ambiguous
+        ?? source?.ambiguous;
+      if (candidateCount !== 1 || ambiguous === true) {
+        return {
+          ok: false,
+          error: {
+            code: "workflow_target_not_unique",
+            message: `Workflow step ${step.id} refused its effect because ${targetGuard.source_step} did not resolve exactly one target.`,
+            candidate_count: Number.isInteger(candidateCount) ? candidateCount : null,
+            effect_performed: false,
+          },
+        };
+      }
+    }
+    return executePrimitive({ name: step.primitive, arguments: args });
+  };
 
   for (const step of workflow.steps) {
     const startedAt = performance.now();
@@ -488,7 +591,7 @@ export async function executeWorkflowAction({
         for (let index = 0; index < boundedItems.length; index += 1) {
           const iterationContext = { ...context, item: boundedItems[index], index };
           const args = await evaluateWorkflowValue(step.args || {}, iterationContext, limits);
-          const result = normalizeStepResult(await executePrimitive({ name: step.primitive, arguments: args }));
+          const result = normalizeStepResult(await guardedExecute(step, args, iterationContext));
           iterationResults.push(result);
           if (result?.ok === false && step.on_error !== "continue") {
             const loopResult = { ok: false, items: iterationResults };
@@ -514,7 +617,7 @@ export async function executeWorkflowAction({
         for (let attemptIndex = 0; attemptIndex < maxAttempts; attemptIndex += 1) {
           const attemptContext = { ...context, index: attemptIndex, item: null };
           const args = await evaluateWorkflowValue(step.args || {}, attemptContext, limits);
-          finalResult = normalizeStepResult(await executePrimitive({ name: step.primitive, arguments: args }));
+          finalResult = normalizeStepResult(await guardedExecute(step, args, attemptContext));
           context.steps[step.save_as || step.id] = finalResult;
           attempts.push(finalResult);
           if (finalResult?.ok === false && step.on_error !== "continue") {
@@ -574,7 +677,7 @@ export async function executeWorkflowAction({
       }
 
       const args = await evaluateWorkflowValue(step.args || {}, context, limits);
-      const result = normalizeStepResult(await executePrimitive({ name: step.primitive, arguments: args }));
+      const result = normalizeStepResult(await guardedExecute(step, args, context));
       context.steps[step.save_as || step.id] = result;
       if (result?.ok === false && step.on_error !== "continue") {
         stepSummaries.push(summarizeStep({ step, result, startedAt }));

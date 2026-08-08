@@ -53,6 +53,20 @@ test("dispatchGatedRepeat reuses the trusted CDP dispatch path and the pure loop
   assert.ok(body.includes("withHeldModifiers"), "must press held modifiers so Docs' chord layer fires");
   assert.ok(body.includes("readCurrentA11yValue"), "the gate must read the current a11y value between presses");
   assert.ok(body.includes('fidelity: "trusted"'), "must report trusted fidelity");
+  assert.ok(body.includes("readSelectionSnapshot"), "must return the exact resulting selection after the trusted key action");
+});
+
+test("selection feedback exposes full scope, ownership, and a large-selection warning", () => {
+  const fn = backgroundSource.match(/const readSelectionSnapshot = async \(tabId\) => \{([\s\S]*?)\n\};/);
+  assert.ok(fn, "readSelectionSnapshot must be declared");
+  const body = fn[1];
+  assert.ok(body.includes("allFrames: true"), "must inspect every frame for the selection owner");
+  assert.ok(body.includes("selected_text: selectedText"), "must return the complete selected text");
+  assert.ok(body.includes("selected_length: selectedText.length"), "must return exact selection length");
+  assert.ok(body.includes("active_element: identity(active)"), "must identify the active element");
+  assert.ok(body.includes("editing_host: identity(editingHost)"), "must identify the owning editable region");
+  assert.ok(body.includes("large_selection: selectedText.length >= 500"), "must warn when selection scope is unusually large");
+  assert.ok(body.includes("ambiguous: selectedFrames.length > 1"), "must expose multi-frame ambiguity");
 });
 
 test("readCurrentA11yValue reads the speakable REGION first, announcement buffer as fallback (live-corrected 2026-07-07)", () => {
@@ -88,6 +102,7 @@ test("keyboard.press_gated primitive_dictionary entry carries model-usable metad
   assert.ok(prim.summary && prim.summary.length > 0, "needs a non-empty summary");
   assert.equal(prim.input_schema.type, "object");
   assert.deepEqual(prim.input_schema.required, ["key", "stop"], "key + stop are required");
+  assert.match(prim.summary, /complete resulting selection/i);
 });
 
 test("keyboard.press_gated is routable (a static tool name, so not unroutable)", () => {

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import test from "node:test";
 import {
-  listSiteActionsFromBundle,
+  listSiteActionsBoundedFromBundle,
   listSiteStorageFilesFromBundle,
   readSiteStorageFileFromBundle,
   resolveSiteActionFromBundle,
@@ -12,6 +13,7 @@ import {
 import {
   buildSemanticDeltas,
   diffStates,
+  INTERNAL_STATE_PROJECTION_MAX_BYTES,
   listStateProjectionsFromBundle,
   verifyStatePostcondition,
 } from "../extensions/chrome-overlay-runtime/src/agent/state-projections.mjs";
@@ -20,9 +22,23 @@ import {
   filterRealtimeToolsForBlockedPrimitives,
 } from "../extensions/chrome-overlay-runtime/src/agent/realtime-tool-catalog.mjs";
 import { BridgeOutputDeliveryQueue } from "../extensions/chrome-overlay-runtime/src/agent/bridge-output-delivery.mjs";
+import {
+  bridgeAuthHeaders,
+  loadBridgeHandshakeSecret as loadSharedBridgeHandshakeSecret,
+} from "../extensions/chrome-overlay-runtime/src/agent/hosted-tool-executor.mjs";
 import { ShimTree } from "../extensions/chrome-overlay-runtime/src/a11y/automation_shim.js";
 import { normalizeGatedRepeatArgs, runGatedRepeat } from "../extensions/chrome-overlay-runtime/src/a11y/gated-repeat.mjs";
-import { TransferBuffer, TransferBufferError } from "../extensions/chrome-overlay-runtime/src/agent/transfer-buffer.mjs";
+import {
+  TransferBuffer,
+  TransferBufferError,
+  transferInsertValue,
+} from "../extensions/chrome-overlay-runtime/src/agent/transfer-buffer.mjs";
+import {
+  base64ToBytes,
+  bytesToBase64,
+  FileTransferError,
+  FileTransferStore,
+} from "../extensions/chrome-overlay-runtime/src/agent/file-transfer.mjs";
 import { executeWorkflowAction } from "../extensions/chrome-overlay-runtime/src/agent/workflow-actions.mjs";
 import { normalizeSiteActionCallArgs } from "../extensions/chrome-overlay-runtime/src/agent/site-action-args.mjs";
 import { captureTabSurface, compactScreenshotDataUrl, createChromeScreenshotBrowser } from "../extensions/chrome-overlay-runtime/src/agent/background-screenshot-capture.mjs";
@@ -30,11 +46,36 @@ import { createCloudStore } from "../extensions/chrome-overlay-runtime/src/agent
 import { reconcileDay } from "../extensions/chrome-overlay-runtime/src/agent/usage-reconciler.mjs";
 import { agentEventFromSessionEvent } from "../extensions/chrome-overlay-runtime/src/agent/agent-event-map.mjs";
 import { DEFAULT_MODEL } from "../extensions/chrome-overlay-runtime/src/agent/realtime-model.mjs";
+import {
+  loadProtofaceCredentials,
+  saveProtofaceCredentials,
+} from "../extensions/chrome-overlay-runtime/src/agent/protoface-credential-store.mjs";
+import {
+  createProjectionCacheStore,
+  readDeclaredProjectionCache,
+} from "../extensions/chrome-overlay-runtime/src/agent/projection-cache-store.mjs";
+import { applyProjectionCacheInvalidations } from "../extensions/chrome-overlay-runtime/src/agent/projection-cache-policy.mjs";
+import { DebuggerSessionManager } from "../extensions/chrome-overlay-runtime/src/agent/debugger-session-manager.mjs";
+import { createGroupStore } from "../extensions/chrome-overlay-runtime/src/delegated-agent/group-store.mjs";
+import { claimTabWithDurableAuthority } from "../extensions/chrome-overlay-runtime/src/agent/tab-ownership-authority.mjs";
+import {
+  classifyProposalState,
+  deriveDiscoveryProposal,
+  deriveHomeLease,
+  senderMatchesLease,
+} from "../extensions/chrome-overlay-runtime/src/delegated-agent/home-lease.mjs";
 
 class Announcer {
   async start() {}
   async stop() {}
 }
+
+const createDirectProtofaceSession = async () => {
+  throw new Error("Direct Protoface sessions are outside this background VM harness");
+};
+const endDirectProtofaceSession = async () => {
+  throw new Error("Direct Protoface sessions are outside this background VM harness");
+};
 
 function backgroundScriptForVm() {
   const source = readFileSync(
@@ -67,6 +108,9 @@ function withBackgroundCatalog(context) {
   return {
     ...context,
     self: context.self || { addEventListener() {} },
+    structuredClone,
+    TextEncoder,
+    crypto: webcrypto,
     chrome: {
       ...context.chrome,
       debugger: {
@@ -74,25 +118,37 @@ function withBackgroundCatalog(context) {
         onEvent: { addListener() {} },
         ...context.chrome?.debugger,
       },
+      tabs: {
+        onRemoved: { addListener() {} },
+        ...context.chrome?.tabs,
+      },
     },
-    listSiteActionsFromBundle,
+    listSiteActionsBoundedFromBundle,
     listSiteStorageFilesFromBundle,
     readSiteStorageFileFromBundle,
     resolveSiteActionFromBundle,
     siteBlockedPrimitiveNamesFromBundle,
     buildSemanticDeltas,
     diffStates,
+    INTERNAL_STATE_PROJECTION_MAX_BYTES,
     listStateProjectionsFromBundle,
     verifyStatePostcondition,
     buildRealtimeToolCatalog,
     filterRealtimeToolsForBlockedPrimitives,
     BridgeOutputDeliveryQueue,
+    bridgeAuthHeaders,
+    loadSharedBridgeHandshakeSecret,
     ShimTree,
     Announcer,
     normalizeGatedRepeatArgs,
     runGatedRepeat,
     TransferBuffer,
     TransferBufferError,
+    transferInsertValue,
+    base64ToBytes,
+    bytesToBase64,
+    FileTransferError,
+    FileTransferStore,
     executeWorkflowAction,
     normalizeSiteActionCallArgs,
     captureTabSurface,
@@ -101,6 +157,20 @@ function withBackgroundCatalog(context) {
     reconcileDay,
     agentEventFromSessionEvent,
     DEFAULT_MODEL,
+    loadProtofaceCredentials,
+    saveProtofaceCredentials,
+    createProjectionCacheStore,
+    readDeclaredProjectionCache,
+    applyProjectionCacheInvalidations,
+    DebuggerSessionManager,
+    createDirectProtofaceSession,
+    endDirectProtofaceSession,
+    createGroupStore,
+    claimTabWithDurableAuthority,
+    classifyProposalState,
+    deriveDiscoveryProposal,
+    deriveHomeLease,
+    senderMatchesLease,
   };
 }
 
@@ -187,6 +257,7 @@ test("background claims authorized tabs into an Open Browser Use style session g
   const calls = [];
   let messageListener;
   let updatedListener;
+  let tabExists = true;
   const storage = {};
   const context = {
     console,
@@ -238,6 +309,7 @@ test("background claims authorized tabs into an Open Browser Use style session g
       },
       tabs: {
         async get(tabId) {
+          if (!tabExists) throw new Error(`missing tab ${tabId}`);
           return {
             id: tabId,
             windowId: 456,
@@ -251,6 +323,7 @@ test("background claims authorized tabs into an Open Browser Use style session g
         },
         async sendMessage(tabId, message) {
           calls.push(["sendMessage", tabId, message]);
+          return { ok: true };
         },
         onUpdated: {
           addListener(listener) {
@@ -290,7 +363,9 @@ test("background claims authorized tabs into an Open Browser Use style session g
     tabId: 321,
     runtimeKey: "chrome-tab:321",
     authorizationId: authorizeResponse.authorizationId,
-    groupId: 771,
+    agentGroupId: "extension:default",
+    chromeTabGroupId: 771,
+    runtimeId: null,
   });
   assert.match(authorizeResponse.authorizationId, /^authorization-/);
   assert.equal(typeof updatedListener, "function");
@@ -379,6 +454,26 @@ test("background claims authorized tabs into an Open Browser Use style session g
       catalog_reload_required: false,
     }
   );
+
+  tabExists = false;
+  const staleListResponse = await new Promise((resolve) => {
+    const asyncResponse = messageListener(
+      { type: "actions-json:claimed-tabs-list" },
+      {},
+      resolve,
+    );
+    assert.equal(asyncResponse, true);
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(staleListResponse)), {
+    ok: true,
+    scope: "extension_instance",
+    complete_within_scope: true,
+    inventory_source: "extension_session_store",
+    note: "This hosted result covers only this browser extension instance. Use the MCP bridge inventory for all connected runtimes across browsers and machines.",
+    active_tab_id: null,
+    count: 0,
+    tabs: [],
+  });
 });
 
 test("background credential messages never return the raw OpenAI key", async () => {
@@ -586,6 +681,8 @@ test("background starts hosted agent through an offscreen realtime document", as
     ok: true,
     state: { status: "connected", model: "gpt-realtime-2.1", error: null },
   });
+  assert.match(calls[3][1].trace_id, /^hosted-start-/);
+  const traceId = calls[3][1].trace_id;
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     [
       "runtime.getContexts",
@@ -603,6 +700,13 @@ test("background starts hosted agent through an offscreen realtime document", as
       },
     ],
     [
+      "runtime.getContexts",
+      {
+        contextTypes: ["OFFSCREEN_DOCUMENT"],
+        documentUrls: ["chrome-extension://fixture/offscreen.html"],
+      },
+    ],
+    [
       "runtime.sendMessage",
       {
         type: "actions-json:agent-session-start",
@@ -617,6 +721,7 @@ test("background starts hosted agent through an offscreen realtime document", as
           },
         ],
         target: "actions-json-agent-offscreen",
+        trace_id: traceId,
       },
     ],
   ]);
@@ -899,7 +1004,7 @@ test("background merges default primitive tools into caller-provided hosted site
   assert.equal(diagnostic.output.has_pointer_click, true);
 });
 
-test("background serves hosted actions.site from uploaded extension storage without bridge fetch", async () => {
+test("background serves a bounded hosted actions.site catalog from uploaded extension storage", async () => {
   let messageListener;
   const storage = {
     actionsJsonStorageBundle: {
@@ -971,6 +1076,18 @@ test("background serves hosted actions.site from uploaded extension storage with
           assert.deepEqual(JSON.parse(JSON.stringify(query)), { active: true, currentWindow: true });
           return [{ id: 190778180, url: "https://acme.example/" }];
         },
+        async sendMessage(_tabId, message) {
+          if (message.type === "actions-json:execute-projection-navigate") {
+            assert.equal(message.arguments.snapshot_id, "snapshot-1");
+            assert.match(message.catalog_revision, /^fnv1a64:[0-9a-f]+$/);
+            return { ok: true, output: { status: "matches", nodes: [{ ref: "node-1" }] } };
+          }
+          if (message.type === "actions-json:execute-projection-search"
+            || message.type === "actions-json:prepare-projection-semantic-search") {
+            return { ok: false, error: { code: "snapshot_required", message: "Run state_read first." } };
+          }
+          throw new Error(`unexpected content message ${message.type}`);
+        },
         onUpdated: {
           addListener() {},
         },
@@ -1000,29 +1117,56 @@ test("background serves hosted actions.site from uploaded extension storage with
     assert.equal(asyncResponse, true);
   });
 
-  assert.deepEqual(JSON.parse(JSON.stringify(response)), {
-    ok: true,
-    result: {
-      ok: true,
-      call_id: "call-actions-site",
-      output: {
-        ok: true,
-        target_url_contains: "https://acme.example/",
-        actions: [
-          {
-            name: "acme.site.map",
-            description: "Return the Acme site map.",
-            input_schema: { type: "object", additionalProperties: false },
-            target_url_contains: null,
-          },
-        ],
-        state_projections: [],
-        files: [],
-        skills: [],
+  const listed = JSON.parse(JSON.stringify(response));
+  assert.equal(listed.ok, true);
+  assert.equal(listed.result.output.actions[0].name, "acme.site.map");
+  assert.equal(listed.result.output.page.returned, 1);
+  assert.equal(listed.result.output.page.has_more, false);
+  assert.match(listed.result.output.provenance.catalog_hash, /^fnv1a64:[0-9a-f]+$/);
+  assert.equal(listed.result.output.coverage.actions.complete, true);
+  assert.ok(Buffer.byteLength(JSON.stringify(listed.result.output)) <= 4096);
+
+  const execute = (mode, callId) => new Promise((resolve) => {
+    messageListener(
+      {
+        type: "actions-json:agent-tool-execute",
+        target: "background",
+        call: {
+          name: "actions.site",
+          call_id: callId,
+          arguments: { mode, projection_name: "board", snapshot_id: "snapshot-1" },
+        },
       },
-      error: null,
-    },
+      {},
+      resolve,
+    );
   });
+  const navigated = JSON.parse(JSON.stringify(await execute("navigate", "call-navigate")));
+  assert.deepEqual(navigated.result.output, { status: "matches", nodes: [{ ref: "node-1" }] });
+  const searched = JSON.parse(JSON.stringify(await execute("search", "call-search")));
+  assert.equal(searched.result.ok, false);
+  assert.equal(searched.result.error.code, "snapshot_required");
+});
+
+test("hosted actions.site schema exposes compact list, navigate, and search arguments", () => {
+  const [siteTool] = buildRealtimeToolCatalog({ dictionary: { primitives: [] } });
+  assert.equal(siteTool.name, "actions.site");
+  assert.ok(Buffer.byteLength(JSON.stringify(siteTool)) < 2048, "hosted broker schema stays below 2 KiB");
+  assert.deepEqual(siteTool.parameters.properties.mode.enum, [
+    "list",
+    "call",
+    "state_read",
+    "state_summary",
+    "state_diff",
+    "navigate",
+    "search",
+  ]);
+  for (const name of [
+    "query", "page_size", "continuation", "snapshot_id", "node_ref", "operation", "direction",
+    "edge_types", "max_depth", "measure_filter", "measure_order", "scope", "cursor", "search_mode",
+  ]) {
+    assert.ok(siteTool.parameters.properties[name], `${name} is advertised`);
+  }
 });
 
 test("background records hosted tool routing decisions in the session log", async () => {

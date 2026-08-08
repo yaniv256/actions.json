@@ -26,6 +26,33 @@ async function loadBridgeUrl(chromeApi) {
   return stored?.bridgeUrl || DEFAULT_BRIDGE_URL;
 }
 
+// U12b. The bridge gates its legacy HTTP tool routes on the same
+// per-installation secret that authenticates the `/extension` socket. Read it
+// exactly the way `bridgeUrl` above is read — chrome.storage.local, one key, a
+// benign empty default — so pairing stays one storage write rather than a second
+// subsystem.
+//
+// Exported because `background.js` needs the identical value for its own bridge
+// fallback `fetch`. One definition, so a rename of the storage key can never
+// leave one caller authenticated and the other silently 401ing.
+export const BRIDGE_HANDSHAKE_SECRET_KEY = "bridgeHandshakeSecret";
+
+export async function loadBridgeHandshakeSecret(chromeApi) {
+  const stored = await chromeApi?.storage?.local?.get?.(BRIDGE_HANDSHAKE_SECRET_KEY);
+  return stored?.[BRIDGE_HANDSHAKE_SECRET_KEY] || "";
+}
+
+// Unlike the WebSocket path, a service-worker `fetch` CAN set headers, so the
+// secret rides in `Authorization` rather than the query string — it stays out of
+// URLs, and therefore out of anything that logs them.
+//
+// An ABSENT secret still makes the call, with no header. The bridge then answers
+// `bridge_secret_missing`, a named cause the operator can act on; a request the
+// extension declined to make would only produce a silence nobody can diagnose.
+export function bridgeAuthHeaders(secret, base = {}) {
+  return secret ? { ...base, authorization: `Bearer ${secret}` } : { ...base };
+}
+
 function hostedToolArguments(call) {
   const args = call.arguments && typeof call.arguments === "object" ? call.arguments : {};
   if (call.name !== "browser.screenshot") {
@@ -104,9 +131,10 @@ export function createChromeHostedToolExecutor({
       }
       try {
         const bridgeUrl = await loadBridgeUrl(chromeApi);
+        const secret = await loadBridgeHandshakeSecret(chromeApi);
         const response = await fetchImpl(`${bridgeHttpOrigin(bridgeUrl)}/mcp/tools/call`, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: bridgeAuthHeaders(secret, { "content-type": "application/json" }),
           body: JSON.stringify({
             name: call.name,
             target_url_contains: tab.url || undefined,
@@ -159,7 +187,10 @@ export async function fetchBridgeRealtimeToolCatalog({
     throw new Error("fetchBridgeRealtimeToolCatalog requires fetch");
   }
   const bridgeUrl = await loadBridgeUrl(chromeApi);
-  const response = await fetchImpl(`${bridgeHttpOrigin(bridgeUrl)}/mcp/tools/list`);
+  const secret = await loadBridgeHandshakeSecret(chromeApi);
+  const response = await fetchImpl(`${bridgeHttpOrigin(bridgeUrl)}/mcp/tools/list`, {
+    headers: bridgeAuthHeaders(secret),
+  });
   const body = await readJsonResponse(response);
   if (!response.ok) {
     throw new Error(`Bridge returned ${response.status} while loading tools.`);

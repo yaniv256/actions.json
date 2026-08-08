@@ -75,7 +75,11 @@ pub fn tool_manifests() -> Vec<Value> {
 pub fn is_chrome_launcher_tool(name: &str) -> bool {
     matches!(
         name,
-        "chrome_endpoint" | "chrome_kill" | "load_extension" | "start_extension_session" | "claim_tab"
+        "chrome_endpoint"
+            | "chrome_kill"
+            | "load_extension"
+            | "start_extension_session"
+            | "claim_tab"
     )
 }
 
@@ -100,7 +104,9 @@ pub async fn dispatch(name: &str, args: &Value, helper_win: Option<&str>) -> Val
     let b = backend(helper_win, user_data_dir);
     match name {
         "chrome_endpoint" => match b.chrome_endpoint().await {
-            Ok(ep) => json!({ "ok": true, "status": "ok", "browser": ep.browser, "webSocketDebuggerUrl": ep.web_socket_debugger_url, "visible": ep.visible }),
+            Ok(ep) => {
+                json!({ "ok": true, "status": "ok", "browser": ep.browser, "webSocketDebuggerUrl": ep.web_socket_debugger_url, "visible": ep.visible })
+            }
             Err(e) => json!({ "ok": false, "error": e.to_string() }),
         },
         "chrome_kill" => match b.chrome_kill().await {
@@ -108,19 +114,29 @@ pub async fn dispatch(name: &str, args: &Value, helper_win: Option<&str>) -> Val
             Err(e) => json!({ "ok": false, "error": e.to_string() }),
         },
         "load_extension" => {
-            let ext = args.get("extension_dir").and_then(Value::as_str).unwrap_or("");
+            let ext = args
+                .get("extension_dir")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             // Omitted user_data_dir must fall back to a real Windows profile path, never "" —
             // an empty --user-data-dir launches Chrome with no/locked profile and the helper hangs
-            // (investigations/rust-helper-cdp-pipe-oneway.md, bug #3). The Python MCP defaulted this.
-            let udd = user_data_dir.filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SESSION_PROFILE);
+            // (the internal investigation record, bug #3). The Python MCP defaulted this.
+            let udd = user_data_dir
+                .filter(|s| !s.is_empty())
+                .unwrap_or(DEFAULT_SESSION_PROFILE);
             match b.load_extension(ext, udd).await {
                 Ok(s) => json!({ "ok": true, "id": s.id, "name": s.name, "version": s.version }),
                 Err(e) => json!({ "ok": false, "error": e.to_string() }),
             }
         }
         "start_extension_session" => {
-            let ext = args.get("extension_dir").and_then(Value::as_str).unwrap_or("");
-            let udd = user_data_dir.filter(|s| !s.is_empty()).unwrap_or(DEFAULT_SESSION_PROFILE);
+            let ext = args
+                .get("extension_dir")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let udd = user_data_dir
+                .filter(|s| !s.is_empty())
+                .unwrap_or(DEFAULT_SESSION_PROFILE);
             match b.start_extension_session(ext, udd).await {
                 Ok(s) => json!({
                     "ok": true,
@@ -136,11 +152,19 @@ pub async fn dispatch(name: &str, args: &Value, helper_win: Option<&str>) -> Val
         }
         "claim_tab" => {
             let cdp = args.get("cdp_ws_url").and_then(Value::as_str).unwrap_or("");
-            let extension_id = args.get("extension_id").and_then(Value::as_str).unwrap_or("");
-            let target = args.get("target_url_contains").and_then(Value::as_str).unwrap_or("");
+            let extension_id = args
+                .get("extension_id")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let target = args
+                .get("target_url_contains")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let bridge = args.get("bridge_url").and_then(Value::as_str).unwrap_or("");
             match b.claim_tab(cdp, extension_id, target, bridge).await {
-                Ok(c) => json!({ "ok": true, "tabId": c.tab_id, "runtimeKey": c.runtime_key, "authorizationId": c.authorization_id }),
+                Ok(c) => {
+                    json!({ "ok": true, "tabId": c.tab_id, "runtimeKey": c.runtime_key, "authorizationId": c.authorization_id })
+                }
                 Err(e) => json!({ "ok": false, "error": e.to_string() }),
             }
         }
@@ -159,7 +183,13 @@ mod tests {
             .iter()
             .map(|m| m["name"].as_str().unwrap())
             .collect();
-        for expected in ["chrome_endpoint", "chrome_kill", "load_extension", "start_extension_session", "claim_tab"] {
+        for expected in [
+            "chrome_endpoint",
+            "chrome_kill",
+            "load_extension",
+            "start_extension_session",
+            "claim_tab",
+        ] {
             assert!(names.contains(&expected), "missing manifest for {expected}");
         }
     }
@@ -177,7 +207,9 @@ mod tests {
             .into_iter()
             .find(|manifest| manifest["name"] == "claim_tab")
             .expect("claim_tab manifest");
-        let required = claim["input_schema"]["required"].as_array().expect("required fields");
+        let required = claim["input_schema"]["required"]
+            .as_array()
+            .expect("required fields");
 
         assert!(required.iter().any(|field| field == "extension_id"));
         assert_eq!(

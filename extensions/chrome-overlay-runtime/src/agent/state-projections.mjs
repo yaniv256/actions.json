@@ -1,14 +1,34 @@
 import jsonata from "./vendor/jsonata.mjs";
 import { parseStoragePath, siteHostMatchesPage } from "../storage-bundle.mjs";
+import { graphifyProjection, ProjectionGraphError } from "./projection-graph.mjs";
 
 const EXPRESSION_SLOT_PATTERN = /^\s*\{%\s*([\s\S]*?)\s*%\}\s*$/;
 const DISALLOWED_JSONATA_FUNCTIONS = /\$(eval|random|now|millis)\s*\(/i;
+const CACHE_NAMESPACE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
+export const STATE_PROJECTION_LIMITS = Object.freeze({
+  publicResponseBytes: 48_000,
+  internalComputeBytes: 4_000_000,
+  internalTransferBytes: 4_000_000,
+  diffResponseBytes: 48_000,
+});
+export const INTERNAL_STATE_PROJECTION_MAX_BYTES = STATE_PROJECTION_LIMITS.internalComputeBytes;
 
 const DEFAULT_LIMITS = {
-  maxStateBytes: 48_000,
+  maxStateBytes: STATE_PROJECTION_LIMITS.publicResponseBytes,
   maxSummaryBytes: 12_000,
   maxExpressionOutputBytes: 32_000,
+  maxProjectionWorkingBytes: INTERNAL_STATE_PROJECTION_MAX_BYTES,
 };
+
+function stateOutputBudget(consumer, requestedBytes) {
+  const hardMaximum = consumer === "internal_compute"
+    ? STATE_PROJECTION_LIMITS.internalComputeBytes
+    : STATE_PROJECTION_LIMITS.publicResponseBytes;
+  const requested = Number(requestedBytes);
+  return Number.isFinite(requested) && requested > 0
+    ? Math.min(requested, hardMaximum)
+    : hardMaximum;
+}
 
 function storageBundleEntries(bundle) {
   if (Array.isArray(bundle?.entries)) {
@@ -30,6 +50,15 @@ function storageBundleEntries(bundle) {
 
 function byteLength(value) {
   return new TextEncoder().encode(JSON.stringify(value)).length;
+}
+
+function fnv1a64(value) {
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of new TextEncoder().encode(String(value ?? ""))) {
+    hash ^= BigInt(byte);
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return `fnv1a64:${hash.toString(16).padStart(16, "0")}`;
 }
 
 function normalizeJsonValue(value) {
@@ -81,7 +110,7 @@ function loadStateProjectionMapsFromBundle(bundle, pageUrl) {
     try {
       const map = JSON.parse(entry.text);
       if (map?.protocol === "actions.json" && Array.isArray(map.state_projections)) {
-        maps.push({ path: entry.path, parsed, map });
+        maps.push({ path: entry.path, parsed, map, contentHash: fnv1a64(entry.text) });
       }
     } catch {
       // Invalid maps are ignored here; storage import remains the validation surface.
@@ -108,13 +137,46 @@ function projectionMatchesPage(projection, pageUrl) {
 }
 
 function findStateProjection(bundle, pageUrl, projectionName) {
-  for (const { map } of loadStateProjectionMapsFromBundle(bundle, pageUrl)) {
+  for (const { path, parsed, map, contentHash } of loadStateProjectionMapsFromBundle(bundle, pageUrl)) {
     const projection = map.state_projections.find((candidate) => (
       candidate?.name === projectionName && projectionMatchesPage(candidate, pageUrl)
     ));
-    if (projection) return projection;
+    if (projection) {
+      return {
+        projection,
+        provenance: {
+          map_path: path,
+          content_hash: contentHash,
+          map_version: map.version ?? null,
+          site_host: parsed.siteHost,
+        },
+      };
+    }
   }
   return null;
+}
+
+export function stateProjectionCacheNamespaces(bundle, pageUrl, projectionName) {
+  const resolved = findStateProjection(bundle, pageUrl, projectionName);
+  if (!resolved) return [];
+  const { projection } = resolved;
+  return [...new Set(projection.cache?.read_namespaces || [])];
+}
+
+export function resolveStateProjectionSemanticConfig(bundle, pageUrl, projectionName) {
+  const resolved = findStateProjection(bundle, pageUrl, projectionName);
+  if (!resolved || validateStateProjection(resolved.projection).ok !== true) return null;
+  const semantic = resolved.projection.semantic;
+  if (!semantic) return {
+    policy: null,
+    semantic_namespace: resolved.projection.name,
+    provenance: structuredClone(resolved.provenance),
+  };
+  return {
+    policy: structuredClone(semantic.policy),
+    semantic_namespace: semantic.namespace || resolved.projection.name,
+    provenance: structuredClone(resolved.provenance),
+  };
 }
 
 export function listStateProjectionsFromBundle(bundle, pageUrl) {
@@ -128,6 +190,16 @@ export function listStateProjectionsFromBundle(bundle, pageUrl) {
         description: typeof projection.description === "string" ? projection.description : null,
         summaries: Array.isArray(projection.summaries)
           ? projection.summaries.map((summary) => summary?.name).filter((name) => typeof name === "string" && name)
+          : [],
+        summary_definitions: Array.isArray(projection.summaries)
+          ? projection.summaries
+              .filter((summary) => typeof summary?.name === "string" && summary.name)
+              .map((summary) => ({
+                name: summary.name,
+                description: typeof summary.description === "string" ? summary.description : null,
+                max_bytes: Number(summary.max_bytes) || DEFAULT_LIMITS.maxSummaryBytes,
+                input_schema: summary.input_schema || null,
+              }))
           : [],
       });
     }
@@ -160,6 +232,89 @@ export function validateStateProjection(projection) {
       ok: false,
       error: { code: "invalid_state_projection", message: "State projection snapshot.projection must declare JSONata expression." },
     };
+  }
+  if (projection.summaries != null) {
+    if (!Array.isArray(projection.summaries)) {
+      return { ok: false, error: { code: "invalid_state_projection", message: "State projection summaries must be an array." } };
+    }
+    const summaryNames = new Set();
+    for (const summary of projection.summaries) {
+      if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+        return { ok: false, error: { code: "invalid_state_projection", message: "Each state summary must be an object." } };
+      }
+      if (typeof summary.name !== "string" || !summary.name) {
+        return { ok: false, error: { code: "invalid_state_projection", message: "Each state summary needs a name." } };
+      }
+      if (summaryNames.has(summary.name)) {
+        return { ok: false, error: { code: "invalid_state_projection", message: `Duplicate state summary name "${summary.name}".` } };
+      }
+      summaryNames.add(summary.name);
+      if (typeof summary.expression !== "string" || !summary.expression.trim()) {
+        return { ok: false, error: { code: "invalid_state_projection", message: `State summary "${summary.name}" needs a JSONata expression.` } };
+      }
+      if (summary.max_bytes != null && (!Number.isFinite(Number(summary.max_bytes)) || Number(summary.max_bytes) <= 0)) {
+        return { ok: false, error: { code: "invalid_state_projection", message: `State summary "${summary.name}" max_bytes must be positive.` } };
+      }
+      if (summary.input_schema != null) {
+        if (
+          typeof summary.input_schema !== "object" ||
+          Array.isArray(summary.input_schema) ||
+          summary.input_schema.type !== "object"
+        ) {
+          return {
+            ok: false,
+            error: {
+              code: "invalid_state_projection",
+              message: `State summary "${summary.name}" input_schema must be an object schema.`,
+            },
+          };
+        }
+      }
+    }
+  }
+  if (projection.cache != null) {
+    if (!projection.cache || typeof projection.cache !== "object" || Array.isArray(projection.cache)) {
+      return { ok: false, error: { code: "invalid_state_projection", message: "State projection cache must be an object." } };
+    }
+    const readNamespaces = projection.cache.read_namespaces || [];
+    if (!Array.isArray(readNamespaces) || readNamespaces.some((name) => !CACHE_NAMESPACE_PATTERN.test(name))) {
+      return { ok: false, error: { code: "invalid_state_projection", message: "State projection cache.read_namespaces must contain valid namespace strings." } };
+    }
+    const writes = projection.cache.writes || [];
+    if (!Array.isArray(writes)) {
+      return { ok: false, error: { code: "invalid_state_projection", message: "State projection cache.writes must be an array." } };
+    }
+    for (const write of writes) {
+      if (
+        !write
+        || typeof write !== "object"
+        || Array.isArray(write)
+        || !CACHE_NAMESPACE_PATTERN.test(write.namespace)
+        || typeof write.entries !== "string"
+        || !write.entries.trim()
+      ) {
+        return { ok: false, error: { code: "invalid_state_projection", message: "Each projection cache write needs a valid namespace and entries expression." } };
+      }
+    }
+  }
+  if (projection.semantic != null) {
+    const semantic = projection.semantic;
+    if (!semantic || typeof semantic !== "object" || Array.isArray(semantic)) {
+      return { ok: false, error: { code: "invalid_state_projection", message: "State projection semantic declaration must be an object." } };
+    }
+    if (semantic.namespace != null && !CACHE_NAMESPACE_PATTERN.test(semantic.namespace)) {
+      return { ok: false, error: { code: "invalid_state_projection", message: "State projection semantic.namespace must be a valid namespace." } };
+    }
+    const policy = semantic.policy;
+    if (!policy || typeof policy !== "object" || Array.isArray(policy) || !["all", "include", "exclude", "jsonata"].includes(policy.mode)) {
+      return { ok: false, error: { code: "invalid_state_projection", message: "State projection semantic.policy must declare all, include, exclude, or jsonata mode." } };
+    }
+    if (["include", "exclude"].includes(policy.mode) && (!Array.isArray(policy.fields) || policy.fields.length === 0 || policy.fields.some((field) => typeof field !== "string" || !field))) {
+      return { ok: false, error: { code: "invalid_state_projection", message: `State projection semantic ${policy.mode} policy needs non-empty fields.` } };
+    }
+    if (policy.mode === "jsonata" && (typeof policy.expression !== "string" || !policy.expression.trim())) {
+      return { ok: false, error: { code: "invalid_state_projection", message: "State projection semantic jsonata policy needs an expression." } };
+    }
   }
   if (projection.markers != null) {
     // markers may be a static array, or a JSONata expression slot ("{% ... %}")
@@ -383,9 +538,26 @@ function valueMatchesSchema(value, schema, path, errors) {
   const types = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : [];
   if (types.length > 0) {
     const actualType = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
-    if (!types.includes(actualType)) {
+    const matchesInteger = actualType === "number" && types.includes("integer") && Number.isInteger(value);
+    if (!types.includes(actualType) && !matchesInteger) {
       errors.push({ path, message: `Expected ${types.join(" or ")} but got ${actualType}.` });
       return;
+    }
+  }
+  if (typeof value === "number") {
+    if (Number.isFinite(schema.minimum) && value < schema.minimum) {
+      errors.push({ path, message: `Expected a value greater than or equal to ${schema.minimum}.` });
+    }
+    if (Number.isFinite(schema.maximum) && value > schema.maximum) {
+      errors.push({ path, message: `Expected a value less than or equal to ${schema.maximum}.` });
+    }
+  }
+  if (typeof value === "string") {
+    if (Number.isInteger(schema.minLength) && value.length < schema.minLength) {
+      errors.push({ path, message: `Expected at least ${schema.minLength} characters.` });
+    }
+    if (Number.isInteger(schema.maxLength) && value.length > schema.maxLength) {
+      errors.push({ path, message: `Expected at most ${schema.maxLength} characters.` });
     }
   }
   if (value && typeof value === "object" && !Array.isArray(value)) {
@@ -395,9 +567,23 @@ function valueMatchesSchema(value, schema, path, errors) {
     for (const [key, nestedSchema] of Object.entries(schema.properties || {})) {
       if (key in value) valueMatchesSchema(value[key], nestedSchema, `${path}/${key}`, errors);
     }
+    if (schema.additionalProperties === false) {
+      const declaredKeys = new Set(Object.keys(schema.properties || {}));
+      for (const key of Object.keys(value)) {
+        if (!declaredKeys.has(key)) errors.push({ path: `${path}/${key}`, message: "Additional property is not allowed." });
+      }
+    }
   }
   if (Array.isArray(value) && schema.items) {
     value.forEach((item, index) => valueMatchesSchema(item, schema.items, `${path}/${index}`, errors));
+  }
+  if (Array.isArray(value)) {
+    if (Number.isInteger(schema.minItems) && value.length < schema.minItems) {
+      errors.push({ path, message: `Expected at least ${schema.minItems} items.` });
+    }
+    if (Number.isInteger(schema.maxItems) && value.length > schema.maxItems) {
+      errors.push({ path, message: `Expected at most ${schema.maxItems} items.` });
+    }
   }
 }
 
@@ -585,24 +771,114 @@ export async function verifyStatePostcondition({ postcondition, state, input = {
   }
 }
 
+async function searchableSnapshotDescriptor({
+  state,
+  projection,
+  provenance,
+  computedStateHash,
+  observedAt,
+  activateGraph,
+} = {}) {
+  const graph = graphifyProjection(state);
+  const descriptor = {
+    schema_version: 1,
+    snapshot_id: null,
+    projection: projection.name,
+    observed_at: observedAt,
+    roots: graph.roots,
+    size: {
+      nodes: graph.coverage.graph.node_count,
+      edges: graph.coverage.graph.edge_count,
+    },
+    coverage: graph.coverage,
+    source: provenance,
+    active: false,
+    navigation_ready: false,
+    next_step: "snapshot_activation_required",
+  };
+  if (typeof activateGraph !== "function") return descriptor;
+
+  const activated = await activateGraph({
+    graph,
+    lexicalIndex: graph.lexical_index,
+    projection: {
+      name: projection.name,
+      description: typeof projection.description === "string" ? projection.description : null,
+    },
+    stateHash: computedStateHash,
+    observedAt,
+    coverage: graph.coverage,
+    provenance,
+  });
+  if (!activated || typeof activated !== "object" || typeof activated.snapshot_id !== "string" || !activated.snapshot_id) {
+    const error = new Error("Projection graph activation did not return a snapshot identifier.");
+    error.code = "snapshot_activation_failed";
+    throw error;
+  }
+  const activeDescriptor = {
+    ...descriptor,
+    snapshot_id: activated.snapshot_id,
+    roots: Array.isArray(activated.roots) ? activated.roots : descriptor.roots,
+    active: activated.active !== false,
+    navigation_ready: activated.navigation_ready !== false,
+  };
+  delete activeDescriptor.next_step;
+  return activeDescriptor;
+}
+
 export async function executeStateProjection({
   bundle,
   pageUrl,
   document,
   projectionName,
   summaryName = null,
-  maxBytes = DEFAULT_LIMITS.maxStateBytes,
+  summaryArguments = {},
+  maxBytes,
+  consumer = "public_response",
+  projectionCache = {},
+  activateGraph,
 } = {}) {
-  const projection = findStateProjection(bundle, pageUrl, projectionName);
-  if (!projection) {
+  const resolvedProjection = findStateProjection(bundle, pageUrl, projectionName);
+  if (!resolvedProjection) {
     return {
       ok: false,
       error: { code: "state_projection_not_found", message: "Requested state projection is not declared for this site." },
     };
   }
+  const { projection, provenance } = resolvedProjection;
   const validation = validateStateProjection(projection);
   if (!validation.ok) {
     return { ok: false, error: validation.error };
+  }
+  const summary = findSummary(projection, summaryName);
+  if (summaryName && !summary) {
+    return {
+      ok: false,
+      error: { code: "state_summary_not_found", message: "Requested state summary is not declared for this projection." },
+    };
+  }
+  if (summary) {
+    if (!summaryArguments || typeof summaryArguments !== "object" || Array.isArray(summaryArguments)) {
+      return {
+        ok: false,
+        error: {
+          code: "state_summary_input_validation_failed",
+          message: "State summary arguments must be an object.",
+          errors: [{ path: "", message: "Expected object summary arguments." }],
+        },
+      };
+    }
+    const summaryInputValidation = validateState(summaryArguments, summary.input_schema);
+    if (!summaryInputValidation.ok) {
+      return {
+        ok: false,
+        error: {
+          code: "state_summary_input_validation_failed",
+          message: "State summary arguments did not match the declared input schema.",
+          errors: summaryInputValidation.errors,
+        },
+      };
+    }
   }
   if (!document) {
     return {
@@ -610,15 +886,26 @@ export async function executeStateProjection({
       error: { code: "state_document_unavailable", message: "State projection requires a DOM document." },
     };
   }
+  const readableCache = {};
+  for (const namespace of projection.cache?.read_namespaces || []) {
+    if (projectionCache?.[namespace] && typeof projectionCache[namespace] === "object") {
+      readableCache[namespace] = normalizeJsonValue(projectionCache[namespace]);
+    }
+  }
   const { records, diagnostics } = extractRecords(document, projection.snapshot.extract);
   let state;
   try {
-    state = await evaluateJsonataExpression(projection.snapshot.projection.expression, {
-      records,
-      url: pageUrl,
-      title: document?.title || "",
-      projection: { name: projection.name },
-    });
+    state = await evaluateJsonataExpression(
+      projection.snapshot.projection.expression,
+      {
+        records,
+        url: pageUrl,
+        title: document?.title || "",
+        projection: { name: projection.name },
+        cache: readableCache,
+      },
+      DEFAULT_LIMITS.maxProjectionWorkingBytes,
+    );
   } catch (error) {
     return {
       ok: false,
@@ -646,6 +933,7 @@ export async function executeStateProjection({
             state,
             url: pageUrl,
             projection: { name: projection.name },
+            cache: readableCache,
           })
         : projection.markers;
       const markersValidation = validateStateMarkers(resolved);
@@ -654,17 +942,69 @@ export async function executeStateProjection({
       }
       markers = resolved;
     } catch (error) {
+      if (error?.code === "expression_output_too_large") {
+        try {
+          const graphDescriptor = await searchableSnapshotDescriptor({
+            state,
+            projection,
+            provenance,
+            computedStateHash,
+            observedAt,
+            activateGraph,
+          });
+          if (byteLength(graphDescriptor) <= stateOutputBudget("public_response", maxBytes)) {
+            return {
+              ...base,
+              summary_name: summary.name,
+              summary_arguments: summaryArguments,
+              summary_unavailable: {
+                code: error.code,
+                message: "The requested summary was too large; use the searchable snapshot instead.",
+              },
+              graph_descriptor: graphDescriptor,
+            };
+          }
+        } catch (_fallbackError) {
+          // Preserve the original summary error when graphification or activation
+          // cannot produce a valid bounded alternative.
+        }
+      }
       return {
         ok: false,
         error: { code: error.code || "state_markers_failed", message: error.message || String(error) },
       };
     }
   }
+  const cacheUpdates = [];
+  for (const write of projection.cache?.writes || []) {
+    try {
+      const entries = await evaluateJsonataExpression(
+        write.entries,
+        { records, state, url: pageUrl, projection: { name: projection.name }, cache: readableCache },
+        DEFAULT_LIMITS.maxExpressionOutputBytes,
+      );
+      if (!Array.isArray(entries)) {
+        return {
+          ok: false,
+          error: { code: "state_projection_cache_failed", message: `Projection cache write "${write.namespace}" must produce an array.` },
+        };
+      }
+      cacheUpdates.push({ namespace: write.namespace, entries });
+    } catch (error) {
+      return {
+        ok: false,
+        error: { code: error.code || "state_projection_cache_failed", message: error.message || String(error) },
+      };
+    }
+  }
+  const observedAt = new Date().toISOString();
+  const computedStateHash = stateHash(state);
   const base = {
     ok: true,
     projection: projection.name,
-    state_hash: stateHash(state),
-    observed_at: new Date().toISOString(),
+    state_hash: computedStateHash,
+    observed_at: observedAt,
+    ...(cacheUpdates.length > 0 ? { cache_updates: cacheUpdates } : {}),
     ...(markers ? { markers } : {}),
     diagnostics: {
       ...diagnostics,
@@ -672,33 +1012,105 @@ export async function executeStateProjection({
       truncated: false,
     },
   };
-  const summary = findSummary(projection, summaryName);
-  if (summaryName && !summary) {
-    return {
-      ok: false,
-      error: { code: "state_summary_not_found", message: "Requested state summary is not declared for this projection." },
-    };
-  }
   if (summary) {
     try {
+      const declaredSummaryBudget = Number(summary.max_bytes) || DEFAULT_LIMITS.maxSummaryBytes;
+      const callerBudget = stateOutputBudget("public_response", maxBytes);
       const summaryOutput = await evaluateJsonataExpression(
         summary.expression,
-        { state, records, url: pageUrl, projection: { name: projection.name } },
-        Math.min(Number(summary.max_bytes) || DEFAULT_LIMITS.maxSummaryBytes, DEFAULT_LIMITS.maxExpressionOutputBytes),
+        { state, records, input: summaryArguments, url: pageUrl, projection: { name: projection.name }, cache: readableCache },
+        Math.min(declaredSummaryBudget, callerBudget, DEFAULT_LIMITS.maxExpressionOutputBytes),
       );
       return {
         ...base,
         summary_name: summary.name,
+        summary_arguments: summaryArguments,
         summary: summaryOutput,
+      };
+    } catch (error) {
+      let fallbackFailure = null;
+      if (error?.code === "expression_output_too_large") {
+        try {
+          const graphDescriptor = await searchableSnapshotDescriptor({
+            state,
+            projection,
+            provenance,
+            computedStateHash,
+            observedAt,
+            activateGraph,
+          });
+          if (byteLength(graphDescriptor) <= stateOutputBudget("public_response", maxBytes)) {
+            return {
+              ...base,
+              summary_name: summary.name,
+              summary_arguments: summaryArguments,
+              summary_unavailable: {
+                code: error.code,
+                message: "The requested summary was too large; use the searchable snapshot instead.",
+              },
+              graph_descriptor: graphDescriptor,
+            };
+          }
+        } catch (fallbackError) {
+          fallbackFailure = fallbackError;
+        }
+      }
+      return {
+        ok: false,
+        error: {
+          code: error.code || "state_summary_failed",
+          message: error.message || String(error),
+          ...(fallbackFailure ? {
+            fallback_error: {
+              code: fallbackFailure.code || "searchable_snapshot_failed",
+              message: fallbackFailure.message || String(fallbackFailure),
+            },
+          } : {}),
+        },
+      };
+    }
+  }
+  const outputBudget = stateOutputBudget(consumer, maxBytes);
+  if (consumer === "public_response") {
+    try {
+      const graphDescriptor = await searchableSnapshotDescriptor({
+        state,
+        projection,
+        provenance,
+        computedStateHash,
+        observedAt,
+        activateGraph,
+      });
+      if (byteLength(graphDescriptor) > outputBudget) {
+        return {
+          ok: false,
+          error: {
+            code: "state_payload_too_large",
+            message: "State projection descriptor exceeded the configured payload budget.",
+            available_summaries: Array.isArray(projection.summaries)
+              ? projection.summaries.map((item) => item?.name).filter((name) => typeof name === "string" && name)
+              : [],
+          },
+        };
+      }
+      return {
+        ...base,
+        graph_descriptor: graphDescriptor,
       };
     } catch (error) {
       return {
         ok: false,
-        error: { code: error.code || "state_summary_failed", message: error.message || String(error) },
+        error: {
+          code: error instanceof ProjectionGraphError ? error.code : (error?.code || "projection_graph_failed"),
+          message: error.message || String(error),
+          ...(error instanceof ProjectionGraphError && Object.keys(error.details).length > 0
+            ? { details: error.details }
+            : {}),
+        },
       };
     }
   }
-  if (byteLength(state) > maxBytes) {
+  if (byteLength(state) > outputBudget) {
     return {
       ok: false,
       error: {

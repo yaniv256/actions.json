@@ -4,35 +4,88 @@ const ACTIONS_SITE_PARAMETERS = {
   properties: {
     mode: {
       type: "string",
-      enum: ["list", "call", "state_read", "state_summary", "state_diff"],
-      description: "Use list to inspect current-site actions and state projections; use call to execute one named current-site action; use state_read/state_summary to read mapped logical state; use state_diff to compare with the last snapshot.",
+      enum: ["list", "call", "state_read", "state_summary", "state_diff", "navigate", "search"],
+      description: "List or call site actions, read mapped state, or navigate/search an active projection snapshot.",
     },
     action: {
       type: "string",
-      description:
-        "Required when mode is call. The site action name returned by actions.site list. Pass it in THIS parameter — there is no 'name' parameter, and it does not go inside 'arguments'.",
+      description: "Site action name for call mode.",
     },
     arguments: {
       type: "object",
-      description: "Arguments for the named current-site action.",
       additionalProperties: true,
     },
     target_runtime_id: {
       type: "string",
-      description: "Optional runtime id when the agent needs to target a specific authorized browser runtime.",
     },
     projection_name: {
       type: "string",
-      description: "Required for state_read and state_summary. The state projection name returned by actions.site list.",
     },
     summary_name: {
       type: "string",
-      description: "Optional for state_summary. The projection summary name returned by actions.site list.",
+    },
+    summary_arguments: {
+      type: "object",
+      additionalProperties: true,
     },
     max_bytes: {
       type: "integer",
+      minimum: 256,
+      maximum: 48000,
+    },
+    query: {
+      type: "string",
+      description: "List filter or search query.",
+    },
+    page_size: {
+      type: "integer",
       minimum: 1,
-      description: "Optional payload budget for state_read.",
+      maximum: 5,
+    },
+    continuation: {
+      type: "string",
+    },
+    snapshot_id: {
+      type: "string",
+      description: "Snapshot id for navigate/search.",
+    },
+    node_ref: {
+      type: "string",
+    },
+    operation: {
+      type: "string",
+      enum: ["roots", "node", "neighbors", "traverse"],
+    },
+    direction: {
+      type: "string",
+      enum: ["outbound", "inbound"],
+    },
+    edge_types: {
+      type: "array",
+      items: { type: "string" },
+    },
+    max_depth: {
+      type: "integer",
+      minimum: 0,
+    },
+    measure_filter: {
+      type: "object",
+      additionalProperties: true,
+    },
+    measure_order: {
+      type: "object",
+      additionalProperties: true,
+    },
+    scope: {
+      type: "object",
+      additionalProperties: true,
+    },
+    cursor: {
+      type: "string",
+    },
+    search_mode: {
+      type: "string",
+      enum: ["semantic", "lexical"],
     },
   },
   additionalProperties: false,
@@ -96,10 +149,10 @@ export function buildRealtimeToolCatalog({ dictionary, host = "extension", block
     realtimeFunctionTool({
       name: "actions.site",
       description: [
-        "List or call actions.json actions available for the current website.",
-        "Do not assume site-specific actions are globally available; call mode=list for the active page first.",
+        "Use bounded actions.json capabilities for the current page.",
+        "Call mode=list first; use navigate/search only with a snapshot_id returned by state_read.",
         "For mode=call, put the site action name in the 'action' parameter and its inputs in 'arguments', for example {\"mode\": \"call\", \"action\": \"site.do.thing\", \"arguments\": {}}.",
-        "Prefer state-machine actions or composable recipes for recoverable mutations; failures may include failure_class, failed_state, retryable, and safe recovery guidance.",
+        "snapshot_required means run state_read; stale or invalid snapshot/cursor errors require a fresh state_read.",
       ].join(" "),
       parameters: ACTIONS_SITE_PARAMETERS,
     }),

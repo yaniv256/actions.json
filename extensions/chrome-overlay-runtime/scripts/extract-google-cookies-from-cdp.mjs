@@ -1,5 +1,5 @@
 // Extract Google cookies from an ALREADY-RUNNING Chrome reachable over CDP — specifically the
-// chrome-launcher MCP's visible Windows Chrome that Yaniv logs into (endpoint like
+// chrome-launcher MCP's visible Windows Chrome that the product owner logs into (endpoint like
 // ws://192.168.176.1:9223). The shipped extract-google-cookies.mjs launches its OWN Playwright
 // Chromium and asks the user to log into THAT window — wrong browser for this flow. This one
 // attaches (connectOverCDP) to the session the user actually authenticated in and pulls cookies.

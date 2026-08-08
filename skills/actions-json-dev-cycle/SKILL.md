@@ -19,8 +19,8 @@ skills, the GitHub release). Break none of them.
 
 ### Authorship & attribution — Yaniv, not the agent
 - **Every commit in Yaniv's repos is authored + committed by `Yaniv Ben-Ami <yaniv@realtimevoice.dev>`** (GitHub
-  `yaniv256`). Set `git config user.name/user.email` per repo, or use `-c` flags. Never "Zara Chen" / agent identity.
-- **PUBLIC repos must show ONLY Yaniv as a contributor.** Do NOT add `Co-Authored-By: Claude` (or Zara/Anthropic)
+  `yaniv256`). Set `git config user.name/user.email` per repo, or use `-c` flags. Never use an agent identity.
+- **PUBLIC repos must show ONLY Yaniv as a contributor.** Do NOT add an AI or agent co-author
   trailers to anything that lands in a public repo. (This overrides the harness default of appending that trailer.)
   If a public repo already shows Claude as a contributor, rewrite its history clean (author/committer=Yaniv, strip
   the trailers), delete stale branches, force-push, and re-point every superproject submodule pin that referenced it.
@@ -322,7 +322,7 @@ Env summary: `EVAL_CDP_ENDPOINT` (Mode A) | `DEPLOY_CHROME`/`DEPLOY_NODE`/`DEPLO
 Built, self-contained, deployment machinery in-repo. The full Mode A' pipeline runs
 end-to-end — deploy → connect (raw CDP) → open doc → claim → baseline → real `gpt-realtime-2.1`
 agent → read (`/mobilebasic`) → score — and produces a real scored result. Process lifecycle
-is **run-owned** (plan `docs/plans/2026-07-07-007-*`): the run starts/kills its serve bridge +
+is **run-owned** (plan the implementation plan): the run starts/kills its serve bridge +
 eval Chrome, pre-cleans leaked processes, and never wedges the shell. Remaining before the
 green navigation run that gates merging `feat/eval-plus-gated-nav` to main: confirm the
 integrated `await_event` path records real tool_call events (the agent acts) on tasks #18/#20 —

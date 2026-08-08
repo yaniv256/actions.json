@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 // Pure gate logic for the accessibility-gated key-repeat primitive
-// (docs/plans/2026-07-07-004-feat-accessibility-gated-key-repeat-plan.md, U1-U3).
+// (the implementation plan, U1-U3).
 // The dispatch loop lives in background.js (CDP, source-guarded + live-smoked);
 // the CORRECTNESS CORE — stop-mode resolution, per-step regex gate, polarity,
 // path advance, R5 halt, budget/partial — is extracted here as a pure module so

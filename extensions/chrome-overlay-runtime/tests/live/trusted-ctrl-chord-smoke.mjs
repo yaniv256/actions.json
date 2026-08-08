@@ -1,6 +1,6 @@
 // LIVE class-guard smoke: trusted MODIFIER-CHORD dispatch on Google Docs.
 //
-// Root cause (investigations/hosted-agent-debugger-not-attached-new-tab.md, X13,
+// Root cause (the internal investigation record, X13,
 // measured live 2026-07-07 on a real Doc, ext 0.1.182): a trusted modifier chord
 // dispatched as ONE `rawKeyDown` carrying only a `modifiers` bitmask reaches Google
 // Docs but does NOT trigger its shortcut/command layer — Ctrl+A / Ctrl+Home /

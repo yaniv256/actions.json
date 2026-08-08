@@ -1,7 +1,7 @@
 // Native-Windows-Node persistent pipe-session: install OUR extension AND expose the
 // SAME instance for driving — the self-install + drive-same-instance flow.
 //
-// WHY this shape (see investigations/extension-self-install-not-loading.md):
+// WHY this shape (see the internal investigation record):
 //  - Extensions.loadUnpacked needs --remote-debugging-pipe; Chrome 149 will NOT
 //    auto-load an unpacked extension on a later normal launch, so we must DRIVE the
 //    very instance we installed into.

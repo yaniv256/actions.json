@@ -1,0 +1,39 @@
+{
+  "protocol": "actions.json.website-agent/v1",
+  "agent": {
+    "id": "com.example.course-helper",
+    "name": "Course Helper",
+    "source_origins": ["https://course.example"]
+  },
+  "targets": [
+    {
+      "id": "tasks-web",
+      "origin": "https://tasks.example",
+      "path_prefixes": ["/tasks", "/search"]
+    }
+  ],
+  "actions": [
+    {
+      "name": "tasks.list",
+      "map": "sites/tasks.example/actions.json",
+      "target_ids": ["tasks-web"],
+      "effect": "read"
+    },
+    {
+      "name": "tasks.create",
+      "map": "sites/tasks.example/actions.json",
+      "target_ids": ["tasks-web"],
+      "effect": "write",
+      "timeout_ms": 180000
+    }
+  ],
+  "skills": [
+    {
+      "path": "sites/tasks.example/SKILL.md",
+      "purpose": "Operator guidance shown during review"
+    }
+  ],
+  "data_sharing": {
+    "summary": "Declared task results return to course.example and its Realtime provider."
+  }
+}
