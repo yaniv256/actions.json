@@ -8,7 +8,7 @@ const extensionSource = path.join(root, "extensions/chrome-overlay-runtime/src")
 const defaultUrl = 'const DEFAULT_BRIDGE_URL = "ws://127.0.0.1:17345/extension";';
 const surfaces = [
   "popup.js",
-  "sidepanel.js",
+  "agent-surface.js",
   "background.js",
   "agent/hosted-tool-executor.mjs",
 ];

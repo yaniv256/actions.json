@@ -51,7 +51,7 @@ async function main() {
     const page = ctx.pages()[0] || await ctx.newPage();
     page.on('console', (m) => console.log('[page]', m.type(), m.text()));
     page.on('pageerror', (e) => console.log('[pageerror]', e.message));
-    await page.goto(`chrome-extension://${extId}/sidepanel.html`, {
+    await page.goto(`chrome-extension://${extId}/agent-surface.html`, {
       waitUntil: 'domcontentloaded',
       timeout: 15000,
     });

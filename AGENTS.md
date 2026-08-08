@@ -22,10 +22,7 @@ Storage-backed site maps and overlays live outside this repo in
 `actions.json.storage`. Public-facing documentation lives under `docs/`.
 Reusable authoring instructions live in `skills/write-actions-json/SKILL.md`.
 
-Documented solutions to past problems (bugs, patterns, methodology) live under
-`docs/solutions/`, organized by category with YAML frontmatter (`module`,
-`tags`, `problem_type`) — relevant when implementing or debugging in documented
-areas. Shared domain vocabulary lives in `CONCEPTS.md` at the repo root.
+Shared domain vocabulary lives in `CONCEPTS.md` at the repo root.
 
 ## Reference Routing
 
@@ -53,7 +50,7 @@ When changing runtime or bridge behavior, prefer focused tests near the changed
 surface before broad release packaging.
 
 **MANDATORY — before ANY release (dev pre-release, version bump, package, or
-`gh release`), you MUST read `docs/development-cycle.md` first.** Not "when
+`gh release`), you MUST read `skills/actions-json-dev-cycle/SKILL.md` first.** Not "when
 unsure" — every time. Reading it is the procedural gate, not a reminder you hope
 to recall: the release checklist (run the Playwright live test before asking a
 human to install; the restart ask must contain the GitHub release URL with
@@ -63,4 +60,4 @@ that gets skipped under momentum. Re-read it at the start of the release, act on
 its checklist, then proceed. Skipping this re-read is the recurring failure this
 gate exists to stop.
 
-- `docs/development-cycle.md`
+- `skills/actions-json-dev-cycle/SKILL.md`

@@ -1,4 +1,4 @@
-// LIVE EDIT-LOOP harness (Yaniv 2026-07-07: "do editing in the harness on a
+// LIVE EDIT-LOOP harness (the product owner 2026-07-07: "do editing in the harness on a
 // fully-fledged article, on Playwright"). Proves the WHOLE positional edit loop
 // the Docs map prescribes — navigate by gated word-jumps, then a trusted
 // select+overtype edit, then VERIFY THE NEIGHBORHOOD (no fused words, no eaten

@@ -313,9 +313,10 @@ export class ShimTree {
   }
 
   /**
-   * Attest that the accessibility node's geometric center is owned by the
-   * page element itself. AX bounds identify a node, but do not prove that a
-   * sticky header, overlay, or another hit-test surface receives a pointer.
+   * Attest that at least one safe point within the accessibility node's bounds
+   * is owned by the page element itself. AX bounds identify a node, but do not
+   * prove that a sticky header, tooltip, or another hit-test surface receives
+   * the pointer at the geometric center.
    */
   async actionability(node) {
     const visibleCenter = await this.clickableCenter(node);
@@ -349,21 +350,51 @@ export class ShimTree {
           };
           const x = rect.left + rect.width / 2;
           const y = rect.top + rect.height / 2;
-          const hit = (rect.width > 0 && rect.height > 0)
+          const insetX = Math.min(4, rect.width / 4);
+          const insetY = Math.min(4, rect.height / 4);
+          const left = rect.left + insetX;
+          const right = rect.right - insetX;
+          const top = rect.top + insetY;
+          const bottom = rect.bottom - insetY;
+          const candidates = [
+            {x, y},
+            {x: left, y},
+            {x: right, y},
+            {x, y: top},
+            {x, y: bottom},
+            {x: left, y: top},
+            {x: right, y: top},
+            {x: left, y: bottom},
+            {x: right, y: bottom},
+          ];
+          const centerHit = (rect.width > 0 && rect.height > 0)
             ? document.elementFromPoint(x, y)
             : null;
-          const receives = Boolean(hit && (hit === this || this.contains(hit)));
-          const text = hit && typeof hit.textContent === 'string'
-            ? hit.textContent.trim().replace(/\\s+/g, ' ').slice(0, 160)
+          let actionPoint = null;
+          if (rect.width > 0 && rect.height > 0) {
+            for (const point of candidates) {
+              const candidateHit = document.elementFromPoint(point.x, point.y);
+              if (candidateHit && (candidateHit === this || this.contains(candidateHit))) {
+                actionPoint = point;
+                break;
+              }
+            }
+          }
+          const receives = Boolean(actionPoint);
+          const text = centerHit && typeof centerHit.textContent === 'string'
+            ? centerHit.textContent.trim().replace(/\\s+/g, ' ').slice(0, 160)
             : '';
           return {
             visible_center: {x: Math.round(x), y: Math.round(y)},
             visible_rect: visibleRect,
+            clickable_center: actionPoint
+              ? {x: Math.round(actionPoint.x), y: Math.round(actionPoint.y)}
+              : null,
             receives_events: receives,
             clickable: receives,
-            occluded_by: !receives && hit ? {
-              tag_name: String(hit.tagName || '').toLowerCase() || null,
-              id: hit.id || null,
+            occluded_by: !receives && centerHit ? {
+              tag_name: String(centerHit.tagName || '').toLowerCase() || null,
+              id: centerHit.id || null,
               text,
             } : null,
           };

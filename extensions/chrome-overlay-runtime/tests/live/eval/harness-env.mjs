@@ -171,7 +171,7 @@ async function connectAuthedChromeEnv(opts) {
       return r.result?.result?.value;
     };
 
-    // ROOT-CAUSE FIX (investigations/eval-extension-no-runtime-registration.md): the extension
+    // ROOT-CAUSE FIX (the internal investigation record): the extension
     // defaults its bridge to DEFAULT_BRIDGE_URL (ws://…:17345/extension) at startup — NOT the
     // run-owned serve bridge (17346). So it registers no runtime on our bridge and
     // runtime.agent.await_event drains an empty queue → the agent never gets driven. Overwrite

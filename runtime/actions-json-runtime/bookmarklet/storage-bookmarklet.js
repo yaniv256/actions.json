@@ -1422,7 +1422,7 @@
         right: rect.right,
         bottom: rect.bottom,
       },
-      clickable_center: {
+      clickable_center: visibility.current.action_point || {
         x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
         y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2,
       },
@@ -1466,28 +1466,50 @@
         return locator.text_equals ? haystack === text : haystack.includes(text);
       });
     const retarget = locator.retarget;
-    if (!retarget || typeof retarget !== "object") {
-      return identityCandidates;
+    let resolvedCandidates = identityCandidates;
+    if (retarget && typeof retarget === "object") {
+      if (typeof retarget.selector !== "string" || !retarget.selector.trim()) {
+        return [];
+      }
+      const targets = identityCandidates.flatMap((identity) => {
+        const scope = typeof retarget.closest === "string" && retarget.closest.trim()
+          ? identity.closest(retarget.closest.trim())
+          : identity;
+        return scope
+          ? queryRelative(scope, retarget.selector.trim(), { visible_only: false })
+          : [];
+      });
+      resolvedCandidates = Array.from(new Set(targets));
+      const retargetText = normalizeText(retarget.text || retarget.text_contains || retarget.text_equals);
+      if (retargetText) {
+        resolvedCandidates = resolvedCandidates.filter((element) => {
+          const haystack = normalizeText(
+            [
+              element.textContent,
+              element.getAttribute("aria-label"),
+              element.getAttribute("title"),
+              element.getAttribute("value"),
+            ].filter(Boolean).join(" "),
+          );
+          return retarget.text_equals ? haystack === retargetText : haystack.includes(retargetText);
+        });
+      }
     }
-    if (typeof retarget.selector !== "string" || !retarget.selector.trim()) {
+    if (locator.match_index === undefined) {
+      return resolvedCandidates;
+    }
+    const matchIndex = Number(locator.match_index);
+    if (!Number.isInteger(matchIndex) || matchIndex < 0) {
       return [];
     }
-    const targets = identityCandidates.flatMap((identity) => {
-      const scope = typeof retarget.closest === "string" && retarget.closest.trim()
-        ? identity.closest(retarget.closest.trim())
-        : identity;
-      return scope
-        ? queryRelative(scope, retarget.selector.trim(), { visible_only: false })
-        : [];
-    });
-    return Array.from(new Set(targets));
+    return resolvedCandidates[matchIndex] ? [resolvedCandidates[matchIndex]] : [];
   }
 
   function pointerClick(args = {}) {
-    const x = Number(args.x);
-    const y = Number(args.y);
-    const viewportError = validateViewportPoint("pointer.click", x, y, args);
-    if (viewportError) return viewportError;
+    const resolved = pointFromViewportPointOrLocator("pointer.click", args, "target");
+    if (resolved.error) return resolved.error;
+    const x = resolved.point.x;
+    const y = resolved.point.y;
     const knownModifiers = ["shift", "alt", "option", "control", "ctrl", "meta", "cmd", "command"];
     const modifiers = (Array.isArray(args.modifiers) ? args.modifiers : [])
       .map((modifier) => String(modifier).toLowerCase());
@@ -1497,7 +1519,7 @@
         modifiers: args.modifiers,
       });
     }
-    const target = document.elementFromPoint(x, y);
+    const target = resolved.element || document.elementFromPoint(x, y);
     if (!target) {
       return primitiveError("pointer.click", "target_not_found", "No element exists at the requested point.", { x, y });
     }
@@ -1508,6 +1530,7 @@
       x,
       y,
       modifiers,
+      geometry: resolved.geometry,
       target: clickTargetDiagnostic(target),
     });
   }
@@ -1547,26 +1570,26 @@
     return primitiveSuccess("pointer.double_click", { double_clicked: true, x, y });
   }
 
-  function pointFromViewportPointOrLocator(value, role) {
+  function pointFromViewportPointOrLocator(primitive, value, role) {
     if (!value || typeof value !== "object") {
-      return { error: primitiveError("pointer.drag", "target_not_found", `No ${role} point or locator was provided.`, { [role]: value || null }) };
+      return { error: primitiveError(primitive, "target_not_found", `No ${role} point or locator was provided.`, { [role]: value || null }) };
     }
     if (("x" in value || "y" in value) && (value.x == null || value.y == null)) {
-      return { error: primitiveError("pointer.drag", "missing_coordinates", `The ${role} point is missing x or y.`, { [role]: value }) };
+      return { error: primitiveError(primitive, "missing_coordinates", `The ${role} point is missing x or y.`, { [role]: value }) };
     }
     const x = Number(value.x);
     const y = Number(value.y);
     if (Number.isFinite(x) && Number.isFinite(y)) {
-      const viewportError = validateViewportPoint("pointer.drag", x, y, value);
+      const viewportError = validateViewportPoint(primitive, x, y, value);
       if (viewportError) return { error: viewportError };
       return { point: { x, y }, element: document.elementFromPoint(x, y), geometry: { source: "coordinates", input: value, point: { x, y } } };
     }
     const locator = value.locator && typeof value.locator === "object" ? value.locator : value;
     const element = resolveSingleVisibleLocator(locator);
-    if (!element) return { error: primitiveError("pointer.drag", "target_not_found", `No visible element matched the ${role} locator.`, { [role]: locator }) };
+    if (!element) return { error: primitiveError(primitive, "target_not_found", `No visible element matched the ${role} locator.`, { [role]: locator }) };
     const geometry = visibilityGeometryFor(element);
     if (!geometry.clickable || !geometry.receives_events || !geometry.action_point) {
-      return { error: primitiveError("pointer.drag", "target_not_actionable", `The ${role} locator resolved, but its visible point does not receive pointer events.`, { [role]: locator, actionability: geometry }) };
+      return { error: primitiveError(primitive, "target_not_actionable", `The ${role} locator resolved, but its visible point does not receive pointer events.`, { [role]: locator, actionability: geometry }) };
     }
     return {
       point: geometry.action_point,
@@ -1578,9 +1601,9 @@
   function pointerDrag(args = {}) {
     const from = args.from || {};
     const to = args.to || {};
-    const start = pointFromViewportPointOrLocator(from, "from");
+    const start = pointFromViewportPointOrLocator("pointer.drag", from, "from");
     if (start.error) return start.error;
-    const end = pointFromViewportPointOrLocator(to, "to");
+    const end = pointFromViewportPointOrLocator("pointer.drag", to, "to");
     if (end.error) return end.error;
     const startX = start.point.x;
     const startY = start.point.y;
@@ -2031,7 +2054,7 @@
           visibility: publicVisibility(geometry),
         };
         if (geometry.clickable && geometry.receives_events !== false) {
-          result.clickable_center = visibleCenter;
+          result.clickable_center = geometry.action_point || visibleCenter;
         }
         return result;
       });
@@ -2516,24 +2539,58 @@
     return ancestors;
   }
 
+  function pointerCandidatePointsFor(visibleRect) {
+    const width = rectWidth(visibleRect);
+    const height = rectHeight(visibleRect);
+    const insetX = Math.min(4, width / 4);
+    const insetY = Math.min(4, height / 4);
+    const left = visibleRect.left + insetX;
+    const right = visibleRect.right - insetX;
+    const top = visibleRect.top + insetY;
+    const bottom = visibleRect.bottom - insetY;
+    const centerX = visibleRect.left + width / 2;
+    const centerY = visibleRect.top + height / 2;
+    return [
+      { x: centerX, y: centerY },
+      { x: left, y: centerY },
+      { x: right, y: centerY },
+      { x: centerX, y: top },
+      { x: centerX, y: bottom },
+      { x: left, y: top },
+      { x: right, y: top },
+      { x: left, y: bottom },
+      { x: right, y: bottom },
+    ];
+  }
+
   function pointerHitFor(element, visibleRect) {
     if (!(element instanceof Element) || !visibleRect) {
       return { receives_events: false, point: null, hit_element: null, occluded_by: null };
     }
-    const point = {
-      x: visibleRect.left + rectWidth(visibleRect) / 2,
-      y: visibleRect.top + rectHeight(visibleRect) / 2,
-    };
-    const hitElement = document.elementFromPoint(point.x, point.y);
-    const receivesEvents = hitElement === element || element.contains(hitElement);
+    const candidates = pointerCandidatePointsFor(visibleRect);
+    const centerPoint = candidates[0];
+    let centerHit = null;
+    for (const point of candidates) {
+      const hitElement = document.elementFromPoint(point.x, point.y);
+      if (point === centerPoint) centerHit = hitElement;
+      if (hitElement === element || element.contains(hitElement)) {
+        return {
+          receives_events: true,
+          point,
+          hit_element: hitElement,
+          occluded_by: null,
+        };
+      }
+    }
+    const hitElement = centerHit;
     const hitRect = hitElement instanceof Element
       ? rectFromClientRect(hitElement.getBoundingClientRect())
       : null;
     return {
-      receives_events: receivesEvents,
-      point,
+      receives_events: false,
+      point: centerPoint,
       hit_element: hitElement,
-      occluded_by: receivesEvents || !(hitElement instanceof Element) ? null : {
+      occluded_by: !(hitElement instanceof Element) ? null : {
         target_label: elementLabel(hitElement),
         tag_name: hitElement.tagName.toLowerCase(),
         rect: hitRect,

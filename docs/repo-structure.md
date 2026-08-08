@@ -168,14 +168,13 @@ Package-specific tests may live beside their package, such as runtime tests
 under `runtime/actions-json-runtime/` or extension tests under
 `extensions/chrome-overlay-runtime/`.
 
-## Internal artifacts (`internal-docs` branch)
+## Internal artifacts
 
-Spec Kit feature work, implementation task records, and incident investigation
-write-ups live on the `internal-docs` orphan branch, not on `main`. The `main`
-branch holds only public-release material. Those documents are useful for
-contributors working on active implementation, but they are not the first place
-a user should learn the product; public docs summarize stable outcomes rather
-than require readers to reconstruct the spec history.
+Plans, implementation task records, investigations, solution histories, and
+other development-process artifacts live in the separate private project
+repository, not in this public-bound development tree. Public documentation
+describes behavior verified in the current code and tests rather than requiring
+readers to reconstruct the development history.
 
 ## Packaging Rule
 

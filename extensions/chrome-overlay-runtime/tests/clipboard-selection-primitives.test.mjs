@@ -82,7 +82,7 @@ test("pasteTargetKind uses the resolved element", () => {
   });
 });
 
-test("pasteTargetKind falls back to activeElement when unresolved", () => {
+test("pasteTargetKind labels an explicitly authorized activeElement fallback", () => {
   const src = sliceConst("pasteTargetKind");
   const pasteTargetKind = new Function(`${src} return pasteTargetKind;`)();
   const active = { tagName: "DIV" };

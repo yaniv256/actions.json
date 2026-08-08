@@ -1,5 +1,23 @@
 import { DEFAULT_MODEL } from "./realtime-model.mjs";
 
+function runtimeResponseError(response, fallback) {
+  const detail = response?.error;
+  const message =
+    typeof detail === "string"
+      ? detail
+      : (detail?.message || fallback);
+  const error = new Error(message);
+  if (detail && typeof detail === "object") {
+    error.name = detail.name || error.name;
+    error.code = detail.code || null;
+    error.phase = detail.phase || null;
+    error.details = detail.details || null;
+  }
+  error.trace_id = response?.trace_id || detail?.trace_id || null;
+  error.responder = response?.responder || detail?.responder || null;
+  return error;
+}
+
 export function createRuntimeHostedSessionClient({
   chromeApi = globalThis.chrome,
   eventObserver = null,
@@ -34,7 +52,7 @@ export function createRuntimeHostedSessionClient({
   const sendCommand = async (type, payload = {}) => {
     const response = await chromeApi.runtime.sendMessage({ type, ...payload });
     if (!response?.ok) {
-      throw new Error(response?.error || `${type} failed`);
+      throw runtimeResponseError(response, `${type} failed`);
     }
     if (response.state && typeof response.state === "object") {
       state = { ...state, ...response.state };
@@ -69,7 +87,10 @@ export function createRuntimeHostedSessionClient({
         text,
       });
       if (!response?.ok) {
-        throw new Error(response?.error || "actions-json:agent-session-user-message failed");
+        throw runtimeResponseError(
+          response,
+          "actions-json:agent-session-user-message failed",
+        );
       }
       if (response.state && typeof response.state === "object") {
         state = { ...state, ...response.state };

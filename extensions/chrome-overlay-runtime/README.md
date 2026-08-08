@@ -61,8 +61,8 @@ cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- serve
 - `manifest.json`: Chrome MV3 manifest and permissions.
 - `popup.html` / `src/popup.js`: extension icon popup, tab authorization, menu
   launch, and direct voice controls.
-- `sidepanel.html` / `src/sidepanel.js`: extension-owned Agent and Settings UI
-  rendered inside the trusted overlay iframe.
+- `agent-surface.html` / `src/agent-surface.js`: extension-owned Agent and
+  Settings UI rendered inside the trusted overlay iframe.
 - `offscreen.html` / `src/offscreen-agent.js`: hidden extension document that
   owns the live Realtime WebRTC session.
 - `src/agent/`: hosted-agent session manager, transcript handling, tool catalog,

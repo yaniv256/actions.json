@@ -1,0 +1,1363 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>actions.json Agent</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #15171d;
+        --muted: #626b7a;
+        --line: #d9e0e9;
+        --panel: #f6f8fb;
+        --accent: #126b7d;
+        --accent-soft: #e5f5f7;
+        --danger: #b64040;
+        --ok: #24744a;
+        --voice-idle-bg: #ffffff;
+        --voice-idle-border: #d8e0ea;
+        --voice-idle-ink: #253041;
+        --voice-live-bg: #e6fcf5;
+        --voice-live-border: #63e6be;
+        --voice-live-ink: #087f5b;
+        --voice-busy-bg: #fff4e6;
+        --voice-busy-border: #ffc078;
+        --voice-busy-ink: #d9480f;
+        --voice-listening-bg: #fff5f5;
+        --voice-listening-border: #ffa8a8;
+        --voice-listening-ink: #fa5252;
+        --pill-surface-start: rgba(255, 255, 255, 0.9);
+        --pill-surface-end: rgba(244, 250, 250, 0.78);
+        --pill-surface-border: rgba(255, 255, 255, 0.76);
+        --pill-surface-ring: rgba(16, 83, 88, 0.06);
+        --pill-surface-shadow: rgba(31, 56, 65, 0.18);
+        --pill-signal-start: #ffffff;
+        --pill-signal-middle: #d8f0ef;
+        --pill-signal-end: #b9dddc;
+        --pill-signal-shadow: rgba(16, 103, 103, 0.12);
+        --pill-hover-fill: rgba(255, 255, 255, 0.44);
+        --pill-active-fill: rgba(216, 240, 239, 0.56);
+        --pill-radius: 28px;
+        --pill-control-radius: 20px;
+        --pill-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+        --pill-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+        --pill-duration-fast: 140ms;
+        --pill-duration-state: 240ms;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        min-width: 0;
+        min-height: 100%;
+        margin: 0;
+      }
+
+      body {
+        color: var(--ink);
+        background: #ffffff;
+        font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      main {
+        min-width: 0;
+        padding: 10px;
+      }
+
+      .tab-panel {
+        display: grid;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .tab-panel[hidden] {
+        display: none;
+      }
+
+      .agent-panel {
+        grid-template-rows: auto minmax(0, 1fr);
+        height: calc(100vh - 20px);
+        min-height: 260px;
+      }
+
+      /* Hallmark · pre-emit critique: P5 H5 E4 S5 R5 V5 */
+      /* Hallmark · component: voice-agent-overlay · genre: modern-minimal · theme: Living Capsule
+       * states: idle · listening · thinking · speaking · working · muted · error · unavailable
+       * contrast: pass (40–41) · tokens: pass (48) · responsive: pass (49)
+       */
+      /* ------------------------------------------------------------------
+         The resting pill (surface=overlay only).
+
+         [state dot] [live waveform] [current action in words].
+
+         Colour containment: --pill-hue is set per state from
+         pill-presentation.mjs and reaches ONLY the rim, the dot, and the
+         waveform stroke. The pill body stays a neutral surface on purpose —
+         it sits on someone else's website, and a tinted fill reads as the
+         host site's chrome rather than as ours. src/agent/pill-presentation.mjs
+         enforces the rule; agent-surface-pill.test.mjs asserts it per state.
+         ------------------------------------------------------------------ */
+      .agent-pill {
+        --pill-hue: #8b96a5;
+        --pill-rim: #8b96a5;
+        display: none;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 4px;
+        align-items: center;
+        width: 100%;
+        min-width: 0;
+        min-height: 54px;
+        padding: 4px;
+        border: 1px solid color-mix(
+          in srgb,
+          var(--pill-rim) 32%,
+          var(--pill-surface-border)
+        );
+        border-radius: var(--pill-radius);
+        background: linear-gradient(
+          120deg,
+          var(--pill-surface-start),
+          var(--pill-surface-end)
+        );
+        color: var(--ink);
+        box-shadow:
+          0 16px 44px var(--pill-surface-shadow),
+          inset 0 0 0 1px var(--pill-surface-ring);
+        backdrop-filter: blur(24px) saturate(1.35);
+        /* Live Activities: layout transitions animate, elements are never
+           removed and re-added. Well under the 2s ceiling. */
+        transition:
+          border-color var(--pill-duration-state) var(--pill-ease-out),
+          box-shadow var(--pill-duration-state) var(--pill-ease-out);
+      }
+
+      .agent-surface-overlay .agent-pill {
+        display: grid;
+      }
+
+      body.agent-surface-overlay {
+        overflow: hidden;
+      }
+
+      .agent-pill-toggle {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 10px;
+        align-items: center;
+        min-width: 0;
+        min-height: 44px;
+        padding: 0 10px 0 0;
+        border-radius: 24px;
+        background: transparent;
+        color: inherit;
+        box-shadow: none;
+        transition:
+          background-color var(--pill-duration-fast) var(--pill-ease-out),
+          transform var(--pill-duration-fast) var(--pill-ease-out);
+      }
+
+      .agent-pill-toggle:hover {
+        background: var(--pill-hover-fill);
+      }
+
+      .agent-pill-toggle:active {
+        background: var(--pill-active-fill);
+        transform: scale(0.98);
+      }
+
+      .overlay-start-agent {
+        display: none;
+        min-width: 96px;
+        min-height: 44px;
+        height: 44px;
+        padding: 0 14px;
+        border-radius: var(--pill-control-radius);
+      }
+
+      .agent-surface-overlay .agent-panel:not([data-avatar-mode="true"]) .overlay-start-agent:not([hidden]) {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      /* Disclosure is explicit. Resting retains status and its primary action;
+         controls add session affordances; opened adds the detail views. */
+      .agent-surface-overlay .agent-panel:not([data-avatar-mode="true"]) .agent-controls,
+      .agent-surface-overlay .agent-panel:not([data-avatar-mode="true"]) .agent-conversation,
+      .agent-surface-overlay .agent-panel:not([data-avatar-mode="true"]) .agent-view-tabs,
+      .agent-surface-overlay .agent-panel:not([data-avatar-mode="true"]) .agent-cost-panel {
+        display: none;
+      }
+
+      .agent-surface-overlay .agent-panel:not([data-avatar-mode="true"])[data-disclosure="controls"] .agent-controls,
+      .agent-surface-overlay .agent-panel:not([data-avatar-mode="true"])[data-disclosure="opened"] .agent-controls {
+        display: flex;
+      }
+
+      .agent-surface-overlay .agent-panel:not([data-avatar-mode="true"])[data-disclosure="opened"] .agent-view-tabs {
+        display: flex;
+      }
+
+      .agent-surface-overlay .agent-panel:not([data-avatar-mode="true"])[data-disclosure="opened"] .agent-conversation:not([hidden]),
+      .agent-surface-overlay .agent-panel:not([data-avatar-mode="true"])[data-disclosure="opened"] .agent-cost-panel:not([hidden]) {
+        display: grid;
+      }
+
+      .agent-surface-overlay .agent-panel:not([data-avatar-mode="true"]) {
+        grid-template-rows: auto;
+        height: auto;
+        min-height: 0;
+      }
+
+      .agent-surface-overlay .agent-panel:not([data-avatar-mode="true"])[data-disclosure="opened"] {
+        grid-template-rows: auto auto auto minmax(0, 1fr);
+        height: calc(100vh - 20px);
+        min-height: 260px;
+      }
+
+      .agent-surface-overlay .agent-panel:not([data-avatar-mode="true"]) .agent-controls {
+        justify-content: flex-end;
+        gap: 4px;
+      }
+
+      .agent-surface-overlay .agent-panel:not([data-avatar-mode="true"]) .agent-controls #startAgent {
+        display: none;
+      }
+
+      .agent-surface-overlay .agent-panel:not([data-avatar-mode="true"]) .agent-controls button {
+        min-width: 44px;
+        min-height: 44px;
+        height: 44px;
+      }
+
+      /* The pill is the resting state, so avatar mode — which has its own
+         always-on video presentation — does not also show it. */
+      .agent-surface-overlay .agent-panel[data-avatar-mode="true"] .agent-pill {
+        display: none;
+      }
+
+      .agent-pill-signal {
+        position: relative;
+        display: grid;
+        place-items: center;
+        width: 76px;
+        height: 44px;
+        overflow: hidden;
+        border: 1px solid color-mix(in srgb, var(--pill-hue) 34%, transparent);
+        border-radius: 22px;
+        background: color-mix(in srgb, var(--pill-hue) 9%, var(--pill-surface));
+        box-shadow:
+          inset 0 0 18px color-mix(in srgb, var(--pill-hue) 8%, transparent),
+          0 5px 16px var(--pill-signal-shadow);
+      }
+
+      .agent-pill[data-state="error"] {
+        --pill-hue: #b64040;
+        --pill-rim: #b64040;
+      }
+
+      .agent-pill-wave {
+        position: relative;
+        width: 68px;
+        height: 38px;
+        overflow: hidden;
+      }
+
+      .agent-pill-wave canvas {
+        display: block;
+      }
+
+      .agent-pill[data-state="thinking"] .agent-pill-wave canvas,
+      .agent-pill[data-state="working"] .agent-pill-wave canvas {
+        visibility: hidden;
+      }
+
+      .agent-pill[data-state="thinking"] .agent-pill-signal::after,
+      .agent-pill[data-state="working"] .agent-pill-signal::after {
+        content: "";
+        position: absolute;
+        inset: 4px;
+        border: 3px solid color-mix(in srgb, var(--pill-hue) 24%, transparent);
+        border-top-color: var(--pill-hue);
+        border-radius: 50%;
+      }
+
+      @media (prefers-reduced-motion: no-preference) {
+        .agent-pill[data-state="thinking"] .agent-pill-signal::after,
+        .agent-pill[data-state="working"] .agent-pill-signal::after {
+          animation: agent-pill-progress-spin 780ms linear infinite;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .agent-pill[data-state="thinking"] .agent-pill-signal::after,
+        .agent-pill[data-state="working"] .agent-pill-signal::after {
+          animation: agent-pill-progress-fade 900ms var(--pill-ease-in-out) infinite;
+        }
+      }
+
+      @keyframes agent-pill-progress-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      @keyframes agent-pill-progress-fade {
+        0%,
+        100% {
+          opacity: 0.35;
+        }
+
+        50% {
+          opacity: 0.9;
+        }
+      }
+
+      /* audioAvailable:false must NOT look like a flat live wave — a dead-mic
+         reading is the exact wrong answer when the truth is "no audio was ever
+         expected". The wave is hidden and a dashed rule takes its place. */
+      .agent-pill[data-audio="unavailable"] .agent-pill-wave canvas {
+        visibility: hidden;
+      }
+
+      .agent-pill[data-audio="unavailable"] .agent-pill-wave::after {
+        content: "";
+        position: absolute;
+        top: 50%;
+        left: 0;
+        width: 100%;
+        border-top: 1px dashed color-mix(in srgb, var(--pill-hue) 60%, transparent);
+      }
+
+      .agent-pill-action {
+        min-width: 0;
+        overflow: hidden;
+        font-size: 13px;
+        font-weight: 650;
+        letter-spacing: -0.01em;
+        text-align: left;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .agent-cost-panel {
+        align-content: start;
+        min-height: 0;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fbfcfe;
+      }
+
+      .agent-conversation[hidden],
+      .agent-cost-panel[hidden],
+      .debug-log[hidden] {
+        display: none;
+      }
+
+      /* ------------------------------------------------------------------
+         The COMPACT waveform pill — the collapsed overlay.
+
+         WHY A WIDTH QUERY AND NOT A MESSAGE
+         -----------------------------------
+         When content.js collapses the trusted menu, the shadow host shrinks to
+         42x42 and .body/.panel-view/iframe all inherit 100%/100%, so THIS
+         DOCUMENT'S OWN VIEWPORT becomes 42px wide. That is already an exact,
+         synchronous statement of "the overlay is collapsed" — no message has to
+         cross the realm boundary to say it, and nothing has to be reloaded
+         (re-assigning the iframe src would tear down the live voice session).
+
+         Crucially this is a PRESENTATION change only. The waveform colour comes
+         from --pill-hue, which the SAME createPillPresenter writes on every
+         session event. So a state change arriving while collapsed updates the
+         measured waveform exactly as it updates the expanded pill; there is no
+         second copy of session state anywhere,
+         and in particular none in content.js's shadow DOM.
+
+         The label is not deleted — it stays in the a11y tree via the pill's
+         own aria-label (pillSurface.setLabel writes both), so a screen reader
+         still hears the named action while the visual is the waveform.
+         ------------------------------------------------------------------ */
+      @media (max-width: 60px) {
+        main {
+          padding: 0;
+        }
+
+        .agent-surface-overlay .agent-pill {
+          grid-template-columns: 1fr;
+          place-items: center;
+          gap: 0;
+          width: 42px;
+          height: 42px;
+          min-height: 42px;
+          padding: 0;
+          border-radius: 50%;
+          box-shadow: none;
+        }
+
+        .agent-surface-overlay .agent-pill-toggle {
+          grid-template-columns: 1fr;
+          width: 42px;
+          min-height: 42px;
+          padding: 0;
+        }
+
+        .agent-surface-overlay .overlay-start-agent,
+        .agent-surface-overlay .agent-controls {
+          display: none !important;
+        }
+
+        /* Keep the measured waveform visible in the compact capsule. The
+           spoken label remains available through the toggle's aria-label. */
+        .agent-surface-overlay .agent-pill .agent-pill-action {
+          display: none;
+        }
+
+        .agent-surface-overlay .agent-pill .agent-pill-signal {
+          display: grid;
+          width: 42px;
+          height: 42px;
+        }
+
+        .agent-surface-overlay .agent-pill .agent-pill-wave {
+          width: 36px;
+          height: 38px;
+        }
+      }
+
+      .agent-panel[data-avatar-mode="true"] {
+        grid-template-rows: auto auto minmax(0, 1fr);
+      }
+
+      .protoface-stage {
+        position: relative;
+        min-height: 0;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: #101827;
+        aspect-ratio: 16 / 9;
+      }
+
+      .protoface-stage[hidden] {
+        display: none;
+      }
+
+      .protoface-stage video {
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      .protoface-stage audio {
+        display: none;
+      }
+
+      .protoface-status {
+        position: absolute;
+        left: 8px;
+        bottom: 8px;
+        max-width: calc(100% - 16px);
+        padding: 4px 7px;
+        border-radius: 999px;
+        background: rgba(9, 15, 28, 0.78);
+        color: #ffffff;
+        font-size: 11px;
+        font-weight: 750;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .agent-controls {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto auto;
+        gap: 8px;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .voice-launcher {
+        display: inline-grid;
+        grid-template-columns: 42px minmax(0, 1fr);
+        align-items: center;
+        width: 100%;
+        min-width: 0;
+        height: 46px;
+        padding: 0;
+        border: 1px solid var(--voice-idle-border);
+        border-radius: 8px;
+        background: var(--voice-idle-bg);
+        color: var(--voice-idle-ink);
+        box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
+      }
+
+      .voice-launcher[data-voice-state="live"] {
+        border-color: var(--voice-live-border);
+        background: var(--voice-live-bg);
+        color: var(--voice-live-ink);
+      }
+
+      .voice-launcher[data-voice-state="connecting"],
+      .voice-launcher[data-voice-state="busy"] {
+        border-color: var(--voice-busy-border);
+        background: var(--voice-busy-bg);
+        color: var(--voice-busy-ink);
+      }
+
+      .voice-launcher[data-voice-state="listening"] {
+        border-color: var(--voice-listening-border);
+        background: var(--voice-listening-bg);
+        color: var(--voice-listening-ink);
+      }
+
+      .voice-launcher[data-voice-state="error"] {
+        border-color: #ff8787;
+        background: #fff5f5;
+        color: #e03131;
+      }
+
+      .voice-launcher:focus-visible,
+      button:focus-visible,
+      input:focus-visible,
+      textarea:focus-visible {
+        outline: 2px solid color-mix(in srgb, currentColor 38%, transparent);
+        outline-offset: 2px;
+      }
+
+      .voice-launcher-icon {
+        display: inline-flex;
+        width: 100%;
+        height: 100%;
+        align-items: center;
+        justify-content: center;
+        border-right: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+      }
+
+      .voice-launcher-icon svg {
+        display: block;
+        width: 17px;
+        height: 17px;
+        overflow: visible;
+      }
+
+      .voice-launcher-label {
+        min-width: 0;
+        padding: 0 10px;
+        overflow: hidden;
+        text-align: left;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .voice-launcher-dot {
+        transform-box: fill-box;
+        transform-origin: center;
+      }
+
+      @media (prefers-reduced-motion: no-preference) {
+        .voice-launcher[data-voice-state="connecting"] .voice-launcher-dot {
+          animation: voice-launcher-pulse 1s ease-in-out infinite;
+          opacity: 0.38;
+        }
+
+        .voice-launcher[data-voice-state="connecting"] .voice-launcher-dot:nth-child(2) {
+          animation-delay: 120ms;
+        }
+
+        .voice-launcher[data-voice-state="connecting"] .voice-launcher-dot:nth-child(3) {
+          animation-delay: 240ms;
+        }
+      }
+
+      @keyframes voice-launcher-pulse {
+        0%,
+        100% {
+          opacity: 0.38;
+          transform: translateY(0) scale(0.92);
+        }
+
+        40% {
+          opacity: 1;
+          transform: translateY(-0.75px) scale(1.08);
+        }
+      }
+
+      button {
+        min-width: 0;
+        height: 34px;
+        padding: 0 9px;
+        border: 0;
+        border-radius: 7px;
+        background: var(--accent);
+        color: white;
+        font-size: 13px;
+        font-weight: 800;
+        cursor: pointer;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      button.secondary {
+        background: #202836;
+      }
+
+      button.icon-only {
+        width: 42px;
+        height: 46px;
+        padding: 0;
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.52;
+      }
+
+      button.icon-only:disabled {
+        background: #eef2f6;
+        color: #778291;
+        opacity: 1;
+      }
+
+      button.icon-only[aria-pressed="true"] {
+        border: 1px solid #f0b9b9;
+        background: #f7e5e5;
+        color: var(--danger);
+        box-shadow: inset 0 0 0 1px rgba(182, 64, 64, 0.12);
+      }
+
+      button.icon-only .mute-slash,
+      button.icon-only .mute-slash-casing {
+        display: none;
+      }
+
+      button.icon-only.is-muted .mute-slash-casing {
+        display: block;
+        stroke: #f7e5e5;
+      }
+
+      button.icon-only.is-muted .mute-slash {
+        display: block;
+        stroke: currentColor;
+      }
+
+      button.icon-only.is-muted:disabled {
+        opacity: 1;
+      }
+
+      .agent-conversation {
+        display: grid;
+        grid-template-rows: minmax(0, 1fr) auto;
+        gap: 8px;
+        min-height: 0;
+      }
+
+      .transcript {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-height: 0;
+        height: 100%;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fbfcfe;
+        overflow-y: auto;
+        overflow-x: hidden;
+        overflow-wrap: anywhere;
+        overscroll-behavior: contain;
+      }
+
+      .transcript-line {
+        width: fit-content;
+        max-width: 100%;
+        padding: 7px 9px;
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        border-radius: 8px;
+        font-size: 14px;
+        line-height: 1.38;
+      }
+
+      .transcript-line-user {
+        align-self: flex-end;
+        background: #e8f0fe;
+        color: #12376f;
+        border-bottom-right-radius: 2px;
+      }
+
+      .transcript-line-assistant {
+        align-self: flex-start;
+        background: #f1f5f9;
+        color: #1f2937;
+        border-bottom-left-radius: 2px;
+      }
+
+      .transcript-line-status {
+        align-self: stretch;
+        background: transparent;
+        color: var(--muted);
+        border-color: transparent;
+        padding: 2px 0;
+        font-size: 13px;
+      }
+
+      .transcript-line.is-live::after,
+      .transcript-line.is-pending::after {
+        content: "▍";
+        margin-left: 1px;
+        color: var(--accent);
+        animation: transcript-cursor-blink 0.8s step-end infinite;
+      }
+
+      @keyframes transcript-cursor-blink {
+        50% {
+          opacity: 0;
+        }
+      }
+
+      .empty {
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      /* ------------------------------------------------------------------
+         U9 — the Debug view (developer mode only).
+
+         The tab strip and the whole debug view are BUILT BY JAVASCRIPT and
+         only when devMode is on. They are not markup-with-hidden: a debug
+         surface that is merely `display:none` is still in the DOM, still
+         reachable from devtools, and still readable by anything that walks
+         the tree. "Off" has to mean absent.
+
+         Colour comes from src/agent/debug-log-presentation.mjs, which draws
+         on this file's existing vocabulary (--ok, --danger, the busy amber)
+         rather than inventing a palette. Three outcome states, never two:
+         `indeterminate` is visually distinct from BOTH success and failure
+         because collapsing it into "failed" tells the user to retry a
+         mutation that may already have committed.
+         ------------------------------------------------------------------ */
+      .agent-view-tabs {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .agent-view-tab {
+        position: relative;
+        padding: 5px 10px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: #ffffff;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      .agent-view-tab[aria-selected="true"] {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+        color: var(--accent);
+      }
+
+      /* The unread-error dot. Lit when a new error arrives, cleared on view. */
+      .agent-view-tab .unread-dot {
+        display: none;
+        position: absolute;
+        top: 1px;
+        right: 3px;
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--danger);
+      }
+
+      .agent-view-tab[data-unread="true"] .unread-dot {
+        display: block;
+      }
+
+      .debug-log {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        min-height: 0;
+        height: 100%;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fbfcfe;
+        overflow-y: auto;
+        overflow-x: hidden;
+        overflow-wrap: anywhere;
+        overscroll-behavior: contain;
+      }
+
+      .debug-entry {
+        display: grid;
+        gap: 3px;
+        padding: 7px 9px;
+        border: 1px solid rgba(15, 23, 42, 0.08);
+        border-left: 3px solid var(--debug-hue, var(--muted));
+        border-radius: 6px;
+        background: var(--debug-background, #f1f5f9);
+        font-size: 13px;
+      }
+
+      .debug-entry-head {
+        display: flex;
+        gap: 6px;
+        align-items: baseline;
+        flex-wrap: wrap;
+      }
+
+      .debug-entry-type {
+        font-weight: 800;
+        color: var(--ink);
+      }
+
+      /* Each outcome carries a WORD, not only a colour: the state has to
+         survive a greyscale screenshot pasted into an incident thread. */
+      .debug-entry-outcome {
+        padding: 1px 6px;
+        border-radius: 999px;
+        background: #ffffff;
+        color: var(--debug-hue, var(--muted));
+        border: 1px solid var(--debug-hue, var(--line));
+        font-size: 11px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+
+      .debug-entry-time {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .debug-entry-summary {
+        color: var(--ink);
+      }
+
+      .debug-entry-field {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .debug-entry-field > .debug-field-label {
+        font-weight: 700;
+        color: #46506180;
+      }
+
+      /* The status_details block — the field whose absence made Greg's
+         failure undiagnosable. It is styled to be the loudest thing in the
+         entry because it is the only part that answers "why". */
+      .debug-status-details {
+        display: grid;
+        gap: 2px;
+        margin-top: 3px;
+        padding: 6px 7px;
+        border-radius: 5px;
+        background: #ffffff;
+        border: 1px dashed var(--debug-hue, var(--line));
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 11px;
+        color: var(--ink);
+      }
+
+      .debug-status-message {
+        overflow-wrap: anywhere;
+      }
+
+      .config-panel {
+        gap: 8px;
+      }
+
+      section {
+        display: grid;
+        gap: 8px;
+        min-width: 0;
+      }
+
+      details.settings-group {
+        min-width: 0;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #ffffff;
+      }
+
+      details.settings-group > summary {
+        display: flex;
+        gap: 7px;
+        align-items: center;
+        padding: 9px 10px;
+        border-radius: 8px;
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 800;
+        list-style: none;
+        cursor: pointer;
+        user-select: none;
+      }
+
+      details.settings-group > summary::-webkit-details-marker {
+        display: none;
+      }
+
+      details.settings-group > summary::before {
+        content: "";
+        flex: 0 0 auto;
+        width: 7px;
+        height: 7px;
+        border-right: 2px solid var(--muted);
+        border-bottom: 2px solid var(--muted);
+        transform: rotate(-45deg);
+        transition: transform 140ms ease;
+      }
+
+      details.settings-group[open] > summary {
+        border-bottom: 1px solid var(--line);
+        border-bottom-left-radius: 0;
+        border-bottom-right-radius: 0;
+      }
+
+      details.settings-group[open] > summary::before {
+        transform: rotate(45deg);
+      }
+
+      details.settings-group > .settings-body {
+        display: grid;
+        gap: 8px;
+        min-width: 0;
+        padding: 10px;
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.2;
+      }
+
+      p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      label {
+        display: grid;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 800;
+      }
+
+      input {
+        width: 100%;
+        min-width: 0;
+        height: 34px;
+        padding: 0 9px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        color: var(--ink);
+        font: 13px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+
+      textarea {
+        width: 100%;
+        min-width: 0;
+        min-height: 44px;
+        max-height: 96px;
+        padding: 8px 9px;
+        resize: vertical;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        color: var(--ink);
+        font: 14px/1.35 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .agent-composer {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 7px;
+        align-items: end;
+        min-width: 0;
+      }
+
+      input[type="range"] {
+        padding: 0;
+      }
+
+      input[type="checkbox"] {
+        width: auto;
+        height: auto;
+      }
+
+      .inline-check {
+        display: flex;
+        grid-template-columns: none;
+        flex-direction: row;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .inline-check input {
+        flex: 0 0 auto;
+      }
+
+      select {
+        width: 100%;
+        min-width: 0;
+        height: 34px;
+        padding: 0 9px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #fff;
+        color: var(--ink);
+        font: 13px/1.2 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .button-row {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(82px, 1fr));
+        gap: 7px;
+        min-width: 0;
+      }
+
+      .status-card {
+        display: grid;
+        gap: 4px;
+        padding: 9px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+      }
+
+      .status-card strong {
+        font-size: 12px;
+      }
+
+      .agent-state {
+        display: inline-flex;
+        width: fit-content;
+        align-items: center;
+        min-height: 22px;
+        padding: 2px 7px;
+        border-radius: 999px;
+        background: #e8edf3;
+        color: #2b3340;
+        font-size: 12px;
+        font-weight: 800;
+      }
+
+      .agent-state[data-state="ready"] {
+        background: #dff3e6;
+        color: var(--ok);
+      }
+
+      .agent-state[data-state="blocked"] {
+        background: #f7e5e5;
+        color: var(--danger);
+      }
+
+      .status-line {
+        min-height: 18px;
+        color: var(--ok);
+        font-size: 13px;
+      }
+
+      .status-line[data-error="true"] {
+        color: var(--danger);
+      }
+
+      @media (max-width: 220px) {
+        main {
+          padding: 8px;
+        }
+
+        .agent-controls {
+          grid-template-columns: 1fr;
+        }
+
+        button.icon-only {
+          width: 100%;
+          height: 34px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div id="agentPanel" class="tab-panel agent-panel" role="tabpanel" aria-label="Agent">
+        <!-- The extension iframe owns status and session actions. The page host
+             owns geometry only. A native disclosure button surrounds the
+             nested live-status region; the separate primary action starts
+             voice and never masquerades as passive status text. -->
+        <section
+          id="agentPill"
+          class="agent-pill"
+          data-state="idle"
+          data-audio="idle"
+        >
+          <button
+            id="agentPillToggle"
+            class="agent-pill-toggle"
+            type="button"
+            aria-expanded="false"
+            aria-controls="agentConversation"
+            aria-label="Open agent details"
+          >
+            <span class="agent-pill-signal" aria-hidden="true">
+              <span id="agentPillWave" class="agent-pill-wave"></span>
+            </span>
+            <span
+              id="agentPillStatus"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+              class="agent-pill-action"
+            ><span id="agentPillAction">Ready</span></span>
+          </button>
+          <button
+            id="overlayStartAgent"
+            class="overlay-start-agent"
+            type="button"
+            disabled
+          >Open settings</button>
+        </section>
+
+        <section class="agent-controls" aria-label="Voice controls">
+          <button id="startAgent" class="voice-launcher" data-voice-state="idle" disabled>
+            <span id="voiceLauncherIcon" class="voice-launcher-icon" aria-hidden="true"></span>
+            <span id="voiceLauncherLabel" class="voice-launcher-label">Start voice</span>
+          </button>
+          <button id="muteMic" class="secondary icon-only" disabled title="Mute microphone" aria-label="Mute microphone" aria-pressed="false">
+            <svg aria-hidden="true" viewBox="0 0 16 16" width="17" height="17"><rect x="5.25" y="2.25" width="5.5" height="7" rx="2.75" fill="none" stroke="currentColor" stroke-width="1.5"></rect><path d="M3.75 8a4.25 4.25 0 0 0 8.5 0M8 12.25v1.5M5.5 13.75h5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"></path><line class="mute-slash-casing" x1="1.6" y1="1.6" x2="14.4" y2="14.4" fill="none" stroke-width="3.4" stroke-linecap="round"></line><line class="mute-slash" x1="1.6" y1="1.6" x2="14.4" y2="14.4" fill="none" stroke-width="1.6" stroke-linecap="round"></line></svg>
+          </button>
+          <button id="muteSpeaker" class="secondary icon-only" disabled title="Mute speaker" aria-label="Mute speaker" aria-pressed="false">
+            <svg aria-hidden="true" viewBox="0 0 16 16" width="18" height="18"><path d="M2.75 6.25h2.5L8.5 3.5v9L5.25 9.75h-2.5z" fill="none" stroke="currentColor" stroke-linejoin="round" stroke-width="1.4"></path><path d="M10.5 6a3 3 0 0 1 0 4M12.25 4.5a5.25 5.25 0 0 1 0 7" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.4"></path><line class="mute-slash-casing" x1="1.6" y1="1.6" x2="14.4" y2="14.4" fill="none" stroke-width="3.4" stroke-linecap="round"></line><line class="mute-slash" x1="1.6" y1="1.6" x2="14.4" y2="14.4" fill="none" stroke-width="1.6" stroke-linecap="round"></line></svg>
+          </button>
+          <button id="stopAgent" class="secondary icon-only" disabled title="Stop voice" aria-label="Stop voice">■</button>
+          <button id="openAgentDetails" class="secondary icon-only" type="button" title="Open details" aria-label="Open agent details">↗</button>
+          <button id="closeAgentOverlay" class="secondary icon-only" type="button" title="Close overlay" aria-label="Close overlay">×</button>
+        </section>
+
+        <section id="protofaceStage" class="protoface-stage" aria-label="Protoface avatar" hidden>
+          <video id="protofaceVideo" autoplay playsinline></video>
+          <audio id="protofaceAudio" autoplay></audio>
+          <div id="protofaceStatus" class="protoface-status" role="status">Avatar idle</div>
+        </section>
+
+        <!-- U9: Transcript and Cost are permanent. The developer-mode Debug
+             tab mounts here only when devMode is on, so #debugTab and
+             #debugLog are absent—not merely hidden—when it is off. -->
+        <div id="agentViewTabs" class="agent-view-tabs" role="tablist" aria-label="Agent views">
+          <button id="transcriptViewTab" class="agent-view-tab" type="button" role="tab" aria-selected="true" aria-controls="agentConversation">Transcript</button>
+          <button id="costViewTab" class="agent-view-tab" type="button" role="tab" aria-selected="false" aria-controls="agentCostPanel">Cost</button>
+        </div>
+
+        <section id="agentConversation" class="agent-conversation" aria-label="Transcript" role="tabpanel">
+          <div id="transcript" class="transcript">
+            <div class="empty">Realtime transcript will appear here.</div>
+          </div>
+          <form id="agentTextForm" class="agent-composer" aria-label="Send text to agent">
+            <textarea id="agentTextInput" placeholder="Type to the agent" aria-label="Text message to agent"></textarea>
+            <button id="sendAgentText" type="submit" disabled>Send</button>
+          </form>
+        </section>
+        <section id="agentCostPanel" class="agent-cost-panel" role="tabpanel" aria-label="Cost" hidden>
+          <h2>Session cost</h2>
+          <p>Cost appears in the page meter when cost display is enabled. This view never estimates usage that the session has not reported.</p>
+        </section>
+      </div>
+
+      <div id="configPanel" class="tab-panel config-panel" role="tabpanel" aria-label="Settings" hidden>
+        <section class="status-card" aria-label="Agent status">
+          <strong>Agent</strong>
+          <span id="agentState" class="agent-state" data-state="blocked">Blocked</span>
+          <p id="keySummary">No OpenAI key configured.</p>
+          <p id="targetSummary">No active hosted-agent session.</p>
+        </section>
+
+        <details class="settings-group" open>
+          <summary>OpenAI API key</summary>
+          <div class="settings-body">
+            <p>The key stays in Chrome extension storage and is used only by this extension to connect to OpenAI.</p>
+            <label>
+              API key
+              <input id="apiKey" type="password" autocomplete="off" placeholder="sk-..." />
+            </label>
+            <div class="button-row">
+              <button id="saveKey">Save key</button>
+              <button id="clearKey" class="secondary">Clear</button>
+            </div>
+            <div id="credentialStatus" class="status-line" role="status"></div>
+          </div>
+        </details>
+
+        <details class="settings-group">
+          <summary>Voice</summary>
+          <div class="settings-body">
+            <p>Applies to the next Realtime voice session. OpenAI locks the voice after audio has started in a session.</p>
+            <label>
+              Realtime voice
+              <select id="voiceSelect">
+                <option value="alloy">alloy</option>
+                <option value="ash">ash</option>
+                <option value="ballad">ballad</option>
+                <option value="coral">coral</option>
+                <option value="echo">echo</option>
+                <option value="sage">sage</option>
+                <option value="shimmer">shimmer</option>
+                <option value="verse">verse</option>
+                <option value="marin">marin</option>
+                <option value="cedar">cedar</option>
+              </select>
+            </label>
+            <div id="voiceStatus" class="status-line" role="status"></div>
+          </div>
+        </details>
+
+        <details class="settings-group">
+          <summary>Turn detection</summary>
+          <div class="settings-body">
+            <p>Applies to the next Realtime voice session. Use these controls when speech is interrupted too easily or the agent waits too long.</p>
+            <label>
+              VAD mode
+              <select id="vadMode">
+                <option value="server_vad">server VAD</option>
+                <option value="semantic_vad">semantic VAD</option>
+              </select>
+            </label>
+            <label>
+              Server threshold
+              <input id="vadThreshold" type="range" min="0" max="1" step="0.05" />
+            </label>
+            <label>
+              Silence duration ms
+              <input id="vadSilenceDuration" type="number" min="100" max="5000" step="100" />
+            </label>
+            <label>
+              Semantic eagerness
+              <select id="vadEagerness">
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+                <option value="auto">auto</option>
+              </select>
+            </label>
+            <label class="inline-check">
+              <input id="vadInterruptResponse" type="checkbox" />
+              Interrupt assistant when user speaks
+            </label>
+            <div id="vadStatus" class="status-line" role="status"></div>
+          </div>
+        </details>
+
+        <details class="settings-group">
+          <summary>Experimental avatar</summary>
+          <div class="settings-body">
+            <p>Routes assistant audio to a Protoface lip-synced avatar in the next reopened overlay. Voice-only playback remains the fallback.</p>
+            <label class="inline-check">
+              <input id="protofaceEnabled" type="checkbox" />
+              Enable Protoface in the actions.json overlay
+            </label>
+            <label>
+              Connection mode
+              <select id="protofaceConnectionMode">
+                <option value="direct">Direct credentials</option>
+                <option value="broker">Session broker</option>
+              </select>
+            </label>
+            <div id="protofaceBrokerFields">
+              <label>
+                Session broker URL
+                <input id="protofaceBrokerUrl" type="url" autocomplete="off" />
+              </label>
+            </div>
+            <div id="protofaceDirectCredentialFields" hidden>
+              <p>Local demo only. These credentials stay in extension-local storage, not in actions.json storage. Use a server-side broker for production.</p>
+              <label>
+                Protoface API key
+                <input id="protofaceApiKey" type="password" autocomplete="new-password" />
+              </label>
+              <label>
+                LiveKit URL
+                <input id="livekitUrl" type="url" autocomplete="off" placeholder="wss://your-project.livekit.cloud" />
+              </label>
+              <label>
+                LiveKit API key
+                <input id="livekitApiKey" type="password" autocomplete="new-password" />
+              </label>
+              <label>
+                LiveKit API secret
+                <input id="livekitApiSecret" type="password" autocomplete="new-password" />
+              </label>
+              <div class="button-row">
+                <button id="saveProtofaceCredentials">Save credentials and avatar settings</button>
+                <button id="clearProtofaceCredentials" class="secondary">Clear credentials</button>
+              </div>
+              <div id="protofaceCredentialStatus" class="status-line" role="status"></div>
+            </div>
+            <label>
+              Avatar ID
+              <input id="protofaceAvatarId" type="text" autocomplete="off" />
+            </label>
+            <div class="button-row">
+              <button id="saveProtofaceSettings">Save avatar settings</button>
+            </div>
+            <div id="protofaceSettingsStatus" class="status-line" role="status"></div>
+          </div>
+        </details>
+
+        <details class="settings-group">
+          <summary>Bridge</summary>
+          <div class="settings-body">
+            <label>
+              URL
+              <input id="bridgeUrl" value="ws://127.0.0.1:17345/extension" />
+            </label>
+            <div class="button-row">
+              <button id="authorizeBridge">Connect</button>
+              <button id="closeOverlay" class="secondary">Close overlay</button>
+            </div>
+            <div id="bridgeStatus" class="status-line" role="status"></div>
+          </div>
+        </details>
+
+        <details class="settings-group">
+          <summary>Storage folder</summary>
+          <div class="settings-body">
+            <p>Upload or download actions.json storage from a local checkout.</p>
+            <div class="button-row">
+              <button id="loadStorageFolder">Upload</button>
+              <button id="writeStorageFolder" class="secondary">Download</button>
+            </div>
+            <div id="storageFolderStatus" class="status-line" role="status"></div>
+          </div>
+        </details>
+
+        <details class="settings-group">
+          <summary>Memory and logs</summary>
+          <div class="settings-body">
+            <p id="memoryStatus">Memory unavailable.</p>
+            <div class="button-row">
+              <button id="clearMemory" class="secondary">Clear memory</button>
+            </div>
+          </div>
+        </details>
+      </div>
+    </main>
+
+    <script type="module" src="src/agent-surface.js"></script>
+  </body>
+</html>

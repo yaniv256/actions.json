@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { bridgeAuthHeaders, requireBridgeSecret } from './support/bridge-secret.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXT = path.resolve(HERE, '../..');
@@ -36,10 +37,17 @@ async function fetchRuntimes() {
   return res.json();
 }
 
+// U12b: /mcp/tools/call is gated on the per-installation handshake secret. The
+// bridge this script spawns below reads the same .actions-json.local.json this
+// resolver does, so both sides land on one secret with no operator step.
+// Resolved EAGERLY at startup (see main) so a missing secret fails by name
+// rather than as an opaque 401 mid-run.
+let bridgeSecret = null;
+
 async function callBridgeTool(name, args = {}, route = {}) {
   const res = await fetch(`http://127.0.0.1:${BRIDGE_PORT}/mcp/tools/call`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: bridgeAuthHeaders(bridgeSecret, { 'content-type': 'application/json' }),
     body: JSON.stringify({ name, arguments: args, ...route }),
   });
   if (!res.ok) throw new Error(`${name} HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
@@ -61,6 +69,9 @@ async function main() {
   if (!fs.existsSync(BRIDGE_BIN)) {
     throw new Error(`bridge binary missing at ${BRIDGE_BIN} — run: cargo build --manifest-path mcp/actions-json-mcp/Cargo.toml`);
   }
+  // Fail on the missing credential HERE, before launching Chromium — cheap, and
+  // the error names the secret instead of surfacing as a 401 twenty seconds in.
+  bridgeSecret = requireBridgeSecret();
   // background.js statically imports the a11y bundle; build it so the loaded
   // extension carries current code.
   execFileSync('node', [path.join(EXT, 'esbuild.a11y.mjs')], { stdio: 'inherit' });

@@ -1,12 +1,52 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  listExecutableRuntimeActionNames,
+  listSiteActionsBoundedFromBundle,
   listSiteStorageFilesFromBundle,
   listSiteActionsFromBundle,
   resolveSiteActionFromBundle,
   readSiteStorageFileFromBundle,
   siteBlockedPrimitiveNamesFromBundle,
 } from "../src/agent/local-actions-catalog.mjs";
+import { validateWorkflow } from "../src/agent/workflow-actions.mjs";
+
+test("runtime workflow allowlist includes executable tools and supported dictionary primitives", () => {
+  const knownPrimitives = listExecutableRuntimeActionNames({
+    tools: [
+      { name: "browser.extract_elements" },
+      { name: "pointer.click" },
+    ],
+    primitive_dictionary: {
+      primitives: [
+        { name: "pointer.click", support: "supported" },
+        { name: "locator.element_info" },
+        { name: "legacy.unsupported", support: "unsupported" },
+      ],
+    },
+  });
+  assert.deepEqual(
+    knownPrimitives,
+    ["browser.extract_elements", "pointer.click", "locator.element_info"],
+  );
+  assert.deepEqual(
+    validateWorkflow(
+      {
+        version: 1,
+        expression_language: "jsonata",
+        steps: [
+          {
+            id: "readRows",
+            primitive: "browser.extract_elements",
+            args: { item_selector: "[role='checkbox']", fields: [{ name: "checked", attribute: "aria-checked" }] },
+          },
+        ],
+      },
+      { knownPrimitives },
+    ),
+    { ok: true },
+  );
+});
 
 const bundle = {
   protocol: "actions.json.storage.bundle",
@@ -175,6 +215,77 @@ test("local actions catalog ignores pipeline proof-package map copies", () => {
   );
 });
 
+test("bounded local actions catalog filters, paginates, caps output, and binds cursors to provenance", () => {
+  const many = structuredClone(bundle);
+  const map = JSON.parse(many.entries[0].content);
+  map.tools = Array.from({ length: 12 }, (_, index) => ({
+    name: `acme.card.${String(index).padStart(2, "0")}`,
+    description: index === 11 ? "Find the invoice needle." : `Open card ${index}.`,
+    input_schema: { type: "object", properties: { title: { type: "string" } } },
+  }));
+  many.entries[0].content = JSON.stringify(map);
+
+  const first = listSiteActionsBoundedFromBundle(many, "https://acme.example/", {
+    query: "acme.card",
+    max_bytes: 2_500,
+  });
+  assert.equal(first.ok, true);
+  assert.equal(first.value.actions.length, 5);
+  assert.equal(first.value.page.page_size, 5);
+  assert.equal(first.value.page.has_more, true);
+  assert.equal(typeof first.value.page.continuation, "string");
+  assert.match(first.value.provenance.catalog_hash, /^fnv1a64:[0-9a-f]{16}$/);
+  assert.equal(first.value.actions[0].source.map_path, many.entries[0].path);
+  assert.match(first.value.actions[0].source.content_hash, /^fnv1a64:[0-9a-f]{16}$/);
+  assert.ok(Buffer.byteLength(JSON.stringify(first)) <= 2_500);
+
+  const second = listSiteActionsBoundedFromBundle(many, "https://acme.example/", {
+    query: "acme.card",
+    continuation: first.value.page.continuation,
+    max_bytes: 2_500,
+  });
+  assert.equal(second.ok, true);
+  assert.deepEqual(second.value.actions.map(({ name }) => name), [
+    "acme.card.05",
+    "acme.card.06",
+    "acme.card.07",
+    "acme.card.08",
+    "acme.card.09",
+  ]);
+
+  const needle = listSiteActionsBoundedFromBundle(many, "https://acme.example/", {
+    query: "invoice needle",
+    max_bytes: 2_500,
+  });
+  assert.deepEqual(needle.value.actions.map(({ name }) => name), ["acme.card.11"]);
+
+  const changed = structuredClone(many);
+  changed.entries[0].content = `${changed.entries[0].content}\n`;
+  const stale = listSiteActionsBoundedFromBundle(changed, "https://acme.example/", {
+    query: "acme.card",
+    continuation: first.value.page.continuation,
+    max_bytes: 2_500,
+  });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.error.code, "catalog_continuation_invalid");
+});
+
+test("bounded local actions catalog preserves legacy list behavior and enforces requested page limit", () => {
+  const legacy = listSiteActionsFromBundle(bundle, "https://acme.example/");
+  const bounded = listSiteActionsBoundedFromBundle(bundle, "https://acme.example/", {
+    page_size: 99,
+    max_bytes: 4_000,
+  });
+
+  assert.equal(bounded.ok, true);
+  assert.equal(bounded.value.page.page_size, 5);
+  assert.deepEqual(
+    bounded.value.actions.map(({ name }) => name),
+    legacy.map(({ name }) => name).sort(),
+  );
+  assert.equal(legacy[0].source, undefined);
+});
+
 test("local actions catalog resolves workflow-backed stored actions", () => {
   const result = resolveSiteActionFromBundle(bundle, "https://acme.example/", {
     action: "acme.card.by_title.open",
@@ -222,6 +333,23 @@ test("local actions catalog recursively merges caller arguments into primitive b
       },
     },
   );
+});
+
+test("local actions catalog preserves declarative cache invalidation policy", () => {
+  const withCache = structuredClone(bundle);
+  const map = JSON.parse(withCache.entries[0].content);
+  map.tools.find((tool) => tool.name === "acme.sections.list").cache = {
+    invalidations: [{ namespace: "acme.sections", entity_id_argument: "section_id" }],
+  };
+  withCache.entries[0].content = JSON.stringify(map);
+
+  const result = resolveSiteActionFromBundle(withCache, "https://acme.example/", {
+    action: "acme.sections.list",
+    arguments: { section_id: "section-1" },
+  });
+  assert.deepEqual(result.cache, {
+    invalidations: [{ namespace: "acme.sections", entity_id_argument: "section_id" }],
+  });
 });
 
 test("local actions catalog lists declared storage files and skill front matter", () => {

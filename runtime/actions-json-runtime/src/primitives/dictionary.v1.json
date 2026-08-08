@@ -548,7 +548,7 @@
       "name": "pointer.click",
       "version": 1,
       "stage": 1,
-      "summary": "Move visibly to viewport coordinates and perform a click.",
+      "summary": "Resolve a fresh locator or use viewport coordinates, then move visibly and click.",
       "capability_class": "portable",
       "portable": true,
       "capabilities": [
@@ -557,9 +557,18 @@
       ],
       "input_schema": {
         "type": "object",
-        "required": [
-          "x",
-          "y"
+        "anyOf": [
+          {
+            "required": [
+              "x",
+              "y"
+            ]
+          },
+          {
+            "required": [
+              "locator"
+            ]
+          }
         ],
         "properties": {
           "x": {
@@ -567,6 +576,10 @@
           },
           "y": {
             "type": "number"
+          },
+          "locator": {
+            "type": "object",
+            "description": "Locator resolved inside pointer.click immediately before pointer-event dispatch. Optional match_index selects one zero-based match after identity filtering and retargeting."
           },
           "button": {
             "type": "string",
@@ -837,6 +850,174 @@
           "scroll_position_changed"
         ]
       }
+    },
+    {
+      "name": "file.transfer.create",
+      "version": 1,
+      "stage": 1,
+      "summary": "Create a bounded, origin-bound upload transfer in extension memory.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["file.transfer"],
+      "input_schema": {
+        "type": "object",
+        "required": ["transfer_id", "direction", "filename", "expected_size", "expected_sha256", "origin"],
+        "properties": {
+          "transfer_id": { "type": "string" },
+          "direction": { "type": "string", "enum": ["upload"] },
+          "filename": { "type": "string" },
+          "mime_type": { "type": "string" },
+          "expected_size": { "type": "integer", "minimum": 0, "maximum": 26214400 },
+          "expected_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "origin": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": { "type": "object", "additionalProperties": true },
+      "adapters": { "extension": { "support": "supported" }, "embed": { "support": "unsupported" } },
+      "errors": ["transfer_id_conflict", "transfer_oversize", "transfer_origin_invalid"],
+      "conformance": { "fixture": "file-transfer-fixture", "assertions": ["metadata_only", "bounded"] }
+    },
+    {
+      "name": "file.transfer.chunk",
+      "version": 1,
+      "stage": 1,
+      "summary": "Append one ordered, retry-safe base64 upload chunk.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["file.transfer"],
+      "input_schema": {
+        "type": "object",
+        "required": ["transfer_id", "index", "base64"],
+        "properties": { "transfer_id": { "type": "string" }, "index": { "type": "integer", "minimum": 0 }, "base64": { "type": "string" } },
+        "additionalProperties": false
+      },
+      "output_schema": { "type": "object", "additionalProperties": true },
+      "adapters": { "extension": { "support": "supported" }, "embed": { "support": "unsupported" } },
+      "errors": ["transfer_chunk_out_of_order", "transfer_chunk_conflict", "transfer_chunk_oversize", "transfer_interrupted"],
+      "conformance": { "fixture": "file-transfer-fixture", "assertions": ["ordered", "replay_idempotent"] }
+    },
+    {
+      "name": "file.transfer.finalize",
+      "version": 1,
+      "stage": 1,
+      "summary": "Verify upload byte size and SHA-256 before browser consumption.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["file.transfer"],
+      "input_schema": { "type": "object", "required": ["transfer_id"], "properties": { "transfer_id": { "type": "string" } }, "additionalProperties": false },
+      "output_schema": { "type": "object", "additionalProperties": true },
+      "adapters": { "extension": { "support": "supported" }, "embed": { "support": "unsupported" } },
+      "errors": ["transfer_size_mismatch", "transfer_hash_mismatch", "transfer_not_found", "transfer_expired", "transfer_interrupted"],
+      "conformance": { "fixture": "file-transfer-fixture", "assertions": ["sha256_verified"] }
+    },
+    {
+      "name": "file.transfer.status",
+      "version": 1,
+      "stage": 1,
+      "summary": "Read metadata-only transfer state without exposing bytes.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["file.transfer"],
+      "input_schema": { "type": "object", "required": ["transfer_id"], "properties": { "transfer_id": { "type": "string" } }, "additionalProperties": false },
+      "output_schema": { "type": "object", "additionalProperties": true },
+      "adapters": { "extension": { "support": "supported" }, "embed": { "support": "unsupported" } },
+      "errors": ["transfer_not_found", "transfer_expired"],
+      "conformance": { "fixture": "file-transfer-fixture", "assertions": ["metadata_only"] }
+    },
+    {
+      "name": "file.transfer.cancel",
+      "version": 1,
+      "stage": 1,
+      "summary": "Cancel a transfer and clear retained bytes.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["file.transfer"],
+      "input_schema": { "type": "object", "required": ["transfer_id"], "properties": { "transfer_id": { "type": "string" } }, "additionalProperties": false },
+      "output_schema": { "type": "object", "additionalProperties": true },
+      "adapters": { "extension": { "support": "supported" }, "embed": { "support": "unsupported" } },
+      "errors": ["transfer_not_found"],
+      "conformance": { "fixture": "file-transfer-fixture", "assertions": ["bytes_cleared"] }
+    },
+    {
+      "name": "file.transfer.upload.consume",
+      "version": 1,
+      "stage": 1,
+      "summary": "Consume a verified upload once and attach it to an exact same-origin file input.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["file.transfer", "file.upload"],
+      "input_schema": {
+        "type": "object",
+        "required": ["transfer_id", "origin", "file_input"],
+        "properties": { "transfer_id": { "type": "string" }, "origin": { "type": "string" }, "file_input": { "type": "object" }, "filename": { "type": "string" }, "mime_type": { "type": "string" } },
+        "additionalProperties": false
+      },
+      "output_schema": { "type": "object", "additionalProperties": true },
+      "adapters": { "extension": { "support": "supported" }, "embed": { "support": "unsupported" } },
+      "errors": ["transfer_origin_mismatch", "transfer_not_ready", "transfer_already_consumed", "transfer_interrupted"],
+      "conformance": { "fixture": "file-transfer-fixture", "assertions": ["single_consume", "exact_origin"] }
+    },
+    {
+      "name": "file.transfer.download.capture",
+      "version": 1,
+      "stage": 1,
+      "summary": "Fetch a same-origin browser resource into a bounded download transfer.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["file.transfer", "file.download"],
+      "input_schema": {
+        "type": "object",
+        "required": ["transfer_id", "url", "origin"],
+        "properties": { "transfer_id": { "type": "string" }, "url": { "type": "string" }, "origin": { "type": "string" }, "filename": { "type": "string" }, "mime_type": { "type": "string" } },
+        "additionalProperties": false
+      },
+      "output_schema": { "type": "object", "additionalProperties": true },
+      "adapters": { "extension": { "support": "supported" }, "embed": { "support": "unsupported" } },
+      "errors": ["transfer_origin_mismatch", "transfer_oversize", "transfer_id_conflict"],
+      "conformance": { "fixture": "file-transfer-fixture", "assertions": ["exact_origin", "bounded"] }
+    },
+    {
+      "name": "file.transfer.upload.complete",
+      "version": 1,
+      "stage": 1,
+      "summary": "Acknowledge successful page-side upload assignment and clear retained bytes.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["file.transfer", "file.upload"],
+      "input_schema": { "type": "object", "required": ["transfer_id", "origin"], "properties": { "transfer_id": { "type": "string" }, "origin": { "type": "string" } }, "additionalProperties": false },
+      "output_schema": { "type": "object", "additionalProperties": true },
+      "adapters": { "extension": { "support": "supported" }, "embed": { "support": "unsupported" } },
+      "errors": ["transfer_origin_mismatch", "transfer_not_ready", "transfer_not_found", "transfer_expired"],
+      "conformance": { "fixture": "file-transfer-fixture", "assertions": ["bytes_cleared", "idempotent"] }
+    },
+    {
+      "name": "file.transfer.download.read_chunk",
+      "version": 1,
+      "stage": 1,
+      "summary": "Read one bounded base64 download chunk by exact index.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["file.transfer", "file.download"],
+      "input_schema": { "type": "object", "required": ["transfer_id", "index"], "properties": { "transfer_id": { "type": "string" }, "index": { "type": "integer", "minimum": 0 } }, "additionalProperties": false },
+      "output_schema": { "type": "object", "additionalProperties": true },
+      "adapters": { "extension": { "support": "supported" }, "embed": { "support": "unsupported" } },
+      "errors": ["transfer_chunk_index_invalid", "transfer_not_ready", "transfer_interrupted"],
+      "conformance": { "fixture": "file-transfer-fixture", "assertions": ["bounded", "ordered"] }
+    },
+    {
+      "name": "file.transfer.download.complete",
+      "version": 1,
+      "stage": 1,
+      "summary": "Acknowledge durable local download completion and clear retained browser bytes.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["file.transfer", "file.download"],
+      "input_schema": { "type": "object", "required": ["transfer_id"], "properties": { "transfer_id": { "type": "string" } }, "additionalProperties": false },
+      "output_schema": { "type": "object", "additionalProperties": true },
+      "adapters": { "extension": { "support": "supported" }, "embed": { "support": "unsupported" } },
+      "errors": ["transfer_not_ready", "transfer_interrupted"],
+      "conformance": { "fixture": "file-transfer-fixture", "assertions": ["bytes_cleared", "replay_idempotent"] }
     },
     {
       "name": "storage.read_file",

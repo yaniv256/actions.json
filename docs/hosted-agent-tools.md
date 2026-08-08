@@ -120,8 +120,8 @@ cases where no reviewed site action exists. They fall into these groups.
 
 - `browser.navigate`, `browser.open_tab`, `browser.close_tab`;
 - `browser.claimed_tabs.list`, `browser.claimed_tabs.activate`;
-- `browser.dismiss_dialog`: dismiss a native JS dialog (alert/confirm/prompt/
-  beforeunload) that is blocking a claimed tab, recovering a wedged tab.
+- `browser.dismiss_dialog`: choose Accept/Leave or Cancel/Stay on a native
+  dialog after `browser.close_tab` has proactively armed recovery.
 
 **Move content between tabs** (see [Transfer Buffer](#transfer-buffer))
 
@@ -224,9 +224,20 @@ actions (these are tab-lifecycle operations, not workflow steps):
   reconnect its runtime;
 - `browser.open_tab`: open a new tab, auto-claim it, and return a ready-to-drive
   runtime;
-- `browser.close_tab`: close a claimed tab (defaults to the active tab; refuses
-  to close the last remaining claimed tab);
-- `browser.dismiss_dialog`: dismiss a native dialog that has wedged a tab.
+- `browser.close_tab`: close a claimed tab (defaults to the active tab). Before
+  mutating the claim or closing the tab, it detects active `beforeunload`
+  handlers that may protect unsaved changes. It refuses by default when a guard
+  is detected or detection is indeterminate, returning a structured
+  `beforeunload_guard_detected` or `beforeunload_guard_unknown` result. Pass
+  `force: true` only when the caller has deliberately accepted the data-loss
+  risk. It also refuses to close the last remaining claimed tab;
+- `browser.dismiss_dialog`: handle a native dialog whose recovery session was
+  armed before the modal opened. `browser.close_tab` arms this automatically
+  when it detects a `beforeunload` guard. For the resulting prompt,
+  `accept: true` chooses Leave and `accept: false` chooses Cancel/Stay. Chrome
+  cannot reliably attach a new debugger session after a native modal is already
+  open, so an independently opened, unarmed dialog returns
+  `dialog_recovery_not_armed` and requires manual browser interaction.
 
 ### Routing when several tabs are connected
 

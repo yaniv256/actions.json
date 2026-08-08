@@ -14,6 +14,7 @@
 //   EVAL_DOC_URL       an existing sandbox Doc to edit (optional; else a new doc is created)
 //   EVAL_BRIDGE_URL    bridge ws (default ws://127.0.0.1:17345/extension)
 //   EVAL_TASK_IDS      comma-separated subset (e.g. "1,2,3") to run a cheap proof first
+import { bridgeAuthHeaders, requireSpawnedBridgeSecret } from '../support/bridge-secret.mjs';
 import { launchEvalEnv } from './harness-env.mjs';
 import { runEval } from './run-eval.mjs';
 import { DOCS_EDIT_TASKS } from '../fixtures/docs-edit-tasks.mjs';
@@ -30,13 +31,16 @@ import { DOCS_EDIT_TASKS } from '../fixtures/docs-edit-tasks.mjs';
 // start/user_message/stop/await_event share one queue-consistent path.
 // (The bridge must be launched in serve-mode so /mcp/tools/call is mounted; EVAL_BRIDGE_URL's
 // host:port is that same bridge — the one the extension is connected to.)
-function makeBridgeHttpClient(bridgeWsUrl, targetUrlContains) {
+// U12b: /mcp/tools/call is gated on the per-installation handshake secret, so the
+// secret is threaded in alongside the bridge URL it authenticates against — the
+// two travel together or the call 401s.
+function makeBridgeHttpClient(bridgeWsUrl, targetUrlContains, secret) {
   // ws://host:port/extension  →  http://host:port/mcp/tools/call
   const u = new URL(bridgeWsUrl);
   const httpBase = `${u.protocol === 'wss:' ? 'https:' : 'http:'}//${u.host}`;
   const call = async (name, args, timeoutMs = 30000) => {
     const res = await fetch(`${httpBase}/mcp/tools/call`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
+      method: 'POST', headers: bridgeAuthHeaders(secret, { 'content-type': 'application/json' }),
       body: JSON.stringify({ name, arguments: args || {}, target_url_contains: targetUrlContains, timeout_ms: timeoutMs }),
     });
     if (!res.ok) throw new Error(`bridge ${name} HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
@@ -91,6 +95,14 @@ async function main() {
   }
   const httpBase = evalBridge ? evalBridge.httpBase : (process.env.EVAL_BRIDGE_HTTP || 'http://127.0.0.1:17346');
 
+  // U12b — the secret for THAT bridge. When this run started it, the secret it
+  // printed into its own log is authoritative; when we attached to an operator's
+  // pre-existing bridge (EVAL_BRIDGE_URL), fall back to the installation config.
+  // Resolved before the eval env launches so a missing secret costs seconds, not
+  // a full Chrome + Docs + Realtime-session startup ending in an opaque 401.
+  const bridgeSecret = requireSpawnedBridgeSecret(evalBridge?.logPath);
+  trace('bridge-secret-resolved', { source: evalBridge ? 'spawned-bridge-log-or-config' : 'installation-config' });
+
   // U4/R1 — best-effort teardown on Ctrl-C / TERM / uncaught. SIGKILL is uncatchable → the
   // next run's pre-clean sweeps it. Registered once; handlers just fire teardown then exit.
   let signalTearingDown = false;
@@ -116,7 +128,7 @@ async function main() {
     } catch (e) { trace('runtimes-err', { error: String(e.message || e) }); }
 
     // Drive runtime.agent.* over the serve-bridge's HTTP tool interface (LOCAL httpBase).
-    const bridge = makeBridgeHttpClient(httpBase.replace(/^http/, 'ws') + '/extension', 'docs.google.com/document/d/');
+    const bridge = makeBridgeHttpClient(httpBase.replace(/^http/, 'ws') + '/extension', 'docs.google.com/document/d/', bridgeSecret);
     trace('drive-begin');
     const result = await runEval({ bridge, cdp: env }, { tasks, targetUrlContains: 'docs.google.com/document/d/' });
     trace('drive-done', { clearsGoal: result.clearsGoal, failed: result.failed, total: result.total });

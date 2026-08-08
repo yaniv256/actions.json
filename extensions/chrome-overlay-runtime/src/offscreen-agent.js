@@ -1,11 +1,30 @@
 import { HostedRealtimeSessionManager } from "./agent/realtime-session-manager.mjs";
 import { RealtimeWebRtcTransportFactory } from "./agent/realtime-webrtc-transport.mjs";
 import { recordAgentMemoryEvent } from "./agent/session-memory-store.mjs";
+import { createAmplitudeEnvelopePublisher } from "./agent/amplitude-envelope.mjs";
+import {
+  AMPLITUDE_BROADCAST_CHANNEL,
+  createAmplitudeRuntimeMessage,
+} from "./agent/amplitude-runtime-message.mjs";
 
 const TARGET = "actions-json-agent-offscreen";
 
 function sendRuntimeMessage(message) {
   return chrome.runtime.sendMessage(message);
+}
+
+function emitStartDiagnostic(message = {}) {
+  return chrome.runtime.sendMessage({
+    type: "actions-json:agent-start-diagnostic",
+    target: "background",
+    ...message,
+  }).catch((error) => {
+    console.warn("Hosted-session diagnostic delivery failed", {
+      trace_id: message.trace_id || null,
+      phase: message.phase || null,
+      error: error?.message || String(error),
+    });
+  });
 }
 
 const storageProxy = {
@@ -64,6 +83,37 @@ const toolExecutor = {
 };
 
 let manager = null;
+let activeStartTraceId = null;
+const amplitudeBroadcastChannel = typeof globalThis.BroadcastChannel === "function"
+  ? new globalThis.BroadcastChannel(AMPLITUDE_BROADCAST_CHANNEL)
+  : null;
+
+/**
+ * Amplitude envelopes use a named same-extension channel so every visible
+ * agent surface receives them. The publisher throttles to ~15Hz internally;
+ * a per-frame stream would be needless load on either messaging path.
+ *
+ * `sendMessage` rejects whenever no receiver is listening (a closed agent surface
+ * is the normal case), so every publish swallows its rejection exactly like the
+ * session-event and expenditure broadcasts above.
+ */
+function publishAmplitudeMessage(payload) {
+  try {
+    amplitudeBroadcastChannel?.postMessage(payload);
+  } catch (error) {
+    console.warn("[offscreen-agent] amplitude broadcast failed", error);
+  }
+  chrome.runtime.sendMessage(createAmplitudeRuntimeMessage(payload)).catch(() => {});
+}
+
+function createAmplitudePublisher() {
+  try {
+    return createAmplitudeEnvelopePublisher({ publish: publishAmplitudeMessage });
+  } catch (error) {
+    console.warn("[offscreen-agent] amplitude publisher unavailable", error);
+    return null;
+  }
+}
 
 const toolNames = (tools = []) =>
   (Array.isArray(tools) ? tools : [])
@@ -74,7 +124,9 @@ function getManager() {
   if (!manager) {
     manager = new HostedRealtimeSessionManager({
       storage: storageProxy,
-      transportFactory: new RealtimeWebRtcTransportFactory(),
+      transportFactory: new RealtimeWebRtcTransportFactory({
+        amplitudePublisherFactory: createAmplitudePublisher,
+      }),
       toolExecutor,
       eventObserver(event) {
         chrome.runtime.sendMessage({
@@ -96,6 +148,12 @@ function getManager() {
             meter,
           }).catch(() => {});
         }
+      },
+      diagnosticObserver(event) {
+        return emitStartDiagnostic({
+          ...event,
+          trace_id: event?.trace_id || activeStartTraceId,
+        });
       },
     });
   }
@@ -224,8 +282,47 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.target !== TARGET) {
     return false;
   }
+  const traceId = typeof message?.trace_id === "string" ? message.trace_id : null;
+  const startedAt = Date.now();
+  activeStartTraceId = traceId;
+  emitStartDiagnostic({
+    trace_id: traceId,
+    phase: "offscreen.listener.received",
+    ok: true,
+    elapsed_ms: 0,
+  });
   handleCommand(message)
-    .then((response) => sendResponse(response))
-    .catch((error) => sendResponse({ ok: false, error: error.message || String(error) }));
+    .then(async (response) => {
+      await emitStartDiagnostic({
+        trace_id: traceId,
+        phase: "offscreen.handler.resolved",
+        ok: response?.ok === true,
+        state_status: response?.state?.status || null,
+        elapsed_ms: Date.now() - startedAt,
+      });
+      sendResponse({
+        ...response,
+        responder: "offscreen-agent",
+        trace_id: traceId,
+      });
+      activeStartTraceId = null;
+    })
+    .catch(async (error) => {
+      await emitStartDiagnostic({
+        trace_id: traceId,
+        phase: "offscreen.handler.rejected",
+        ok: false,
+        error_name: error?.name || null,
+        error_message: error?.message || String(error),
+        elapsed_ms: Date.now() - startedAt,
+      });
+      sendResponse({
+        ok: false,
+        error: error?.message || String(error),
+        responder: "offscreen-agent",
+        trace_id: traceId,
+      });
+      activeStartTraceId = null;
+    });
   return true;
 });

@@ -1,5 +1,5 @@
 // LIVE STRESS harness for keyboard.press_gated on a FULL, REAL article — not a
-// toy 8-word fixture. Yaniv's directive (2026-07-07): "test in the harness in a
+// toy 8-word fixture. the product owner directive (2026-07-07): "test in the harness in a
 // real way on Playwright and you'll find more bugs before shipping." A real
 // article carries what a toy can't: contractions (It's, isn't), sentence-final
 // punctuation the a11y region strips (you. → "you"), capitalized sentence starts,

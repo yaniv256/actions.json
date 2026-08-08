@@ -51,6 +51,30 @@ primitives, selectors, target descriptions, and result schemas.
 `tools` may be empty when the file only provides metadata or context, but most
 useful maps declare one or more actions.
 
+## Limit A Map To One Route
+
+A site can have several action maps for different page surfaces. Add a
+top-level `scope.url_matches` when a map should only be available on one route:
+
+```json
+{
+  "protocol": "actions.json",
+  "version": 1,
+  "scope": {
+    "url_matches": "https://www.linkedin.com/messaging/*"
+  },
+  "tools": []
+}
+```
+
+The bridge applies this pattern to every action, declared file, workflow, and
+state projection in the map. `actions.site` listing and calls reject those
+declarations on non-matching pages. The pattern supports `*` wildcards and is
+matched against the selected runtime's full URL or a URL-like
+`target_url_contains` fragment. Host-only and human-readable tab-title routing
+remain available for selecting a live runtime, but a full page URL gives the
+strongest applicability check.
+
 ## A Small Action Example
 
 {% raw %}
@@ -139,8 +163,61 @@ Beyond tools, two more implemented blocks matter for real maps:
   before operating.
 - `state_projections` turn DOM records into compact logical JSON that agents
   read through `actions.site` modes `state_read`, `state_summary`, and
-  `state_diff` for orientation and post-mutation verification. See the schema
-  reference for the projection shape.
+  `state_diff` for orientation and post-mutation verification. Large collections
+  should expose schema-declared, parameterized summaries so callers can pass
+  `summary_arguments` such as a list name, offset, and bounded page size. See
+  the schema reference for the projection shape.
+
+### Maintained projection fields
+
+A state projection may opt into the extension's bounded durable cache when a
+field is not available on every compact page surface. The cache is never an
+ambient global object: the runtime scopes entries by normalized site host and
+durable agent-group ownership, and a projection can read only namespaces it
+declares.
+
+```json
+{
+  "name": "trello.card",
+  "cache": {
+    "read_namespaces": ["trello.cards"],
+    "writes": [
+      {
+        "namespace": "trello.cards",
+        "entries": "{% [{'entity_id': state.id, 'value': {'last_touched_at': state.last_touched_at}, 'content_hash': state.activity_hash, 'observed_at': state.observed_at, 'expires_at': state.expires_at, 'provenance': 'visible-card-activity'}] %}"
+      }
+    ]
+  }
+}
+```
+
+The `cache` object exposed to snapshot and summary JSONata contains only the
+declared `read_namespaces`. Cache writes are data returned by the projection;
+page code cannot write browser storage directly. The extension validates and
+persists each entry with a stable entity ID, content hash, observation time,
+expiry, provenance, strict value-size limit, deterministic eviction, and
+secret-material rejection. Reads expose `freshness` as `known` or `stale`;
+maps must represent missing entries as `unknown` rather than inventing values.
+
+A mutating tool can invalidate maintained fields after successful execution:
+
+```json
+{
+  "name": "trello.card.title.set",
+  "cache": {
+    "invalidations": [
+      { "namespace": "trello.cards", "entity_id_argument": "card_id" }
+    ]
+  }
+}
+```
+
+When the named stable-ID argument is absent, the runtime conservatively
+invalidates that namespace for the current site and agent group. Invalidation
+also runs when workflow steps completed but independent verification was
+indeterminate, because the website mutation may already have committed. Cache
+failure does not turn an already-committed website mutation into a retry-safe
+failure; the action result reports projection-cache freshness separately.
 
 ## Actions And Primitives
 

@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "actions.json delegated MessagePort spike",
+  "version": "0.0.1",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://127.0.0.1/*"],
+      "js": ["broker.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ]
+}

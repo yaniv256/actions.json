@@ -170,7 +170,7 @@ output, apply every principle above to it.** Concretely:
 The rule to carry: **every surface the blind agent reads — the maps AND the MCP's
 own tool/status/error output — obeys the same UX laws. If operating the tool
 requires the agent to compensate for a misleading surface, the surface is the
-defect, not the agent.** (Learned: investigations/trello-drag-504-claim-loss-wedge;
+defect, not the agent.** (Learned from a Trello drag timeout investigation;
 see [[mcp-is-my-ui-blame-the-interface]].)
 
 ## Mental Model
@@ -226,6 +226,10 @@ Choose the bridge address based on where the browser runtime actually runs.
   actions-json-mcp mcp --bind 0.0.0.0:17345
   ```
 
+  **This binds every interface.** `GET /runtimes` takes no credential and
+  reports the URL and title of every authorized tab, so require the Tailscale
+  network below plus a host firewall, and never expose 17345 publicly.
+
   Then find the agent host's Tailscale IP and use it in the extension config:
 
   ```bash
@@ -276,10 +280,14 @@ coding-agent host, the normal launch shape is:
 cd /path/to/actions.json.dev
 cargo build --manifest-path mcp/actions-json-mcp/Cargo.toml
 ./mcp/target/debug/actions-json-mcp mcp \
-  --bind 0.0.0.0:17345 \
+  --bind 127.0.0.1:17345 \
   --actions /path/to/actions.json.dev/extensions/chrome-overlay-runtime/actions/overlay.actions.json \
   --storage-root /path/to/actions.json.storage
 ```
+
+Use `0.0.0.0:17345` only when Chrome runs on a different machine, and only
+behind a firewall and a private network — it binds every interface, and
+unauthenticated `GET /runtimes` discloses every authorized tab's URL and title.
 
 Then configure the extension with:
 
@@ -504,9 +512,16 @@ Expected stable flow:
 
    ```bash
    curl -s http://127.0.0.1:17345/mcp/tools/call \
+     -H "authorization: Bearer $ACTIONS_JSON_BRIDGE_SECRET" \
      -H 'content-type: application/json' \
      --data '{ "name": "storage.list", "target_url_contains": "example.com", "arguments": {} }'
    ```
+
+   `/actions`, `/mcp/tools/list`, and `/mcp/tools/call` require the
+   per-installation handshake secret the bridge prints at startup
+   (`extension handshake secret: <secret>`, also stored as
+   `bridge_handshake_secret` in `.actions-json.local.json`); without it they
+   answer `401 bridge_secret_missing`.
 
 4. If storage changed, sync/reload the storage bundle without restarting the
    bridge:
@@ -586,6 +601,7 @@ envelope:
 
 ```bash
 curl -sS http://<bridge-host>:17345/mcp/tools/call \
+  -H "authorization: Bearer $ACTIONS_JSON_BRIDGE_SECRET" \
   -H 'content-type: application/json' \
   --data '{
     "name": "runtime.session.log",
@@ -825,7 +841,7 @@ do not assert a limit from memory.
 > wrong. Verify the limit against `workflow-actions.mjs`, not your mental model.
 > (Real instance, 2026-07-06: built a whole `cursor.to_paragraph` primitive + cut
 > a release on the false belief "workflows can't loop" — `for_each` had existed
-> all along. See `investigations/workflow-loop-capability-blindspot.md`.)
+> all along. See the internal investigation record.)
 
 ### Compound Workflow Actions
 
@@ -1013,6 +1029,120 @@ cause it.
   chase a phantom timing/primitive difference. Validate through the same path the
   action runs in production (the packaged workflow via `actions.site`); a manual
   success that depends on your observation tool is not a passing recipe.
+
+### An Unintended Editor Mutation Is An Incident — Preserve Undo Before Recovery
+
+When an editor mutation changes the wrong field, replaces too much content, or
+otherwise produces an unintended result, **freeze the surface immediately**.
+Ordinary operating guidance such as “reload and verify,” “retry,” or “replace
+from the source” is suspended. The editor's undo/version history and the live
+document are now incident evidence.
+
+Run this recovery order without skipping steps:
+
+1. **Stop all further writes.** Do not retry the failed action, reconstruct
+   media, clean up formatting, or continue the user's task.
+2. **Preserve non-mutating evidence.** Read the current logical projection,
+   capture the exact active element/editing host, record the current URL/runtime,
+   and preserve a screenshot or export when it will not change focus. Do not use
+   an observation tool whose activation side effects are uncalibrated.
+3. **Prove focus before undo.** A failed `Control+Z` only proves undo failed in
+   that focus context. Resolve and explicitly focus the semantic editor that
+   owned the unintended mutation, then prove that field is `activeElement` (or
+   the application's equivalent editing host) before issuing one trusted undo.
+4. **Verify after each undo.** Read a prior-state sentinel, structural counts,
+   and preservation facts. If the wrong field had focus, refocus the correct
+   editor and retry; do not infer that history is absent from a wrong-focus
+   failure.
+5. **Do not reload, navigate, close the tab, broadly replace content, or invoke
+   site recovery until correct-target undo and any site-native version history
+   have been exhausted.** Those operations can destroy the only high-fidelity
+   recovery path. This prohibition overrides an action output's normal reload
+   `next_step`.
+6. **Escalate before reconstruction.** If undo/version history cannot restore
+   the prior state, report the exact remaining delta and obtain user direction
+   before any whole-document replacement on a shared artifact.
+
+Never test a new rich-text write mechanism on the user's only live artifact.
+Use a disposable draft, duplicate, fixture editor, or reversible scratch field;
+predict both the success and failure outcomes before the test. A mechanism that
+has not demonstrated correct target identity, recipient focus, and rollback on
+a disposable surface is not ready for production content.
+
+### Mutation Scope Is An Interface Contract, Not Operator Memory
+
+“The agent pasted into the wrong field” is an interface diagnosis, not a user
+error. A safe mutation surface makes the wrong scope difficult or impossible:
+
+- Consequential text primitives require an explicit semantic target. An
+  `activeElement` fallback must be a separately named, deliberate opt-in for
+  surfaces such as canvas editors where no stable receiving locator exists.
+- The primitive resolves the recipient once, proves it is connected and
+  editable, focuses it, and attests that exact identity immediately before
+  dispatch. A prior click or separate `dom.focus` is not a focus guarantee;
+  another human action, rerender, or transient surface can steal focus between
+  steps.
+- The result names the actual recipient (document/frame, tag, stable id/class,
+  role/label) and proves the intended control changed. `pasted:true` or
+  `inserted_length` without recipient identity and a target delta is a lying
+  success surface.
+- Standard inputs and textareas use their scoped native-value/input path. Do
+  not dispatch a bubbling/composed synthetic paste merely to write plain text
+  into them: an ancestor rich-text handler can consume that event and mutate a
+  different editing host.
+- Each site action declares an **allowed write-set** and preservation
+  invariants. A caption edit may change only caption `i`; title, article body,
+  headings, image count/order, embeds, and sibling captions must remain equal.
+  Capture a fresh before-state, mutate, capture after-state, and reject any
+  patch outside the allowed paths.
+- A postcondition that proves only the desired new value is insufficient when a
+  wrong-scope mutation is possible. Prove preservation as well as change.
+- A selection primitive must make its scope visible in its result. Return the
+  complete selected content, exact character length, owning editable region,
+  active element, frame identity, and ambiguity. Add an explicit
+  `large_selection` warning when the selection crosses a conservative threshold.
+  “Selected successfully” is not actionable evidence: the next delete, paste,
+  or overtype must be able to show exactly what it would replace.
+- For destructive operations, prefer a selection receipt that binds the
+  selection content hash, owner identity, and document/version observation to
+  the following write. If the selection or document changes, fail with a state
+  conflict instead of consuming stale scope.
+
+If the runtime cannot atomically enforce recipient identity and the allowed
+write-set, the map must treat the action as unsafe and test only on a disposable
+artifact. Do not compensate with prose that asks the operator to remember the
+scope perfectly forever; improve the interface.
+
+### Shared Documents Have Multiple Writers — A Read Is Not Authority
+
+When a human and an agent can both edit a document, assume the document is a
+multi-writer system even if the website exposes no collaboration indicator.
+Every agent read is a **timestamped observation**, not a lock and not proof that
+the agent knows the complete current state. The human may edit, move media, or
+reformat content between any two tool calls.
+
+- Never call an earlier projection, local Markdown file, generated HTML, or
+  agent memory “the current document” without a fresh equality proof.
+- A local manuscript is a fallback source, not a restoration point. It cannot
+  contain human edits the agent never observed.
+- Before any broad replacement, preserve the complete live version when
+  possible, read it again immediately before mutation, compare it with the
+  proposed source, and treat every unexplained delta as another writer's work.
+- Require an optimistic-concurrency token/state hash when the action can support
+  one. If the live state changed since planning, stop with `state_conflict`
+  instead of overwriting.
+- If exact comparison or preservation is unavailable, ask before replacing the
+  shared artifact. Authorization to edit one field is not authorization to
+  overwrite unknown changes elsewhere.
+- Prefer the site's own undo/version history during recovery because it is the
+  only source likely to include both the human's and the agent's latest changes.
+
+For whole-document replacement generated through a transform, preflight the
+payload before mutation: verify expected structural counts and distinctive
+sentinels, assert that editor-only cues/secrets/forbidden markers are absent,
+and diff the transformed source against the preserved live document. A
+successful transform command is not evidence that the replacement payload is
+the intended collaborative state.
 
 When supported by the runtime, add `workflow.x_state_machine` metadata with the
 states the workflow implements (`precondition`, `readiness`, `mutation`,
@@ -1437,6 +1567,22 @@ Example:
           "name": "agent_context",
           "max_bytes": 12000,
           "expression": "{% {'lists': $append([], $map(state.board.lists, function($list) { {'name': $list.name, 'card_count': $count($list.cards)} }))} %}"
+        },
+        {
+          "name": "list_page",
+          "description": "Read one named list in bounded pages.",
+          "max_bytes": 12000,
+          "input_schema": {
+            "type": "object",
+            "required": ["list_name"],
+            "additionalProperties": false,
+            "properties": {
+              "list_name": { "type": "string", "minLength": 1 },
+              "offset": { "type": "integer", "minimum": 0 },
+              "limit": { "type": "integer", "minimum": 1, "maximum": 10 }
+            }
+          },
+          "expression": "{% ( $list := state.board.lists[name = $$.input.list_name][0]; $offset := $exists($$.input.offset) ? $$.input.offset : 0; $limit := $exists($$.input.limit) ? $$.input.limit : 10; $cards := $list.cards; $page := $filter($cards, function($card, $index) { $index >= $offset and $index < $offset + $limit }); {'list_name': $list.name, 'offset': $offset, 'limit': $limit, 'total_count': $count($cards), 'has_more': $offset + $limit < $count($cards), 'next_offset': $offset + $limit < $count($cards) ? $offset + $limit : null, 'cards': $count($page) > 0 ? $append([], $map($page, function($card) { {'title': $card.title, 'url': $card.url} })) : []} ) %}"
         }
       ]
     }
@@ -1456,6 +1602,8 @@ Author projections so the agent can call:
 
 - `actions.site` with `mode=list` to discover available projections;
 - `actions.site` with `mode=state_summary` for compact orientation;
+- `actions.site` with `mode=state_summary`, a declared `summary_name`, and
+  schema-valid `summary_arguments` for bounded filtering or pagination;
 - `actions.site` with `mode=state_read` for exact state;
 - `actions.site` with `mode=state_diff` to see what changed since the last
   full state snapshot.
@@ -1463,6 +1611,9 @@ Author projections so the agent can call:
 Prefer `state_summary` before full `state_read` when the state might be large.
 If the runtime returns `state_payload_too_large`, narrow the projection or use a
 summary instead of trying to force a huge payload through the data channel.
+The caller's `max_bytes` can lower a summary's response budget but cannot raise
+the summary's declared `max_bytes`; use bounded `summary_arguments` instead of
+shipping one ever-growing summary.
 
 ### Iterate Toward A Minimal State Representation
 
@@ -1492,7 +1643,8 @@ The iteration loop:
    engine enforces hard byte budgets on expression output, full state, and
    summaries; a projection near those limits on a normal page will fail on a
    busy one. Summaries must fit their declared `max_bytes` with room to
-   spare.
+   spare. For collections whose cardinality can grow, declare an input schema
+   and return a page with explicit `total_count`, `has_more`, and `next_offset`.
 5. **Re-run and compare.** After each narrowing pass, run `state_read` again
    and check the byte size dropped while the verified entity counts stayed
    exact. Then run a mutation and `state_diff` to confirm the patch describes
@@ -2446,7 +2598,7 @@ three-level blame — the proximate code, the **anti-pattern** (search every oth
 action for the same class of defect), and the **coding-style/skill** deficiency
 that let it be authored (fix THIS document so the class can't recur — see
 [[blame-level-3-lives-in-the-skill]]). Write the investigation to
-`investigations/<slug>.md`; if the map lives on a task board, the investigation
+the private investigation record; if the map lives on a task board, the investigation
 card should cite that file. This is not overhead for a broken selector you can see;
 it is the correct response the moment a map bug becomes a *class* of bug or resists
 a first cheap fix. (This whole authoring role is "fix the tool, not the task" — and
@@ -2916,7 +3068,7 @@ actions.json.storage/
   > extension's copy of that function returns `rootScopeSitePaths` and **nothing
   > reads it**; the only consumer is the bookmarklet, and it merges. No runtime
   > implements map-level shadowing. The rule was traced to evidence **E1** in
-  > `investigations/storage-scope-model-blindspot.md`, which recorded the
+  > the internal investigation record, which recorded the
   > ordering as "High" confidence without checking a consumer — an instrument
   > error that then propagated into this skill and nearly caused a 98-action
   > public map to be migrated into private "for compliance."
@@ -2962,8 +3114,8 @@ redacted, reusable maps, overlays, examples, and skills.
 
 > This is the second-of-a-class blindspot: the system's operational invariants
 > (what wins, where to edit) must be a scannable rule at the decision point, not
-> deep prose. See `investigations/storage-scope-model-blindspot.md` and its sibling
-> `investigations/workflow-loop-capability-blindspot.md`. Before editing/adding a
+> deep prose. See the internal investigation record and its sibling
+> the internal investigation record. Before editing/adding a
 > map action — or whenever a map exists in more than one scope — also read
 > `references/docs/storage-visibility-scopes.md`.
 
@@ -3092,6 +3244,12 @@ Before calling a site map ready:
   uniqueness *in both the present and absent states of its surface*, and (for comma-lists) that no
   alternative is an ancestor of another. A locator that has never been counted has never been
   checked.
+- Rich-text mechanisms were validated on a disposable artifact before touching
+  unique user content, including exact receiving-control identity and rollback.
+- An unintended editor mutation freezes retries and reloads; correct-target
+  focus plus undo/version-history recovery is exhausted before reconstruction.
+- Broad replacements preserve and compare the fresh live document, account for
+  concurrent human edits, and preflight expected plus forbidden sentinels.
 - Existing stored actions were tried before debugger fallback.
 - Any debugger discovery was converted into `actions.json`.
 - The updated storage bundle was synced/reloaded without a bridge restart.

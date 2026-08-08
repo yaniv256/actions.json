@@ -1,7 +1,7 @@
 {
   "name": "@actions-json/bridge",
-  "version": "0.1.204",
-  "bridgeBinaryVersion": "0.1.204",
+  "version": "0.1.217",
+  "bridgeBinaryVersion": "0.1.217",
   "description": "Run the actions.json MCP bridge with npx — no Rust toolchain required. Downloads the prebuilt actions-json-mcp binary, bundles the primitive dictionary, and creates your storage workspace on first run.",
   "license": "MIT",
   "repository": {
@@ -12,6 +12,9 @@
   "homepage": "https://yaniv256.github.io/actions.json/getting-started.html",
   "bin": {
     "actions-json-bridge": "bin/cli.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
   },
   "files": [
     "bin/",

@@ -368,7 +368,7 @@ mod windows_run {
 
         // 4) WS relay on 127.0.0.1:wsPort. Client frames -> pipe; pipe frames -> clients (above).
         // A stale helper/relay from a prior run can still hold this fixed port (EADDRINUSE / os
-        // error 10048) — the incident this guard closes (investigations/rust-helper-cdp-pipe-oneway.md).
+        // error 10048) — the incident this guard closes (the internal investigation record).
         // Free any prior holder, then bind with a clear, actionable error if it's still taken.
         free_tcp_port(ws_port).await;
         let listener = match tokio::net::TcpListener::bind(("127.0.0.1", ws_port)).await {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import vm from "node:vm";
 
 // Regression guard for the 2026-07-03 fresh-tab routing incident.
 //
@@ -17,11 +18,102 @@ const source = await readFile(
   "utf8",
 );
 
-function bodyOf(fnDecl, span = 1200) {
+function bodyOf(fnDecl) {
   const idx = source.indexOf(fnDecl);
   assert.ok(idx >= 0, `expected to find ${fnDecl}`);
-  return source.slice(idx, idx + span);
+  const arrow = source.indexOf("=>", idx);
+  assert.ok(arrow >= 0, `expected ${fnDecl} to be an arrow function`);
+  const brace = source.indexOf("{", arrow);
+  assert.ok(brace >= 0, `expected ${fnDecl} to have a body`);
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  for (let i = brace; i < source.length; i += 1) {
+    const ch = source[i];
+    const next = source[i + 1];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "/" && next === "/") {
+      i = source.indexOf("\n", i);
+      if (i < 0) break;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i = source.indexOf("*/", i + 2) + 1;
+      continue;
+    }
+    if (ch === "{") depth += 1;
+    if (ch === "}" && --depth === 0) return source.slice(idx, i + 1);
+  }
+  assert.fail(`could not find the end of ${fnDecl}`);
 }
+
+function executableBridgeRouteResolver() {
+  const grab = (pattern, label) => {
+    const match = source.match(pattern);
+    assert.ok(match, `expected to extract ${label}`);
+    return match[0];
+  };
+  const runtimeId = grab(
+    /const runtimeIdFromBridgeItem = \(item\) =>[\s\S]*?\n  null;/,
+    "runtimeIdFromBridgeItem",
+  );
+  const runtimeKey = grab(
+    /const runtimeKeyFromBridgeItem = \(item\) =>[\s\S]*?\n  null;/,
+    "runtimeKeyFromBridgeItem",
+  );
+  const resolve = grab(
+    /const resolveBridgeItemTabId = \(item\) => \{[\s\S]*?\n\};/,
+    "resolveBridgeItemTabId",
+  );
+  const context = { Map, Set, Number, Array };
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(`
+    const bridgeRuntimeRoutes = new Map();
+    let bridgeState = { activeRuntimeTabIds: new Set(), tabId: null };
+    ${runtimeId}
+    ${runtimeKey}
+    ${resolve}
+    globalThis.__resolver = resolveBridgeItemTabId;
+    globalThis.__routes = bridgeRuntimeRoutes;
+    globalThis.__setBridgeState = (value) => { bridgeState = value; };
+  `, context);
+  return {
+    resolve: context.__resolver,
+    routes: context.__routes,
+    setBridgeState: context.__setBridgeState,
+  };
+}
+
+test("explicit bridge runtime identity never falls back to an unrelated active tab", () => {
+  const { resolve, routes, setBridgeState } = executableBridgeRouteResolver();
+  routes.set("runtime_id:known-runtime", 41);
+  routes.set("runtime_key:chrome-tab:41", 41);
+  setBridgeState({ activeRuntimeTabIds: new Set([99]), tabId: 99 });
+
+  assert.equal(resolve({ runtime_id: "missing-runtime" }), null);
+  assert.equal(resolve({ runtime_key: "chrome-tab:99" }), null);
+  assert.equal(resolve({ runtime_id: "known-runtime", runtime_key: "chrome-tab:99" }), null);
+  assert.equal(resolve({ runtime_id: "known-runtime", runtime_key: "chrome-tab:41" }), 41);
+});
+
+test("bridge active-tab fallback is reserved for requests without explicit identity", () => {
+  const { resolve, setBridgeState } = executableBridgeRouteResolver();
+  setBridgeState({ activeRuntimeTabIds: new Set([73]), tabId: 88 });
+  assert.equal(resolve({ type: "action_call" }), 73);
+
+  setBridgeState({ activeRuntimeTabIds: new Set([73, 74]), tabId: 88 });
+  assert.equal(resolve({ type: "action_call" }), 88);
+});
 
 test("connectClaimedTab records the local route (covers claim/navigate/activate/reconnect)", () => {
   const body = bodyOf("const connectClaimedTab = async (tabId, claim) =>");
@@ -32,7 +124,7 @@ test("connectClaimedTab records the local route (covers claim/navigate/activate/
 });
 
 test("openClaimedTab records the local route (does not funnel through connectClaimedTab)", () => {
-  const body = bodyOf("const openClaimedTab = async (message = {}) =>", 2600);
+  const body = bodyOf("const openClaimedTab = async (message = {}) =>", 6500);
   assert.ok(
     /rememberRuntimeRegistration\(/.test(body),
     "openClaimedTab must remember the complete runtime registration after sending it to the bridge",
@@ -40,7 +132,7 @@ test("openClaimedTab records the local route (does not funnel through connectCla
 });
 
 test("closeClaimedTab clears the local routes for the closed tab", () => {
-  const body = bodyOf("const closeClaimedTab = async (message = {}) =>", 1400);
+  const body = bodyOf("const closeClaimedTab = async (message = {}) =>", 3400);
   assert.ok(
     /forgetRuntimeRoutesForTab\(/.test(body),
     "closeClaimedTab must call forgetRuntimeRoutesForTab so closed tabs don't leak stale routes",
@@ -48,19 +140,19 @@ test("closeClaimedTab clears the local routes for the closed tab", () => {
 });
 
 test("onRemoved handler clears the local routes for the removed tab", () => {
-  const idx = source.indexOf("chrome.tabs.onRemoved.addListener");
+  const idx = source.indexOf("if (chrome.tabs?.onRemoved?.addListener)");
   assert.ok(idx >= 0, "onRemoved listener must exist");
   // Window widened for the U2 runtime_removed emit that now precedes the
   // forget call inside the handler; the assertion (onRemoved forgets the
   // routes) is unchanged.
-  const body = source.slice(idx, idx + 1600);
+  const body = source.slice(idx, idx + 3200);
   assert.ok(
     /forgetRuntimeRoutesForTab\(/.test(body),
     "onRemoved must call forgetRuntimeRoutesForTab for externally-closed tabs",
   );
 });
 
-// LIVE-CAUGHT REGRESSION (2026-07-09, ext 0.1.187 on Yaniv's browser):
+// LIVE-CAUGHT REGRESSION (2026-07-09, ext 0.1.187 on the product owner browser):
 // browser.close_tab did NOT reap the runtime instantly — the bridge only aged it
 // out via the 30s TTL sweep. Root cause: closeClaimedTab called
 // forgetRuntimeRoutesForTab(tabId) and THEN chrome.tabs.remove(tabId), so by the
@@ -71,7 +163,7 @@ test("onRemoved handler clears the local routes for the removed tab", () => {
 // harness (Playwright page.close tore down the whole WS => connection-teardown
 // reap) exercised this ordering. Guard it here.
 test("closeClaimedTab emits runtime_removed BEFORE forgetting the routes", () => {
-  const body = bodyOf("const closeClaimedTab = async (message = {}) =>", 1400);
+  const body = bodyOf("const closeClaimedTab = async (message = {}) =>", 3400);
   const emitIdx = body.indexOf("runtime_removed");
   const forgetIdx = body.indexOf("forgetRuntimeRoutesForTab(");
   assert.ok(
@@ -173,7 +265,7 @@ test("forgetRuntimeRoutesForTab exists and deletes by mapped tabId", () => {
 test("the relayed-ready loop also records routes (not just bridge registration)", () => {
   const idx = source.indexOf("for (const item of bridgeState.relayedReadyItems");
   assert.ok(idx >= 0, "relayed-ready loop must exist");
-  const body = source.slice(idx, idx + 300);
+  const body = source.slice(idx, source.indexOf("const pendingOutputFlush", idx));
   assert.ok(
     /rememberRuntimeRegistration\(/.test(body),
     "relayed runtimes must remember the complete registration, matching the single-readyItem path",

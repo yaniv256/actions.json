@@ -1,12 +1,12 @@
 {
  "_comment": [
-  "Captured live 2026-07-10 from trello.com/c/TcE3br7d, an open card modal with one",
+  "Captured from a Trello card modal with one",
   "checklist (9 items, 89%). browser.extract_elements {item_selector:\"[data-testid]\"}",
   "scoped to the card-back-name ancestor. READ-ONLY capture; no mutation.",
   "",
   "WHY THIS FILE EXISTS: three static-lint hypotheses for catching dead testids were",
-  "each refuted by a positive control (investigations/trello-checklist-operations-",
-  "unreliable.md). A selector string cannot say whether a testid exists, nor whether",
+  "each refuted by a positive control. A selector string cannot say whether a testid",
+  "exists, nor whether",
   "one testid WRAPS another -- containment lives only in the rendered DOM. This is that",
   "DOM, frozen. With it, 'does this testid exist' is a lookup instead of a guess.",
   "",

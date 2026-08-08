@@ -273,3 +273,132 @@ test("Realtime WebRTC transport closes peer connection, data channel, audio trac
   assert.equal(pc.closed, true);
   assert.equal(audio.removed, true);
 });
+
+function createAudioTransportHarness(remoteOutputAdapter = null) {
+  const microphoneTrack = { enabled: true, stop() {} };
+  const microphoneStream = {
+    getTracks: () => [microphoneTrack],
+    getAudioTracks: () => [microphoneTrack],
+  };
+  const audio = {
+    autoplay: false,
+    muted: false,
+    srcObject: null,
+    plays: 0,
+    play() { this.plays += 1; return Promise.resolve(); },
+    remove() { this.removed = true; },
+  };
+  const pc = createMockPeerConnection();
+  const factory = new RealtimeWebRtcTransportFactory({
+    fetchImpl: async (url) => ({
+      ok: true,
+      async json() { return { value: "ek_mock_client_secret" }; },
+      async text() { return "mock-answer-sdp"; },
+    }),
+    rtcPeerConnectionFactory: () => pc,
+    mediaDevices: { async getUserMedia() { return microphoneStream; } },
+    documentRef: {
+      createElement() { return audio; },
+      body: { appendChild() {} },
+    },
+    remoteOutputAdapter,
+  });
+  return {
+    audio,
+    pc,
+    remoteOutputAdapter,
+    transport: factory.create({ apiKey: "sk-proj-secret", model: "gpt-realtime-2", textOnly: false }),
+  };
+}
+
+test("Realtime WebRTC transport keeps direct audio as the default remote output", async () => {
+  const { audio, pc, transport } = createAudioTransportHarness();
+  await transport.connect();
+  const remoteStream = { id: "remote-stream" };
+
+  await pc.ontrack({ track: { id: "assistant-audio" }, streams: [remoteStream] });
+
+  assert.equal(audio.srcObject, remoteStream);
+  assert.equal(audio.muted, false);
+  assert.equal(audio.plays, 1);
+});
+
+test("a ready remote-output adapter suppresses duplicate direct audio only after a successful handoff", async () => {
+  const calls = [];
+  const adapter = {
+    isReady: () => true,
+    async attachTrack(track) { calls.push(["attach", track.id]); return true; },
+    setMuted(muted) { calls.push(["mute", muted]); },
+    async detach() { calls.push(["detach"]); },
+  };
+  const { audio, pc, transport } = createAudioTransportHarness(adapter);
+  await transport.connect();
+
+  await pc.ontrack({ track: { id: "assistant-audio" }, streams: [{ id: "remote-stream" }] });
+
+  assert.equal(audio.muted, true);
+  assert.deepEqual(calls, [["attach", "assistant-audio"], ["mute", false]]);
+  await transport.setOutputMuted(true);
+  assert.deepEqual(calls.at(-1), ["mute", true]);
+  await transport.close();
+  assert.deepEqual(calls.at(-1), ["detach"]);
+});
+
+test("a rejected avatar handoff immediately restores direct audio fallback", async () => {
+  const adapter = {
+    isReady: () => true,
+    async attachTrack() { return false; },
+    setMuted() {},
+    async detach() {},
+  };
+  const { audio, pc, transport } = createAudioTransportHarness(adapter);
+  await transport.connect();
+
+  await pc.ontrack({ track: { id: "assistant-audio" }, streams: [{ id: "remote-stream" }] });
+
+  assert.equal(audio.muted, false);
+  assert.equal(audio.plays, 1);
+});
+
+test("an adapter runtime failure restores the already-armed direct audio sink", async () => {
+  let fallback;
+  const adapter = {
+    isReady: () => true,
+    async attachTrack() { return true; },
+    setMuted() {},
+    setFallbackHandler(handler) { fallback = handler; },
+    async detach() {},
+  };
+  const { audio, pc, transport } = createAudioTransportHarness(adapter);
+  await transport.connect();
+  await pc.ontrack({ track: { id: "assistant-audio" }, streams: [{ id: "remote-stream" }] });
+  assert.equal(audio.muted, true);
+
+  fallback();
+
+  assert.equal(audio.muted, false);
+});
+
+test("closing during an asynchronous avatar handoff detaches the late attachment", async () => {
+  let resolveAttach;
+  const calls = [];
+  const adapter = {
+    isReady: () => true,
+    attachTrack() {
+      calls.push("attach-started");
+      return new Promise((resolve) => { resolveAttach = resolve; });
+    },
+    setMuted() {},
+    async detach() { calls.push("detach"); },
+  };
+  const { pc, transport } = createAudioTransportHarness(adapter);
+  await transport.connect();
+
+  const handoff = pc.ontrack({ track: { id: "assistant-audio" }, streams: [{ id: "remote-stream" }] });
+  await Promise.resolve();
+  await transport.close();
+  resolveAttach(true);
+  await handoff;
+
+  assert.deepEqual(calls, ["attach-started", "detach", "detach"]);
+});

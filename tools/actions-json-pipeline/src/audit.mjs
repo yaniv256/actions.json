@@ -35,6 +35,8 @@ export function runAudit(context, { ledger = null } = {}) {
     ...auditFallbacksShareDeadScope(context.map),
     ...auditPrimitiveOutputFields(context.map),
     ...auditContainerBoundControls(context.map),
+    ...auditLossyProjections(context.map),
+    ...auditUnadvertisedProjections(context.map),
     ...auditMissingDeclaredFiles(context.declaredFiles),
   ];
   const { findings: overlaidFindings, staleEntries } = applyAcceptedGapLedger(findings, ledger);
@@ -243,6 +245,111 @@ export function auditStateMachineWorkflowShape(map) {
         }),
       );
     }
+  }
+  return findings;
+}
+
+// "Agents do not use tools they were never told about." A state projection can be
+// perfectly authored, live, and correct — and still be invisible, because the only
+// surfaces the agent reads are the map's prompt and the tool descriptions. If the
+// projection's name appears in neither, the agent's situation is indistinguishable
+// from the projection not existing: it improvises instead, and the classic symptom
+// is an embedded agent asking the visitor to DESCRIBE THE PAGE IT IS STANDING ON.
+// Measured 2026-07-27 on helpx.adobe.com: adobe.help.page returned 40 labelled links
+// and was named in zero prose fields, while the map's own reading_order said
+// "RE-READ the destination page" — an instruction with no tool attached.
+// The rule keys on the PRINCIPLE (is this capability discoverable?), not on a
+// pattern, so it cannot fire on a correctly-advertised projection.
+// "A projection's job is to make page state legible, not to certify that it exists."
+// A LOSSY projection extracts a record set (`many: true`) and then emits only a
+// scalar derived from it — most often `$count(...)`. The agent learns HOW MANY and
+// never WHICH, so a correct navigation still ends with the agent asking the user to
+// describe the page it is standing on. Raising max_bytes or preferring state_read
+// over state_summary does not recover it: the records die inside the expression,
+// one layer below where the symptom appears.
+// The rule keys on the EXTRACT-TO-EMIT relationship, never on the presence of
+// `$count`: a projection that emits rows AND a count (the trello.board shape) is
+// CORRECT, and flagging it would make someone break a working map. An emission
+// counts when the extract's records reach an array-producing construct either
+// directly or through an intermediate binding ($all := records.crumbs[...]).
+export function auditLossyProjections(map) {
+  const projections = Array.isArray(map?.state_projections) ? map.state_projections : [];
+  const findings = [];
+  for (const projection of projections) {
+    const snapshot = projection?.snapshot ?? {};
+    const extracts = Array.isArray(snapshot.extract) ? snapshot.extract : [];
+    const manyIds = extracts.filter((entry) => entry?.many && entry?.id).map((entry) => entry.id);
+    if (manyIds.length === 0) continue;
+    const expression = snapshot?.projection?.expression;
+    if (typeof expression !== "string" || expression.length === 0) continue;
+    for (const id of manyIds) {
+      const ref = `records.${id}`;
+      if (!expression.includes(ref)) continue;
+      // Collect every variable bound from this record set, so a projection that
+      // maps an intermediate ($all := records.crumbs[...]) still counts as emitting.
+      const derived = new Set([ref]);
+      const binding = new RegExp(`\\$([A-Za-z_][A-Za-z0-9_]*)\\s*:=\\s*[^;]*${ref.replace(".", "\\.")}`, "g");
+      for (const match of expression.matchAll(binding)) derived.add(`$${match[1]}`);
+      const emitsRecords = [...derived].some((token) => {
+        const escaped = token.replace(/[.$]/g, (c) => `\\${c}`);
+        return new RegExp(`\\$map\\s*\\([^)]*${escaped}`).test(expression)
+          || new RegExp(`\\$append\\s*\\([^)]*${escaped}`).test(expression)
+          || new RegExp(`\\$filter\\s*\\([^)]*${escaped}`).test(expression)
+          || new RegExp(`\\$sort\\s*\\([^)]*${escaped}`).test(expression)
+          || new RegExp(`\\[\\s*${escaped}`).test(expression)
+          || new RegExp(`${escaped}\\s*~>`).test(expression)
+          || new RegExp(`:\\s*${escaped}\\s*[,}]`).test(expression);
+      });
+      if (emitsRecords) continue;
+      findings.push(
+        finding({
+          id: `lossy-projection:${projection.name}:${id}`,
+          code: "lossy_projection",
+          severity: "medium",
+          action: null,
+          context: `state_projections.${projection.name}`,
+          evidence: { projection: projection.name, extract: id },
+          message: `Projection ${projection.name} extracts record set '${id}' (many: true) but emits only scalars derived from it, discarding the records.`,
+          recommendation: `Emit a bounded slice of '${id}' alongside any count (guard with $count(x) > 0 ? $append([], $map(...)) : []), and report extracted vs emitted so a partial read is distinguishable from a complete one.`,
+        }),
+      );
+    }
+  }
+  return findings;
+}
+
+export function auditUnadvertisedProjections(map) {
+  const projections = Array.isArray(map?.state_projections) ? map.state_projections : [];
+  if (projections.length === 0) return [];
+  // A map with NO agent-facing prose at all is a fixture or a fragment, not a
+  // surface an agent operates: there is nowhere for an advertisement to live, so
+  // "unadvertised" is not a meaningful claim about it. Only judge real maps.
+  const hasProse =
+    Boolean(map?.prompt) || Boolean(map?.notes) || Boolean(map?.instructions);
+  if (!hasProse) return [];
+  const prose = [
+    JSON.stringify(map?.prompt ?? ""),
+    JSON.stringify(map?.notes ?? ""),
+    JSON.stringify(map?.instructions ?? ""),
+    ...mapTools(map).map((tool) => JSON.stringify(tool?.description ?? "")),
+    ...mapTools(map).map((tool) => JSON.stringify(tool?.workflow?.output ?? "")),
+  ].join(" ");
+  const findings = [];
+  for (const projection of projections) {
+    const name = projection?.name;
+    if (!name || prose.includes(name)) continue;
+    findings.push(
+      finding({
+        id: `unadvertised-projection:${name}`,
+        code: "unadvertised_projection",
+        severity: "high",
+        action: null,
+        context: "state_projections",
+        evidence: { projection: name },
+        message: `State projection ${name} is never named in the map prompt, notes, or any tool description, so the agent cannot discover it.`,
+        recommendation: `Name ${name} in the map prompt with the exact call (actions.site mode=state_summary projection_name='${name}'), and say when to read it. An undiscoverable projection is equivalent to an absent one.`,
+      }),
+    );
   }
   return findings;
 }

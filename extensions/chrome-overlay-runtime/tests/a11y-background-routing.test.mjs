@@ -24,3 +24,13 @@ test('every background-handled a11y primitive is routed to the background', () =
     assert.ok(routed.has(name), `${name} has a background handler but is missing from BRIDGE_BACKGROUND_ACTION_NAMES — it will throw "No handler implemented" on a direct bridge call`);
   }
 });
+
+test('a11y.query preserves the shim-attested non-center action point', () => {
+  const start = bg.indexOf('if (call.name === "a11y.query")');
+  const end = bg.indexOf('if (call.name === "keyboard.press"', start);
+  assert.ok(start >= 0 && end > start, 'a11y.query handler must exist');
+  const handler = bg.slice(start, end);
+  assert.match(handler, /clickable_center:\s*attestation\.clickable_center/);
+  assert.match(handler, /output\.clickable_center\s*=\s*attestation\.clickable_center\s*\|\|\s*attestation\.visible_center/);
+  assert.match(handler, /delete output\.clickable_center/);
+});

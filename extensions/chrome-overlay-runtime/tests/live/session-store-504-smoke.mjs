@@ -1,5 +1,5 @@
 // Self-driven LIVE smoke for the bridge-504 fix
-// (investigations/bridge-504-timeouts.md).
+// (the internal investigation record).
 //
 // ROOT CAUSE: SessionStore.ready was a one-shot promise; under MV3 the background
 // service worker is re-instantiated constantly, and if its chrome.storage.local.get

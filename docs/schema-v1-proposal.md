@@ -461,6 +461,21 @@ raw DOM reads or screenshots.
           "name": "agent_context",
           "max_bytes": 12000,
           "expression": "{% {'list_count': $count(state.board.lists)} %}"
+        },
+        {
+          "name": "list_page",
+          "max_bytes": 12000,
+          "input_schema": {
+            "type": "object",
+            "required": ["list_name"],
+            "additionalProperties": false,
+            "properties": {
+              "list_name": { "type": "string", "minLength": 1 },
+              "offset": { "type": "integer", "minimum": 0 },
+              "limit": { "type": "integer", "minimum": 1, "maximum": 10 }
+            }
+          },
+          "expression": "{% {'list_name': $$.input.list_name, 'offset': $$.input.offset} %}"
         }
       ]
     }
@@ -476,8 +491,11 @@ include `diagnostics.selector_counts` so authors can verify extraction counts
 against the visible page. Byte budgets are enforced on expression output, full
 state, and summaries; an oversized projection returns
 `state_payload_too_large` — narrow the selectors or use a summary rather than
-raising limits. Workflows may declare a `postcondition` naming a projection to
-re-check after a mutating action.
+raising limits. A summary may declare an object `input_schema`; callers pass
+schema-valid `summary_arguments`, available to JSONata as `input`, to filter or
+page growing collections. Caller `max_bytes` may lower but never raise the
+summary's declared budget. Workflows may declare a `postcondition` naming a
+projection to re-check after a mutating action.
 
 ### `attachments`
 

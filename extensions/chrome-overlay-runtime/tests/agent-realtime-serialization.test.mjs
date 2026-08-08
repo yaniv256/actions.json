@@ -83,11 +83,13 @@ test("U1: error and response.cancelled also clear the active response", async ()
 
 // --- U2: createResponse() serialization (queue) ---
 
-function managerWithRecordingTransport() {
+function managerWithRecordingTransport(responseOutputController = null, options = {}) {
   const sent = [];
   const m = new HostedRealtimeSessionManager({
     storage: createStorage(),
     transportFactory: { create: () => ({ sendEvent() {}, async close() {} }) },
+    responseOutputController,
+    ...options,
   });
   m.transport = { sendEvent(e) { sent.push(e); }, async close() {} };
   return { m, sent };
@@ -160,7 +162,7 @@ test("U4: interrupt cancels the active response then sends", async () => {
   await m.handleRealtimeEvent(created("resp_A")); // busy
 
   const p = m.createResponse({ mode: "interrupt", response: {} });
-  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
   // a response.cancel should have gone out; the new response.create waits for
   // the cancellation to land
   assert.ok(sent.some((e) => e?.type === "response.cancel"), "cancel sent");
@@ -169,6 +171,99 @@ test("U4: interrupt cancels the active response then sends", async () => {
   await m.handleRealtimeEvent({ type: "response.cancelled", response: { id: "resp_A" } });
   await p;
   assert.equal(createOf(sent).length, 1, "new response.create fired after cancel");
+});
+
+test("U4: interrupt clears an attached avatar output buffer before cancellation", async () => {
+  const calls = [];
+  const { m, sent } = managerWithRecordingTransport({
+    async clearBuffer() { calls.push("clearBuffer"); return true; },
+  });
+  await m.handleRealtimeEvent(created("resp_A"));
+
+  const pending = m.createResponse({ mode: "interrupt" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ["clearBuffer"]);
+  assert.equal(sent.some((event) => event.type === "response.cancel"), true);
+  await m.handleRealtimeEvent({ type: "response.cancelled", response: { id: "resp_A" } });
+  await pending;
+});
+
+test("U4: output-buffer clear rejection never blocks response.cancel", async () => {
+  const { m, sent } = managerWithRecordingTransport({
+    async clearBuffer() { throw new Error("avatar unavailable"); },
+  });
+  await m.handleRealtimeEvent(created("resp_A"));
+
+  const pending = m.createResponse({ mode: "interrupt" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent.some((event) => event.type === "response.cancel"), true);
+  await m.handleRealtimeEvent({ type: "response.cancelled", response: { id: "resp_A" } });
+  await pending;
+});
+
+test("U4: stalled output-buffer clear is bounded before response.cancel", async () => {
+  let releaseClear;
+  const { m, sent } = managerWithRecordingTransport({
+    async clearBuffer() {
+      return new Promise((resolve) => { releaseClear = resolve; });
+    },
+  }, { responseOutputClearTimeoutMs: 1 });
+  await m.handleRealtimeEvent(created("resp_A"));
+
+  const pending = m.createResponse({ mode: "interrupt" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const cancelledBeforeClearSettled = sent.some((event) => event.type === "response.cancel");
+  releaseClear();
+  await Promise.resolve();
+  await m.handleRealtimeEvent({ type: "response.cancelled", response: { id: "resp_A" } });
+  await pending;
+
+  assert.equal(cancelledBeforeClearSettled, true);
+});
+
+test("session stop bounds a stalled output-buffer clear before transport teardown", async () => {
+  let releaseClear;
+  let transportClosed = false;
+  const { m } = managerWithRecordingTransport({
+    async clearBuffer() {
+      return new Promise((resolve) => { releaseClear = resolve; });
+    },
+  }, { responseOutputClearTimeoutMs: 1 });
+  m.transport = {
+    sendEvent() {},
+    async close() { transportClosed = true; },
+  };
+
+  const stopping = m.stop();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const closedBeforeClearSettled = transportClosed;
+  releaseClear();
+  await stopping;
+
+  assert.equal(closedBeforeClearSettled, true);
+  assert.equal(m.transport, null);
+  assert.equal(m.getState().status, "stopped");
+});
+
+test("avatar output telemetry observes Realtime audio events without receiving control of event handling", async () => {
+  const observed = [];
+  const { m } = managerWithRecordingTransport({
+    observeRealtimeEvent(event) { observed.push(event.type); },
+  });
+
+  await m.handleRealtimeEvent(created("resp_A"));
+  await m.handleRealtimeEvent({ type: "response.output_audio.delta", delta: "private-audio-data" });
+
+  assert.deepEqual(observed, ["response.created", "response.output_audio.delta"]);
+});
+
+test("avatar output telemetry failure never blocks Realtime event handling", async () => {
+  const { m } = managerWithRecordingTransport({
+    observeRealtimeEvent() { throw new Error("optional avatar observer failed"); },
+  });
+
+  assert.deepEqual(await m.handleRealtimeEvent(created("resp_A")), { handled: false, toolCalls: 0 });
+  assert.equal(m.activeResponseId, "resp_A");
 });
 
 test("U4: a tool result from a cancelled response is marked for discard", () => {

@@ -10,6 +10,24 @@ Shared domain vocabulary for this project — entities, named processes, and sta
 
 **Send mode** — the caller's choice for how a new send behaves when a response is already active: *queue* waits for the active response to finish before sending, *interrupt* cancels the active response and sends immediately. A tool result belonging to a response that was cancelled by an interrupt is discarded rather than delivered, because its turn is no longer live.
 
+## Empowered website agents
+
+**Empowered website agent** — a page-hosted agent that may ask the browser extension to operate other tabs only through capabilities declared by an immutable bundle and explicitly approved by the user; discovering the agent or opening its private channel grants no action authority by itself.
+
+**Delegated approval** — the durable user decision that binds one empowered website agent to its source origin and the exact reviewed bytes of its immutable capability bundle. Revocation makes the approval unusable for new or existing delegated activations.
+
+**Approval authority outcome** — the result of resolving a Delegated approval, distinguishing verified live authority, authoritative absence or revocation, temporary unavailability, and integrity failure.
+
+Only verified live authority permits delegated use. Destructive cleanup requires authoritative absence or a valid revocation; unavailable or integrity-failing authority suspends use while preserving recoverable ownership.
+
+**Durable authority commit** — a delegated-authority state transition whose normal completion requires an acknowledged, uncancelled durable record and a marker-free compatibility mirror. During replacement recovery, a surviving marker vetoes an exact late acknowledgement and restores its embedded rollback state, while a distinct, genuinely later committed ledger candidate may supersede that older recovery marker.
+
+Prepared and applied records retain rollback or cleanup intent across worker replacement. The ledger advances beyond every prepared revision, final mirror confirmation is never timer-abandoned, and immutable bundles use transaction-scoped physical keys. A failed transition therefore remains non-authorizing, while a genuinely later successful transition is distinguished by its own identity and physical resource ownership.
+
+**Website agent group** — one isolated activation of a delegated approval, with its own home lease and exclusively owned working tabs, kept separate from the extension-hosted agent's ordinary tab group.
+
+**Home lease** — the browser-authenticated binding between a website agent group and the top-level page document that hosts it, identified by tab, document, origin, and a fresh private-channel nonce. A navigation or page hide ends the old channel; a BFCache restoration may retain the document binding only by establishing a new channel.
+
 ## Bridge and runtimes
 
 **Bridge** — the process that exposes a stable tool-call surface to agents and routes each call to a connected browser. It owns its own registry of connected runtimes; that registry is independent of the browser extension's internal session state, so a call the bridge can answer from its own knowledge stays live even when an extension-side handler is stuck.
@@ -24,11 +42,17 @@ The invariant has two directions and they fail differently — see *Asymmetric r
 
 **Claimed tab** — a browser tab the extension has taken ownership of and will drive on the agent's behalf. Tab-lifecycle operations (listing, activating, closing claimed tabs) read and write the extension's persisted session state; operations that only observe or capture a page do not, which is why the two classes can fail independently.
 
+Ownership is authoritative only when the durable owner and the exact ownership revision match. Ordinary session metadata and the visual Chrome tab group are secondary projections: they may describe an owner, but they never grant authority, and compensation may alter them only while their revision still matches the failed durable claim.
+
 **Owner-qualified runtime address** — the pair of a bridge runtime identity and a browser-local tab identity copied from one global inventory row. The runtime identifies which connected browser owns the tab number; the tab number alone is not globally unique.
 
 The address is generation-sensitive: full-document navigation preserves the tab container but replaces its document runtime, so a successful replacement operation must return a newly attested runtime identity. An operation that targets the already selected runtime without an explicit local tab identity does not need the pair.
 
-**Background service worker** — the extension's always-available background context. Under Manifest V3 it is torn down and re-instantiated on its own schedule rather than running continuously, so any state it holds must survive re-instantiation and any readiness it awaits must be able to recover from a restart mid-initialization — code that assumes a single, permanent startup will wedge when the worker is recycled.
+**Background service worker** — the extension's privileged, event-driven background context. Under Manifest V3 it can suspend between events rather than remaining a durable controller throughout a multi-turn automation.
+
+Its appearance can attest that an extension loaded and reveal that extension's identity, but it is not a durable multi-turn automation controller: an evaluation can disappear if the worker suspends between protocol turns.
+
+**Extension-owned page** — a persistent document served from an extension's own origin, able to call that extension's privileged browser APIs without depending on the background service worker remaining awake. Multi-turn automation can discover extension identity from the worker, then use an extension-owned page as its stable controller.
 
 **Primitive** — a named, generic unit of browser capability that an agent may invoke directly or that a site map's workflow steps may compose. Exposure is surface-specific: portable workflow and hosted-agent exposure derives from the primitive dictionary, while direct bridge-tool exposure derives from the bridge tool declaration and routing layer. Declaration, documentation, implementation, exposure, and live reachability are separate properties; only evidence at each boundary establishes that property.
 
@@ -38,9 +62,41 @@ Primitives divide by the context they run in, and the division is load-bearing. 
 
 **Proof package** — an immutable evidence bundle produced by validating an operational site map, distinct from the live map even when it contains a byte-identical `actions.json`. A proof package records what was tested; its files must never be discovered as executable actions, projections, or relative companion declarations.
 
+**Catalog revision coherence** — the invariant that actions, workflows, state projections, and companion resources derived from one storage catalog describe the same revision. A bridge violates coherence when it caches action declarations but live-reads workflow bodies or projections: after a storage update it can advertise an action it cannot execute, or execute state from an action it does not advertise. Refresh all parts at one operation boundary or read them from one immutable revision snapshot.
+
+**Extension package contract** — the enforced agreement between the extension's intentional archive inventory and every file its production runtime can load.
+
+**Route-or-refuse** — the dispatch contract for tab-targeted background tool calls: a call routed to a specific runtime executes against exactly that runtime's tab or errors; it never silently falls back to the extension-active tab. The routing layer resolves the target once (`routedTabId`) and every handler must consume that resolution or refuse — re-deriving the target from ambient active-tab state is the defect class this contract exists to prevent.
+
+A package clears this contract only when declared pages, production-injected scripts, generated browser bundles, and transitively reachable modules are present in the archive and the extracted artifact executes its affected behavior in a real browser. Exact inventory, runtime-graph completeness, and extracted-artifact behavior are separate evidence boundaries.
+
+**Release ancestry gate** — proof that every feature claimed for a release belongs to the exact target commit's tree before packaging begins.
+
+It classifies absence at the correct boundary: source missing from the target is release sequencing or scope; source present but archive missing is a package-contract failure; archive present but behavior broken is a runtime failure. Commit timestamps and unmerged branches are not inclusion evidence — Git topology and the immutable release target are.
+
+**Terminal action outcome** — the first `action_call_output` or `action_error` carrying one action call's exact identity after asynchronous dispatch.
+
+The two message types are a closed result union, not independent optional streams. A collector must wait for either by call ID and preserve an error's code and message; waiting for success alone turns a real failure into apparent silence. A visible mutation does not satisfy this contract because result serialization, persistence, or response delivery may still fail after the UI changes.
+
 **Single-authority projection** — a State projection contract in which each logical row is emitted once and derived views (unchecked items, failures, subsets) are computed by consumers from that row collection. Duplicating an unbounded source collection into convenience arrays spends the workflow expression budget on redundant facts and can make otherwise valid large objects unreadable.
 
+**Lossy projection** — a State projection that extracts records and then emits only a derived scalar about them, most often `$count(...)`, discarding the content itself. The agent learns *how many* and never *which*, so a correct navigation still ends in asking the user to describe the page. Raising `max_bytes` or preferring `state_read` over `state_summary` does not recover it: the records are destroyed inside the projection expression, below the layer where the symptom appears. Detected by the `lossy_projection` audit rule, which keys on the extract-to-emit relationship rather than on the presence of `$count` — a projection emitting rows *and* a count is correct.
+
+**Unadvertised capability** — a tool or State projection that is authored, live, and correct, yet named nowhere the agent reads: not the map `prompt`, not `notes`, not any tool description. From inside a session the agent's situation is indistinguishable from the capability not existing, so it improvises instead — the signature symptom being an embedded agent asking the visitor to describe the page it is standing on. A map instruction like "RE-READ the destination page" with no tool named is the canonical shape. Detected by the `unadvertised_projection` audit rule. See [[Lossy projection]] for the sibling defect where the capability *is* known but destroys its own data.
+
+**Fabricating lookup** — a tool that *computes* an identifier it cannot know (concatenating caller-supplied parts into a URL, id, or path) instead of *looking it up* in authoritative data the map already carries, and reports success either way. Measured on `helpx.adobe.com`: 63% of a 751-article corpus sits under a subtopic segment the model has no way to guess, so the resolver 404'd more often than it succeeded while the correct URL sat unused in `article-index.json` beside it. The fix is always a lookup that reports absence honestly, never a better guess.
+
+**Projection fidelity** — a State projection's obligation to report the relationship between what it extracted and what it emitted, so a bounded or partial read is distinguishable from a complete one. A bare list of five is indistinguishable from a complete list of five, and that ambiguity is what converts a partial read into a confident wrong answer. Covers the whole lossy family: count-only emission, viewport-scoped reads, virtualization, and truncation.
+
 **Workflow postcondition** — a logical assertion evaluated after a workflow succeeds, using a State projection and the workflow's original input to decide whether the intended effect actually occurred. Dispatch success alone cannot satisfy it; if the projection is unavailable or the assertion fails, the action reports failure even when earlier interaction steps already changed the page.
+
+**Verification locality** — the rule that a large State projection used only to compute a postcondition or diff remains in the content realm that produced it. Only the bounded verification result, metadata, or patch crosses into the background worker and bridge; internal compute capacity is not an expansion of the public response contract.
+
+**Projection budget domain** — one independently enforced size boundary for state-projection work: *public response* bounds caller-visible full state, *internal compute* bounds page-local verification or diff inputs, *internal transfer* bounds data that may cross extension realms, and *diff response* bounds returned patches. A public `max_bytes` argument may lower its domain's ceiling but never raise it.
+
+**Indeterminate mutation outcome** — the status of a workflow whose potentially state-changing step completed before a later retry exhaustion, required-settle timeout, or verification/confirmation failure, leaving the mutation's commit state unknown when no higher-priority overlay or explicit postcondition classification applies.
+
+It is recoverable but not retryable by default: an independent State projection must prove that the mutation did not commit before the workflow may be repeated. A read-only readiness failure before any mutation remains a different, safely retryable state.
 
 **Visible (as a predicate)** — in this codebase *visible* means an element currently intersects the viewport, never that it exists. An element scrolled out of view is present in the DOM and addressable, yet reports as not visible; so any read that filters on visibility answers "what is rendered", not "what is there".
 
@@ -73,6 +129,10 @@ Because its gate reads the accessibility layer, it is a *privileged* primitive i
 **Context-injection card** — a Trello card treated as a ready-made briefing that lets a returning, memory-less agent resume a task cold. It carries an extensive description (symptom/task/status/next-action), a checklist of sub-tasks, and references to fuller files maintained elsewhere (an investigation .md, the map, the commit) so it stays contained but points to depth. The card is the compressed skill; the files are the full text.
 
 **Closure evidence** — direct current-state proof that every deliverable a task or investigation declared is complete, including committed implementation, required tests, distribution or deployment, and affected-boundary live verification. A checklist, status word, source-only fix, accepted limitation, or follow-up task may describe progress but cannot replace the evidence required for a Done transition.
+
+**Run-owned process tree** — the complete hierarchy of operating-system processes started for one live or evaluation run and exclusively owned by that run's supervisor.
+
+The run is not complete until that hierarchy has been reaped. A wrapper exit, signal sent to one PID, or successful worker result is insufficient when a child, grandchild, browser, listener, or helper can survive; the supervisor must establish the ownership boundary before acquisition and verify descendant absence before returning.
 
 ## Investigation & curiosity
 

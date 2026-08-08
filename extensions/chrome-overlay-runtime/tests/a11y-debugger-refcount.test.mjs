@@ -7,6 +7,7 @@ import assert from 'node:assert';
 import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {DebuggerSessionManager} from '../src/agent/debugger-session-manager.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const bg = fs.readFileSync(path.resolve(HERE, '../src/background.js'), 'utf8');
@@ -22,8 +23,39 @@ test('trusted key + text + debug JS + a11y tree use the shared refcount manager'
     'a consumer still uses the old raw attach/attached pattern instead of acquireDebugger');
 });
 
+test('a11y adds its first holder and only attests an already-recorded holder', () => {
+  assert.match(bg, /if \(a11yDebuggerSessions\.has\(tabId\)\) \{[\s\S]*?await debuggerSessionManager\.attestHeld\(tabId\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?const inFlight = a11yDebuggerSessionInitializers\.get\(tabId\);[\s\S]*?if \(inFlight\) return inFlight;[\s\S]*?await acquireDebugger\(tabId\);/,
+    'a11y must acquire its own first holder before using non-incrementing attestation');
+});
+
+test('a11y first-holder setup is single-flight and watch surfaces ownership failure', () => {
+  assert.match(bg, /const a11yDebuggerSessionInitializers = new Map\(\)/,
+    'concurrent first watches need a shared initializer');
+  assert.doesNotMatch(bg, /try\s*\{\s*await ensureA11yDebuggerSession\(tabId\);\s*\}\s*catch/,
+    'a11y.watch must not report watching:true after debugger ownership fails');
+  assert.match(bg, /await ensureA11yDebuggerSession\(tabId\);/,
+    'a11y.watch must await debugger ownership before reporting success');
+});
+
+test('transient debugger detach preserves the logical a11y holder until tab removal', () => {
+  const detachHandler = bg.match(/chrome\.debugger\.onDetach\?\.addListener\(\(source\) => \{([\s\S]*?)\n\}\);/)?.[1] || '';
+  assert.match(detachHandler, /debuggerSessionManager\.handleDetach\(source\.tabId\)/);
+  assert.doesNotMatch(detachHandler, /a11yDebuggerSessions\.delete/,
+    'onDetach must not discard the logical a11y holder');
+  assert.match(bg, /chrome\.tabs\.onRemoved\.addListener[\s\S]*?debuggerSessionManager\?\.handleTabRemoved\(tabId\)[\s\S]*?a11yDebuggerSessions\?\.delete\(tabId\)/,
+    'tab removal must explicitly clear debugger and a11y ownership');
+});
+
+test('site-action exceptions preserve structured debugger recovery guidance', () => {
+  assert.match(bg, /const siteActionExceptionEnvelope = \(error\) => \(\{[\s\S]*?code: error\?\.code \|\| "site_action_failed"[\s\S]*?recoverable:[\s\S]*?retryable:[\s\S]*?next_step:/,
+    'site actions must retain typed debugger ownership metadata');
+  const uses = bg.match(/error: siteActionExceptionEnvelope\(error\)/g) || [];
+  assert.ok(uses.length >= 2,
+    'both WebSocket and runtime-message site-action failure paths must preserve metadata');
+});
+
 // Behavioral: model the refcount accounting.
-test('refcount: nested holders attach once, detach once', async () => {
+test('refcount: production manager nests holders and detaches once', async () => {
   let attaches = 0, detaches = 0;
   const attached = new Set();
   const fakeAttach = async ({tabId}) => {
@@ -31,23 +63,19 @@ test('refcount: nested holders attach once, detach once', async () => {
     attached.add(tabId); attaches++;
   };
   const fakeDetach = async ({tabId}) => { attached.delete(tabId); detaches++; };
-  // Inline the manager's logic (mirror of background.js).
-  const counts = new Map(), adopted = new Set();
-  const acquire = async (t) => {
-    const n = counts.get(t) || 0;
-    if (n === 0) { try { await fakeAttach({tabId: t}); } catch (e) { if (!/already attached/i.test(e.message)) throw e; adopted.add(t); } }
-    counts.set(t, n + 1);
-  };
-  const release = async (t) => {
-    const n = counts.get(t) || 0;
-    if (n <= 1) { counts.delete(t); if (!adopted.delete(t)) await fakeDetach({tabId: t}); }
-    else counts.set(t, n - 1);
-  };
-  await acquire(7);            // a11y.watch holds
-  await acquire(7);            // trusted key overlaps
+  const manager = new DebuggerSessionManager({
+    attach: fakeAttach,
+    detach: fakeDetach,
+    sendCommand: async ({tabId}) => {
+      if (!attached.has(tabId)) throw new Error(`Debugger is not attached to the tab with id: ${tabId}.`);
+      return {result: {type: 'undefined'}};
+    },
+  });
+  await manager.acquire(7);            // a11y.watch holds
+  await manager.acquire(7);            // trusted key overlaps
   assert.strictEqual(attaches, 1, 'attached once for two holders');
-  await release(7);            // key releases
+  await manager.release(7);            // key releases
   assert.strictEqual(detaches, 0, 'not detached while a11y still holds');
-  await release(7);            // a11y releases
+  await manager.release(7);            // a11y releases
   assert.strictEqual(detaches, 1, 'detached when last holder leaves');
 });

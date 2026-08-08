@@ -8,7 +8,7 @@
 //! macOS and native-Linux are documented seams (see [`backend`]).
 //!
 //! Ported from the Python `chrome_launcher.py` + Windows node helpers (plan
-//! docs/plans/2026-07-08-001-feat-rust-chrome-launcher-crate-plan.md).
+//! the implementation plan).
 
 pub mod backend;
 pub mod claim;

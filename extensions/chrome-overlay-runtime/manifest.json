@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "actions.json Overlay Runtime",
-  "version": "0.1.217",
+  "version": "0.1.264",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2wE10V6edS83HV7hCd/Y2tZxUvJsxCLbuGhWDZaisN8iCD1TdIxEGKqPk8GrcrwW77JuxKWU7GphWRz0hhYZ7AMtAddiHnBhvs0EXnpM+UQACF6dG91U5N1eDAM4NbOoQgRz/Wans9FS6/LZty5bRzhCG4KFZF/UDcH5jViEdueH1oX/Rs5bvpoW1ubPKTt0KPKnMKtlHbfnA/zf9cfhrUTzO1XHDcNvWwNCUTjnFW2cU89mLHDf9sIhfkGjEQep9SYM8wkwAUcek6ANTfukugJqtDjr0sSDTgyH+Z0D6E9wYna8DFcdbGUgRFgGCm0/aNqdJxxkVjFp2AimF50wzQIDAQAB",
   "description": "Experimental actions.json runtime that can render agent-provided HTML overlays on authorized tabs.",
   "action": {
     "default_popup": "popup.html",
@@ -11,6 +12,19 @@
     "service_worker": "src/background.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "src/delegated-agent/page-broker.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
   "permissions": [
     "activeTab",
     "debugger",
@@ -27,8 +41,8 @@
     {
       "resources": [
         "actions/overlay.actions.json",
-        "sidepanel.html",
-        "src/sidepanel.js",
+        "agent-surface.html",
+        "src/agent-surface.js",
         "src/storage-bundle.mjs",
         "src/agent/*.mjs",
         "src/agent/vendor/*.mjs"

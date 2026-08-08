@@ -25,6 +25,14 @@ function bodyOf(marker, span = 2600) {
   return source.slice(idx, idx + span);
 }
 
+function bodyBetween(startMarker, endMarker) {
+  const start = source.indexOf(startMarker);
+  assert.ok(start >= 0, `expected to find ${startMarker}`);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  assert.ok(end > start, `expected to find ${endMarker} after ${startMarker}`);
+  return source.slice(start, end);
+}
+
 test("connectBackgroundBridge reuses an open socket internally before closing it", () => {
   // The idempotency guard lives INSIDE connectBackgroundBridge (not only at the
   // bridge-connect call site) so no current or future caller can re-introduce the
@@ -107,7 +115,10 @@ test("background bridge answers runtime_status for every registered runtime befo
 });
 
 test("openClaimedTab establishes the content bridge connection via connectClaimedTab", () => {
-  const body = bodyOf("const openClaimedTab = async (message = {}) =>", 3600);
+  const body = bodyBetween(
+    "const openClaimedTab = async (message = {}) =>",
+    "const closeClaimedTab = async (message = {}) =>",
+  );
   assert.ok(
     /connectClaimedTab\(/.test(body),
     "open_tab must call connectClaimedTab (sends actions-json:connect) so the content script plugs into the transport — runtime-ready alone does not",

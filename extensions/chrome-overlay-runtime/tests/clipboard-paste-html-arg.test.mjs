@@ -73,7 +73,7 @@ test("syntheticClipboardEvent routes text/html through clipboardHtmlFlavor", () 
 test("clipboardPaste threads args.html into the synthetic event", () => {
   const fnStart = contentSource.indexOf("const clipboardPaste");
   assert.ok(fnStart >= 0, "clipboardPaste must exist");
-  const fnBody = contentSource.slice(fnStart, fnStart + 1400);
+  const fnBody = contentSource.slice(fnStart, fnStart + 6500);
   assert.ok(
     /syntheticClipboardEvent\(payload, args\.html\)/.test(fnBody),
     "clipboardPaste must pass args.html to syntheticClipboardEvent",
@@ -103,4 +103,22 @@ test("clipboard.paste advertises optional html in both manifest surfaces", async
     "string",
     "primitive_dictionary clipboard.paste must declare an html string property",
   );
+  for (const surface of [tool, prim]) {
+    assert.equal(surface.input_schema.properties.use_active_element.type, "boolean");
+    assert.match(surface.input_schema.properties.target.description, /Required unless use_active_element:true/);
+  }
+});
+
+test("clipboardPaste fails closed without an explicit target opt-in", () => {
+  const fnStart = contentSource.indexOf("const clipboardPaste");
+  assert.ok(fnStart >= 0, "clipboardPaste must exist");
+  const fnBody = contentSource.slice(fnStart, fnStart + 6500);
+  assert.match(fnBody, /const usesActiveElement = !args\.target && args\.use_active_element === true/);
+  assert.match(fnBody, /afterText === beforeText && !usesActiveElement/);
+  assert.match(fnBody, /scope_mode: usesActiveElement \? "active-element-opt-in" : "explicit-target"/);
+  assert.match(fnBody, /paste_target_required/);
+  assert.match(fnBody, /paste_target_not_editable/);
+  assert.match(fnBody, /paste_focus_not_acquired/);
+  assert.match(fnBody, /target_identity/);
+  assert.match(fnBody, /scoped_write: "native-control"/);
 });

@@ -9,7 +9,10 @@ import {
 } from "../src/agent/realtime-tool-catalog.mjs";
 
 test("realtime tool catalog exposes tab-lifecycle primitives to the hosted agent", async () => {
-  const dictionary = await loadPrimitiveDictionary();
+  const packaged = JSON.parse(
+    await readFile(new URL("../actions/overlay.actions.json", import.meta.url), "utf8"),
+  );
+  const dictionary = packaged.primitive_dictionary;
   const tools = buildRealtimeToolCatalog({ dictionary, host: "extension" });
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
 
@@ -22,6 +25,7 @@ test("realtime tool catalog exposes tab-lifecycle primitives to the hosted agent
   assert.equal(byName.get("browser.navigate").parameters.properties.url.type, "string");
   assert.equal(byName.get("browser.open_tab").parameters.properties.url.type, "string");
   assert.equal(byName.get("browser.close_tab").parameters.properties.tab_id.type, "integer");
+  assert.equal(byName.get("browser.close_tab").parameters.properties.force.type, "boolean");
 });
 
 test("realtime tool catalog exposes stable actions.site and browser.screenshot tools", async () => {
@@ -35,13 +39,14 @@ test("realtime tool catalog exposes stable actions.site and browser.screenshot t
 
   const actionsSite = tools.find((tool) => tool.name === "actions.site");
   assert.equal(actionsSite.type, "function");
-  assert.match(actionsSite.description, /current website/);
-  assert.match(actionsSite.description, /state-machine/i);
-  assert.match(actionsSite.description, /safe recovery/i);
-  assert.deepEqual(actionsSite.parameters.properties.mode.enum, ["list", "call", "state_read", "state_summary", "state_diff"]);
+  assert.match(actionsSite.description, /current page/);
+  assert.match(actionsSite.description, /snapshot_id/);
+  assert.match(actionsSite.description, /stale or invalid snapshot\/cursor/i);
+  assert.deepEqual(actionsSite.parameters.properties.mode.enum, ["list", "call", "state_read", "state_summary", "state_diff", "navigate", "search"]);
   assert.equal(actionsSite.parameters.properties.action.type, "string");
   assert.equal(actionsSite.parameters.properties.projection_name.type, "string");
   assert.equal(actionsSite.parameters.properties.summary_name.type, "string");
+  assert.equal(actionsSite.parameters.properties.summary_arguments.type, "object");
   assert.equal(actionsSite.parameters.properties.action_name, undefined);
 
   const screenshot = tools.find((tool) => tool.name === "browser.screenshot");
@@ -97,9 +102,21 @@ test("realtime tool catalog reads the packaged extension primitive manifest", as
   assert.equal(names.includes("storage.read_file"), true);
 
   const click = tools.find((tool) => tool.name === "pointer.click");
-  assert.deepEqual(click.parameters.required, ["x", "y"]);
+  // pointer.click accepts EITHER viewport coordinates OR a locator resolved
+  // immediately before dispatch (#271, "preserve click identity through
+  // pacing"). That made the x/y pair conditional, so the schema moved from a
+  // top-level required:["x","y"] to an anyOf over the two calling shapes.
+  // Assert the anyOf branches rather than a flat required list — a top-level
+  // required:["x","y"] would now be WRONG, since it would reject the
+  // locator-only form the runtime supports.
+  assert.equal(click.parameters.required, undefined);
+  assert.deepEqual(click.parameters.anyOf, [
+    { required: ["x", "y"] },
+    { required: ["locator"] },
+  ]);
   assert.equal(click.parameters.properties.x.type, "number");
   assert.equal(click.parameters.properties.y.type, "number");
+  assert.equal(click.parameters.properties.locator.type, "object");
 
   const overlayOpen = tools.find((tool) => tool.name === "overlay.open");
   assert.equal(overlayOpen.parameters.required, undefined);
@@ -170,6 +187,11 @@ test("packaged extension does not advertise primitives that lack an action route
     "transfer.clear",
     "transfer.insert",
     "storage.read_file",
+    // Routed in background.js's executeLocalHostedToolCall, immediately before
+    // storage.read_file — the same seam, because both need the storage bundle
+    // and the tab url already in scope.
+    "corpus.search",
+    "corpus.build",
     "overlay.menu.hide",
     "overlay.menu.show",
     "overlay.menu.collapse",
@@ -181,17 +203,35 @@ test("packaged extension does not advertise primitives that lack an action route
     "task.list",
     "task.clear",
   ]);
-  const unroutable = manifest.primitive_dictionary.primitives
-    .filter((primitive) => primitive.support === "supported")
-    .map((primitive) => primitive.name)
-    .filter((name) => !staticToolNames.has(name) && !dynamicContentRoutes.has(name));
-
-  assert.deepEqual(unroutable, []);
-
   const contentSource = await readFile(
     new URL("../src/content.js", import.meta.url),
     "utf8",
   );
+
+  // The file.transfer.* family is routed by a single PREFIX branch in
+  // executeAction rather than one name-equality branch per primitive
+  // (bounded browser transfers, #302). Listing all ten names here would go
+  // stale the moment an eleventh lands, so the guard checks the branch that
+  // actually does the routing and only then treats the prefix as covered.
+  // If that branch is ever deleted, this assertion fails and every
+  // file.transfer.* primitive goes back to counting as unroutable below.
+  assert.ok(
+    contentSource.includes('message.name?.startsWith("file.transfer.")'),
+    "content.js executeAction must keep the file.transfer.* prefix route",
+  );
+  const prefixRoutes = ["file.transfer."];
+
+  const unroutable = manifest.primitive_dictionary.primitives
+    .filter((primitive) => primitive.support === "supported")
+    .map((primitive) => primitive.name)
+    .filter(
+      (name) =>
+        !staticToolNames.has(name) &&
+        !dynamicContentRoutes.has(name) &&
+        !prefixRoutes.some((prefix) => name.startsWith(prefix)),
+    );
+
+  assert.deepEqual(unroutable, []);
   for (const name of [
     "dom.observe.attributes",
     "locator.value",

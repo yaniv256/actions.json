@@ -11,7 +11,6 @@ assert.match(packageScript, /target_dir="\$workspace_target_dir\/\$target\/relea
 assert.doesNotMatch(packageScript, /target_dir="\$bridge_dir\/target/);
 
 const activeFiles = [
-  'docs/development-cycle.md',
   'skills/actions-json-dev-cycle/SKILL.md',
   'skills/write-actions-json/SKILL.md',
   'adapters/npm-bridge/lib/install.js',

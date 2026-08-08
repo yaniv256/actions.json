@@ -1,5 +1,5 @@
 // Pure control logic for the accessibility-gated key-repeat primitive.
-// (docs/plans/2026-07-07-004-feat-accessibility-gated-key-repeat-plan.md)
+// (the implementation plan)
 //
 // The DISPATCH (real CDP keypress) and the real a11y READ live in background.js;
 // this module owns only the surface-agnostic decision logic — arg normalization,

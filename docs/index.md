@@ -86,44 +86,12 @@ Use this page to choose what to read next.
 - [MCP Bridge README](../mcp/actions-json-mcp/README.md): bridge command and
   endpoint reference.
 
-## Troubleshooting And Release Notes
+## Troubleshooting
 
 - [Troubleshooting](troubleshooting.md): symptom-based guide for extension,
   hosted-agent, storage, bridge, bookmarklet, screenshot, and tool-call issues,
   including policy exception reports, strict workflow validation errors, state
   projection payload limits, payload spill envelopes, and task-queue results.
-- [0.1.74 Release Notes](release-notes/0.1.74.md): public release summary for
-  the hosted agent, storage-backed tools, and durable session work.
-- [0.1.78 Release Notes](release-notes/0.1.78.md): trusted overlay
-  download/upload controls and visual overlay guidance.
-- [0.1.79 Release Notes](release-notes/0.1.79.md): background-owned bridge
-  WebSocket transport for HTTPS pages using insecure `ws:` bridge URLs.
-- [0.1.80 Release Notes](release-notes/0.1.80.md): corrected background bridge
-  handshake reporting for unreachable or failing WebSocket connections.
-- [0.1.81 Release Notes](release-notes/0.1.81.md): sandboxed report overlay
-  rendering so agent-authored full-document HTML and CSS display as intended.
-- [0.1.82 Release Notes](release-notes/0.1.82.md): template/data overlay
-  assets so reusable public templates can render private data bundles.
-- [0.1.84 Release Notes](release-notes/0.1.84.md): consolidated public release
-  summary for hosted-agent, bridge, storage, overlays, and claimed-tab work.
-- [0.1.85 Release Notes](release-notes/0.1.85.md): extension-local transfer
-  primitives development prerelease.
-- [0.1.102 Release Notes](release-notes/0.1.102.md): actions.json-first
-  operation with compound workflow actions and mandatory
-  `policy_exception_report` fields on direct fallback tools.
-- [0.1.103 Release Notes](release-notes/0.1.103.md): corrected policy-report
-  contract across the hosted Realtime and MCP bridge surfaces.
-- [0.1.117 Release Notes](release-notes/0.1.117.md): workflow settle_after and
-  strict validation, overlay menu control, the session task queue, the
-  popup-settings UI restructure, anti-masking error routing, and observable
-  storage hydration.
-- [0.1.118 Release Notes](release-notes/0.1.118.md)
-- [0.1.119 Release Notes](release-notes/0.1.119.md)
-- [0.1.148 Release Notes](release-notes/0.1.148.md): live expenditure tracking
-  and cloud persistence, the `runtime.agent.await_event` agent event stream,
-  tab-lifecycle primitives, agent memory controls, and the npx bridge wrapper
-  with prebuilt cross-platform binaries.
-
 ## UI Implementation Reference
 
 - [Hosted Agent Chat UI](hosted-agent-chat-ui.md): focused reference for

@@ -1,7 +1,7 @@
 use actions_json_mcp::{
     app_from_manifest_and_map_paths, app_from_manifest_map_paths_and_storage_root,
     app_from_manifest_value, app_from_manifest_value_with_runtimes, storage_bundle_from_root,
-    RuntimeSeed,
+    ExtensionAuthConfig, RuntimeSeed,
 };
 use axum::{
     body::{to_bytes, Body},
@@ -12,6 +12,52 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tower::ServiceExt;
+
+/// U12: `/extension` now requires the extension's own Origin plus this
+/// installation's handshake secret. These characterization tests exercise what
+/// happens AFTER a legitimate extension connects, so they present real
+/// credentials rather than opting out of the guard — a test that bypassed the
+/// guard would stop covering the path the extension actually takes.
+async fn connect_extension_socket(
+    address: std::net::SocketAddr,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let auth = ExtensionAuthConfig::load(None);
+    let mut request = format!(
+        "ws://{address}/extension?secret={}",
+        auth.handshake_secret()
+    )
+    .into_client_request()
+    .unwrap();
+    request.headers_mut().insert(
+        header::ORIGIN,
+        auth.primary_origin().parse().expect("a valid origin header"),
+    );
+    let (socket, _) = connect_async(request).await.unwrap();
+    socket
+}
+
+/// U12b: the legacy HTTP tool routes now require this installation's handshake
+/// secret, exactly as `/extension` does. These characterization tests exercise
+/// what the routes DO, so they present the real credential rather than opting
+/// out of the guard — a test that bypassed it would stop covering the path a
+/// real caller takes, and would go on passing if the guard regressed.
+///
+/// Read from `ExtensionAuthConfig::load(None)`, the same cwd-based lookup the
+/// app under test uses, so the two always agree.
+fn bridge_auth_header() -> String {
+    format!(
+        "Bearer {}",
+        ExtensionAuthConfig::load(None).handshake_secret()
+    )
+}
+
+/// Every request builder in this file goes through here, so the credential is
+/// attached in ONE place. Adding a route-touching test later cannot forget it.
+fn authorized(builder: axum::http::request::Builder) -> axum::http::request::Builder {
+    builder.header(header::AUTHORIZATION, bridge_auth_header())
+}
 
 fn fixture_path(path: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -31,7 +77,7 @@ fn policy_exception_report(tool: &str, reason: &str) -> Value {
 async fn list_tool_names(app: axum::Router) -> Vec<String> {
     let response = app
         .oneshot(
-            Request::builder()
+            authorized(Request::builder())
                 .uri("/mcp/tools/list")
                 .body(Body::empty())
                 .unwrap(),
@@ -55,7 +101,7 @@ async fn list_tool_names(app: axum::Router) -> Vec<String> {
 async fn resolve_tool(app: axum::Router, request: Value) -> (StatusCode, Value) {
     let response = app
         .oneshot(
-            Request::builder()
+            authorized(Request::builder())
                 .method("POST")
                 .uri("/mcp/tools/resolve")
                 .header("content-type", "application/json")
@@ -74,7 +120,7 @@ async fn resolve_tool(app: axum::Router, request: Value) -> (StatusCode, Value) 
 async fn post_reload(app: axum::Router) -> (StatusCode, Value) {
     let response = app
         .oneshot(
-            Request::builder()
+            authorized(Request::builder())
                 .method("POST")
                 .uri("/mcp/tools/reload")
                 .body(Body::empty())
@@ -92,7 +138,7 @@ async fn post_reload(app: axum::Router) -> (StatusCode, Value) {
 async fn call_tool(app: axum::Router, request: Value) -> (StatusCode, Value) {
     let response = app
         .oneshot(
-            Request::builder()
+            authorized(Request::builder())
                 .method("POST")
                 .uri("/mcp/tools/call")
                 .header("content-type", "application/json")
@@ -152,20 +198,22 @@ async fn bridge_http_routes_accept_browser_preflight_requests() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert_eq!(
-        response
-            .headers()
-            .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
-            .unwrap(),
-        "*"
-    );
-    assert_eq!(
-        response
-            .headers()
-            .get("access-control-allow-private-network")
-            .unwrap(),
-        "true"
-    );
+    // U12: this used to assert `*` and `access-control-allow-private-network:
+    // true` — the pair that invited any public page into this loopback bridge.
+    // Preflight still succeeds, but only for the extension's own origin.
+    let allow_origin = response
+        .headers()
+        .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        .unwrap();
+    assert_ne!(allow_origin, "*");
+    assert!(allow_origin
+        .to_str()
+        .unwrap()
+        .starts_with("chrome-extension://"));
+    assert!(response
+        .headers()
+        .get("access-control-allow-private-network")
+        .is_none());
 }
 
 #[tokio::test]
@@ -185,9 +233,7 @@ async fn websocket_disconnect_removes_all_runtimes_registered_on_the_connection(
     let server = tokio::spawn(async move {
         axum::serve(listener, server_app).await.unwrap();
     });
-    let (mut socket, _) = connect_async(format!("ws://{address}/extension"))
-        .await
-        .unwrap();
+    let mut socket = connect_extension_socket(address).await;
 
     socket
         .send(Message::Text(
@@ -308,7 +354,7 @@ async fn pr3_ambiguous_url_routing_fails_without_dispatch() {
 
     let response = app
         .oneshot(
-            Request::builder()
+            authorized(Request::builder())
                 .method("POST")
                 .uri("/mcp/tools/call")
                 .header("content-type", "application/json")
@@ -364,7 +410,7 @@ async fn url_routing_failure_reports_candidate_rejection_trace() {
 
     let response = app
         .oneshot(
-            Request::builder()
+            authorized(Request::builder())
                 .method("POST")
                 .uri("/mcp/tools/call")
                 .header("content-type", "application/json")
@@ -667,9 +713,7 @@ async fn runtime_ready_proactively_imports_storage_bundle() {
     let server = tokio::spawn(async move {
         axum::serve(listener, server_app).await.unwrap();
     });
-    let (mut socket, _) = connect_async(format!("ws://{address}/extension"))
-        .await
-        .unwrap();
+    let mut socket = connect_extension_socket(address).await;
     socket
         .send(Message::Text(
             json!({
@@ -887,9 +931,7 @@ async fn actions_site_call_dispatches_site_action_handler_from_base_manifest() {
     let server = tokio::spawn(async move {
         axum::serve(listener, server_app).await.unwrap();
     });
-    let (mut socket, _) = connect_async(format!("ws://{address}/extension"))
-        .await
-        .unwrap();
+    let mut socket = connect_extension_socket(address).await;
     socket
         .send(Message::Text(
             json!({
@@ -1114,6 +1156,146 @@ async fn actions_site_list_includes_storage_files_and_skill_front_matter_from_st
         payload["output"]["skills"][0]["read_when"],
         "Before extracting key moments, screenshots, or tutorials from a YouTube video."
     );
+}
+
+#[tokio::test]
+async fn actions_site_respects_map_level_url_scope_for_listing_and_calls() {
+    let storage_root = tempfile::tempdir().unwrap();
+    let site_dir = storage_root
+        .path()
+        .join("scopes/public/sites/linkedin.com/messaging");
+    std::fs::create_dir_all(&site_dir).unwrap();
+    std::fs::write(
+        site_dir.join("actions.json"),
+        json!({
+            "protocol": "actions.json",
+            "scope": {
+                "url_matches": "https://www.linkedin.com/messaging/*"
+            },
+            "tools": [{
+                "name": "linkedin.messaging.map",
+                "description": "Return LinkedIn Messaging guidance.",
+                "input_schema": {
+                    "type": "object",
+                    "additionalProperties": false
+                },
+                "x_actions": {
+                    "static_output": { "ok": true, "surface": "messaging" }
+                }
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let app = app_from_manifest_map_paths_and_storage_root(
+        json!({ "tools": [] }),
+        Vec::new(),
+        Some(storage_root.path().to_path_buf()),
+    )
+    .await
+    .unwrap();
+
+    let (feed_status, feed_payload) = call_tool(
+        app.clone(),
+        json!({
+            "name": "actions.site",
+            "arguments": {
+                "mode": "list",
+                "target_url_contains": "https://www.linkedin.com/feed/"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(feed_status, StatusCode::OK);
+    assert_eq!(feed_payload["output"]["actions"], json!([]));
+
+    let (feed_fragment_status, feed_fragment_payload) = call_tool(
+        app.clone(),
+        json!({
+            "name": "actions.site",
+            "arguments": {
+                "mode": "list",
+                "target_url_contains": "linkedin.com/feed/"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(feed_fragment_status, StatusCode::OK);
+    assert_eq!(feed_fragment_payload["output"]["actions"], json!([]));
+
+    let (messaging_status, messaging_payload) = call_tool(
+        app.clone(),
+        json!({
+            "name": "actions.site",
+            "arguments": {
+                "mode": "list",
+                "target_url_contains": "https://www.linkedin.com/messaging/thread/example"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(messaging_status, StatusCode::OK);
+    assert_eq!(
+        messaging_payload["output"]["actions"][0]["name"],
+        "linkedin.messaging.map"
+    );
+    assert_eq!(
+        messaging_payload["output"]["actions"][0]["url_matches"],
+        "https://www.linkedin.com/messaging/*"
+    );
+
+    let (messaging_fragment_status, messaging_fragment_payload) = call_tool(
+        app.clone(),
+        json!({
+            "name": "actions.site",
+            "arguments": {
+                "mode": "list",
+                "target_url_contains": "linkedin.com/messaging/thread/"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(messaging_fragment_status, StatusCode::OK);
+    assert_eq!(
+        messaging_fragment_payload["output"]["actions"][0]["name"],
+        "linkedin.messaging.map"
+    );
+
+    let (wrong_page_status, wrong_page_payload) = call_tool(
+        app.clone(),
+        json!({
+            "name": "actions.site",
+            "arguments": {
+                "mode": "call",
+                "action": "linkedin.messaging.map",
+                "arguments": {},
+                "target_url_contains": "https://www.linkedin.com/feed/"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(wrong_page_status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        wrong_page_payload["error"]["code"],
+        "site_action_not_applicable"
+    );
+
+    let (right_page_status, right_page_payload) = call_tool(
+        app,
+        json!({
+            "name": "actions.site",
+            "arguments": {
+                "mode": "call",
+                "action": "linkedin.messaging.map",
+                "arguments": {},
+                "target_url_contains": "https://www.linkedin.com/messaging/"
+            }
+        }),
+    )
+    .await;
+    assert_eq!(right_page_status, StatusCode::OK);
+    assert_eq!(right_page_payload["output"]["surface"], "messaging");
 }
 
 #[tokio::test]
@@ -1433,7 +1615,7 @@ async fn stored_overlay_binding_delegates_to_overlay_open_arguments() {
 
     let response = app
         .oneshot(
-            Request::builder()
+            authorized(Request::builder())
                 .method("POST")
                 .uri("/mcp/tools/resolve")
                 .header("content-type", "application/json")
@@ -1579,7 +1761,7 @@ async fn stored_overlay_binding_renders_storage_overlay_and_items() {
 
     let response = app
         .oneshot(
-            Request::builder()
+            authorized(Request::builder())
                 .method("POST")
                 .uri("/mcp/tools/resolve")
                 .header("content-type", "application/json")
@@ -1716,7 +1898,7 @@ async fn stored_overlay_binding_renders_html_source_with_css_sources() {
 
     let response = app
         .oneshot(
-            Request::builder()
+            authorized(Request::builder())
                 .method("POST")
                 .uri("/mcp/tools/resolve")
                 .header("content-type", "application/json")
@@ -1831,7 +2013,7 @@ async fn stored_overlay_binding_renders_legacy_source_html_relative_to_overlay_f
 
     let response = app
         .oneshot(
-            Request::builder()
+            authorized(Request::builder())
                 .method("POST")
                 .uri("/mcp/tools/resolve")
                 .header("content-type", "application/json")
@@ -1953,7 +2135,7 @@ async fn stored_overlay_register_launcher_binding_renders_overlay_without_openin
 
     let response = app
         .oneshot(
-            Request::builder()
+            authorized(Request::builder())
                 .method("POST")
                 .uri("/mcp/tools/resolve")
                 .header("content-type", "application/json")
@@ -2228,7 +2410,7 @@ async fn unknown_tool_call_returns_structured_unknown_action() {
 
     let response = app
         .oneshot(
-            Request::builder()
+            authorized(Request::builder())
                 .method("POST")
                 .uri("/mcp/tools/call")
                 .header("content-type", "application/json")
@@ -2282,7 +2464,7 @@ async fn invalid_tool_arguments_return_structured_invalid_input() {
 
     let response = app
         .oneshot(
-            Request::builder()
+            authorized(Request::builder())
                 .method("POST")
                 .uri("/mcp/tools/call")
                 .header("content-type", "application/json")
@@ -2335,7 +2517,7 @@ async fn browser_screenshot_dispatches_to_runtime_without_open_browser_use_inter
 
     let response = app
         .oneshot(
-            Request::builder()
+            authorized(Request::builder())
                 .method("POST")
                 .uri("/mcp/tools/call")
                 .header("content-type", "application/json")
@@ -2387,7 +2569,13 @@ fn trello_state_projection_map() -> Value {
                     {
                         "name": "agent_context",
                         "description": "Compact board summary.",
-                        "max_bytes": 12000
+                        "max_bytes": 12000,
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "list_name": { "type": "string" }
+                            }
+                        }
                     }
                 ]
             }
@@ -2437,6 +2625,10 @@ async fn actions_site_list_includes_state_projections() {
     assert_eq!(
         projections[0]["summaries"][0]["name"].as_str(),
         Some("agent_context")
+    );
+    assert_eq!(
+        projections[0]["summaries"][0]["input_schema"]["type"].as_str(),
+        Some("object")
     );
     assert_eq!(
         projections[0]["map_path"].as_str(),
@@ -2590,9 +2782,7 @@ async fn actions_site_state_read_round_trips_through_runtime() {
     let server = tokio::spawn(async move {
         axum::serve(listener, server_app).await.unwrap();
     });
-    let (mut socket, _) = connect_async(format!("ws://{address}/extension"))
-        .await
-        .unwrap();
+    let mut socket = connect_extension_socket(address).await;
     socket
         .send(Message::Text(
             json!({
@@ -2689,6 +2879,116 @@ async fn actions_site_state_read_round_trips_through_runtime() {
 }
 
 #[tokio::test]
+async fn actions_site_state_summary_forwards_summary_arguments_to_runtime() {
+    let storage_root = tempfile::tempdir().unwrap();
+    write_storage_map(
+        storage_root.path(),
+        "scopes/private/sites/trello.com/board/actions.json",
+        &trello_state_projection_map(),
+    );
+    let app = state_projection_app(storage_root.path()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, server_app).await.unwrap();
+    });
+    let mut socket = connect_extension_socket(address).await;
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "runtime_ready",
+                "runtime_id": "runtime-trello",
+                "runtime_key": "chrome-tab:7",
+                "url": "https://trello.com/b/example/board",
+                "extension_version": "0.1.105"
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    for _ in 0..20 {
+        if runtime_count(app.clone()).await == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    let call_app = app.clone();
+    let call_task = tokio::spawn(async move {
+        call_tool(
+            call_app,
+            json!({
+                "name": "actions.site",
+                "target_runtime_id": "runtime-trello",
+                "arguments": {
+                    "mode": "state_summary",
+                    "projection_name": "trello.board",
+                    "summary_name": "agent_context",
+                    "summary_arguments": {
+                        "list_name": "Next",
+                        "offset": 20,
+                        "limit": 10
+                    },
+                    "max_bytes": 8000,
+                    "target_url_contains": "trello.com"
+                },
+                "timeout_ms": 1000
+            }),
+        )
+        .await
+    });
+
+    let item = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        loop {
+            let message = socket.next().await.unwrap().unwrap();
+            let item: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            if item["type"].as_str() == Some("state_projection_call") {
+                break item;
+            }
+        }
+    })
+    .await
+    .expect("runtime did not receive a state projection call");
+
+    assert_eq!(item["mode"].as_str(), Some("state_summary"));
+    assert_eq!(item["summary_name"].as_str(), Some("agent_context"));
+    assert_eq!(
+        item["summary_arguments"]["list_name"].as_str(),
+        Some("Next")
+    );
+    assert_eq!(item["summary_arguments"]["offset"].as_u64(), Some(20));
+    assert_eq!(item["summary_arguments"]["limit"].as_u64(), Some(10));
+    assert_eq!(item["max_bytes"].as_u64(), Some(8000));
+
+    socket
+        .send(Message::Text(
+            json!({
+                "type": "action_call_output",
+                "call_id": item["call_id"].as_str().unwrap(),
+                "runtime_id": "runtime-trello",
+                "output": {
+                    "ok": true,
+                    "projection": "trello.board",
+                    "summary_name": "agent_context",
+                    "summary_arguments": item["summary_arguments"].clone(),
+                    "summary": { "cards": [{ "title": "Card 21" }] }
+                }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let (status, payload) = call_task.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload["output"]["summary"]["cards"][0]["title"], "Card 21");
+    assert_eq!(payload["output"]["summary_arguments"]["list_name"], "Next");
+
+    server.abort();
+}
+
+#[tokio::test]
 async fn actions_site_state_read_passes_runtime_errors_through() {
     let storage_root = tempfile::tempdir().unwrap();
     write_storage_map(
@@ -2703,9 +3003,7 @@ async fn actions_site_state_read_passes_runtime_errors_through() {
     let server = tokio::spawn(async move {
         axum::serve(listener, server_app).await.unwrap();
     });
-    let (mut socket, _) = connect_async(format!("ws://{address}/extension"))
-        .await
-        .unwrap();
+    let mut socket = connect_extension_socket(address).await;
     socket
         .send(Message::Text(
             json!({
@@ -2824,9 +3122,7 @@ async fn actions_site_workflow_call_round_trips_through_runtime() {
     let server = tokio::spawn(async move {
         axum::serve(listener, server_app).await.unwrap();
     });
-    let (mut socket, _) = connect_async(format!("ws://{address}/extension"))
-        .await
-        .unwrap();
+    let mut socket = connect_extension_socket(address).await;
     socket
         .send(Message::Text(
             json!({
@@ -3011,9 +3307,7 @@ async fn actions_site_workflow_call_without_storage_map_falls_back_to_action_cal
     let server = tokio::spawn(async move {
         axum::serve(listener, server_app).await.unwrap();
     });
-    let (mut socket, _) = connect_async(format!("ws://{address}/extension"))
-        .await
-        .unwrap();
+    let mut socket = connect_extension_socket(address).await;
     socket
         .send(Message::Text(
             json!({
@@ -3102,9 +3396,7 @@ async fn actions_site_workflow_call_passes_runtime_errors_through() {
     let server = tokio::spawn(async move {
         axum::serve(listener, server_app).await.unwrap();
     });
-    let (mut socket, _) = connect_async(format!("ws://{address}/extension"))
-        .await
-        .unwrap();
+    let mut socket = connect_extension_socket(address).await;
     socket
         .send(Message::Text(
             json!({

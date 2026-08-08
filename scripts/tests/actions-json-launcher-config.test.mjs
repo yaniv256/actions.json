@@ -205,15 +205,6 @@ test('the dev-cycle skill requires harness-aware launcher discovery before resta
   assert.match(skill, /before asking.*restart/is);
 });
 
-test('the development-cycle reference carries the same harness-aware pre-restart gate', async () => {
-  const reference = await readFile(path.join(repoRoot, 'docs', 'development-cycle.md'), 'utf8');
-
-  assert.match(reference, /active MCP launcher config/i);
-  assert.match(reference, /\.codex\/config\.toml/);
-  assert.match(reference, /\.claude\.json/);
-  assert.match(reference, /verify-actions-json-launcher-config\.mjs/);
-});
-
 test('the actions.json authoring skill does not present Claude config as universal', async () => {
   const authoringSkill = await readFile(path.join(repoRoot, 'skills', 'write-actions-json', 'SKILL.md'), 'utf8');
 

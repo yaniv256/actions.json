@@ -76,7 +76,7 @@ test("missing frame selector errors frame_not_found", () => {
   assert.equal(r.error.frame, ".nope");
 });
 
-// Invariant guard (Yaniv 2026-07-05: wrong-frame is a recurring failure mode).
+// Invariant guard (the product owner 2026-07-05: wrong-frame is a recurring failure mode).
 // Every user-facing element/scope resolver must route its query root through
 // frameRootFor so `frame` is honored universally. A new resolver that queries
 // document.querySelector* directly for a user-supplied selector/scope is a

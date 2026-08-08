@@ -121,7 +121,7 @@ test("an armed loop succeeds as soon as retry_until is satisfied", async () => {
 });
 
 // R11 (Phase-10 remediation of
-// investigations/trello-delete-confirm-anchor-and-silent-noop-family.md).
+// the internal investigation record).
 //
 // `after_each` is a WAIT SLOT — it runs between retry attempts to let the page
 // settle. The validator only checked "is this a known primitive", so it accepted:

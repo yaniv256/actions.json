@@ -11,10 +11,17 @@ Agents should use MCP `tools/list`, `tools/call`, `resources/list`, and
 
 ```bash
 cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- mcp \
-  --bind 0.0.0.0:17345 \
+  --bind 127.0.0.1:17345 \
   --actions extensions/chrome-overlay-runtime/actions/overlay.actions.json \
   --storage-root /path/to/actions.json.storage
 ```
+
+Use `0.0.0.0:17345` only for cross-machine operation, and only behind a host
+firewall and a private network such as Tailscale. It binds every interface, and
+`GET /runtimes` requires no credential — it reports the URL and title of every
+authorized tab, so a non-loopback bind publishes your browsing to anything that
+can route to the port. Never expose 17345 to the public internet. See
+[Security](../../SECURITY.md).
 
 When Chrome runs on another machine, configure the extension WebSocket with the
 coding-agent host address, for example:

@@ -13,6 +13,10 @@
         --accent: #126b7d;
         --danger: #b64040;
         --ok: #24744a;
+        /* Set from PILL_STATE_TOKENS at runtime. The fallback is the pill's
+           own `idle` hue, so a popup that somehow renders before the first
+           state resolves still shows a colour from the shared table. */
+        --state-hue: #8b96a5;
       }
 
       * {
@@ -52,14 +56,69 @@
         text-transform: uppercase;
       }
 
+      /* ------------------------------------------------------------------
+         THE STATE BLOCK — priority 1, so it is the first and largest thing.
+         The hue reaches a rim and a dot only, never a fill: the same
+         containment rule the pill enforces, for the same reason (a coloured
+         body reads as chrome and fights the surface it sits on).
+         ------------------------------------------------------------------ */
+      .state {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 2px 10px;
+        align-items: center;
+        margin: 0 14px;
+        padding: 12px;
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--state-hue);
+        border-radius: 9px;
+        background: var(--panel);
+      }
+
+      .state-dot {
+        grid-row: span 2;
+        align-self: start;
+        width: 11px;
+        height: 11px;
+        margin-top: 4px;
+        border-radius: 999px;
+        background: var(--state-hue);
+      }
+
+      /* A live microphone is the one state that must never be missed, so it
+         is the one state that moves. Well under the pill's 2s ceiling. */
+      .state[data-live="true"] .state-dot {
+        animation: statePulse 1.6s ease-in-out infinite;
+      }
+
+      @keyframes statePulse {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.55; transform: scale(0.82); }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .state[data-live="true"] .state-dot { animation: none; }
+      }
+
+      #sessionState {
+        font-size: 15px;
+        font-weight: 800;
+        letter-spacing: -0.01em;
+      }
+
+      #sessionDetail {
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+
       .actions {
         display: grid;
         gap: 7px;
-        padding: 0 14px;
+        padding: 12px 14px 0;
       }
 
       #tabNotice {
-        margin: 0 14px 10px;
+        margin: 12px 14px 0;
         padding: 9px 10px;
         border: 1px solid #f0d9a8;
         border-radius: 7px;
@@ -70,6 +129,21 @@
       }
 
       #tabNotice[hidden] {
+        display: none;
+      }
+
+      #websiteAgentNotice {
+        margin: 12px 14px 0;
+        padding: 9px 10px;
+        border: 1px solid #b9dce3;
+        border-radius: 7px;
+        background: #effbfe;
+        color: #174f5b;
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      #websiteAgentNotice[hidden] {
         display: none;
       }
 
@@ -94,64 +168,124 @@
         opacity: 0.52;
       }
 
-      .session-card {
-        display: grid;
-        gap: 8px;
-        margin: 12px 14px 0;
-        padding: 10px;
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background: var(--panel);
-      }
-
-      .session-card strong {
-        font-size: 12px;
-        letter-spacing: 0.03em;
-        text-transform: uppercase;
-        color: var(--muted);
-      }
-
-      #voiceState {
-        min-height: 18px;
-        font-size: 13px;
-      }
-
       .voice-controls {
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 7px;
+        padding: 7px 14px 0;
       }
 
       .voice-controls button {
         height: 32px;
       }
 
-      .settings {
-        margin-top: 12px;
+      /* ------------------------------------------------------------------
+         THE TWO TOGGLES — the only settings that get flipped mid-session, so
+         they are the only settings on this screen. Everything else is one
+         door away.
+         ------------------------------------------------------------------ */
+      .toggles {
+        display: grid;
+        gap: 2px;
+        margin: 14px 14px 0;
+        padding: 4px 0;
         border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
       }
 
-      .settings-label {
-        display: block;
-        padding: 10px 14px 0;
+      .toggle {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 2px 10px;
+        align-items: center;
+        padding: 8px 2px;
+        cursor: pointer;
+      }
+
+      .toggle-name {
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .toggle-hint {
+        grid-column: 1;
         color: var(--muted);
-        font-size: 12px;
-        font-weight: 800;
-        letter-spacing: 0.03em;
-        text-transform: uppercase;
+        font-size: 11.5px;
       }
 
-      .settings iframe {
-        display: block;
-        width: 100%;
-        height: 430px;
-        border: 0;
+      /* A real checkbox, restyled: it keeps the native focus ring, the native
+         keyboard behaviour and the native accessible name. */
+      .toggle input {
+        grid-row: span 2;
+        appearance: none;
+        position: relative;
+        width: 34px;
+        height: 20px;
+        margin: 0;
+        border-radius: 999px;
+        background: #c8d0da;
+        cursor: pointer;
+        transition: background 140ms ease;
+      }
+
+      .toggle input::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 999px;
         background: #fff;
+        transition: transform 140ms ease;
+      }
+
+      .toggle input:checked {
+        background: var(--accent);
+      }
+
+      .toggle input:checked::after {
+        transform: translateX(14px);
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .toggle input, .toggle input::after { transition: none; }
+      }
+
+      /* ------------------------------------------------------------------
+         THE ONE DOOR. Everything rare — keys, voice, turn detection, avatar,
+         bridge, storage, memory, cloud credentials — is behind this link.
+         ------------------------------------------------------------------ */
+      .all-settings {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        width: calc(100% - 28px);
+        height: auto;
+        margin: 10px 14px 0;
+        padding: 9px 10px;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        background: #fff;
+        color: var(--ink);
+        font-size: 13px;
+        font-weight: 700;
+        text-align: left;
+        text-decoration: none;
+      }
+
+      .all-settings:hover {
+        background: var(--panel);
+      }
+
+      .all-settings .chev {
+        color: var(--muted);
+        font-weight: 800;
       }
 
       #status {
         min-height: 18px;
-        padding: 8px 14px 12px;
+        padding: 10px 14px 12px;
         color: var(--ok);
         font-size: 12px;
       }
@@ -162,24 +296,47 @@
       <h1>actions.json</h1>
       <span class="tag">runtime</span>
     </header>
+
+    <!-- Priority 1: what is happening. -->
+    <div class="state" id="stateBlock" role="status" data-state="idle" data-live="false">
+      <span class="state-dot" aria-hidden="true"></span>
+      <div id="sessionState">Checking…</div>
+      <div id="sessionDetail">Reading the current session state.</div>
+    </div>
+
     <div id="tabNotice" role="alert" hidden></div>
+    <div id="websiteAgentNotice" role="status" hidden></div>
+
+    <!-- Priority 2: what you can do about it, in the order you reach for it. -->
+    <div class="voice-controls" aria-label="Session controls">
+      <button id="startVoice" type="button">Start</button>
+      <button id="muteVoice" type="button" class="secondary">Mute</button>
+      <button id="stopVoice" type="button" class="secondary">Stop</button>
+    </div>
+
     <div class="actions">
       <button id="authorize">Take control of this tab</button>
       <button id="openMenu" class="secondary">Open agent overlay</button>
     </div>
-    <div class="session-card" aria-label="Session controls">
-      <strong>Session</strong>
-      <div id="voiceState">Session: checking...</div>
-      <div class="voice-controls">
-        <button id="startVoice" type="button">Start</button>
-        <button id="muteVoice" type="button" class="secondary">Mute</button>
-        <button id="stopVoice" type="button" class="secondary">Stop</button>
-      </div>
+
+    <div class="toggles">
+      <label class="toggle" for="showCost">
+        <span class="toggle-name">Show cost meter</span>
+        <input id="showCost" type="checkbox" />
+        <span class="toggle-hint">Live spend strip along the overlay footer.</span>
+      </label>
+      <label class="toggle" for="devMode">
+        <span class="toggle-name">Developer mode</span>
+        <input id="devMode" type="checkbox" />
+        <span class="toggle-hint">Debug surfaces and verbose session logs.</span>
+      </label>
     </div>
-    <div class="settings">
-      <span class="settings-label">Settings</span>
-      <iframe title="actions.json settings" src="sidepanel.html?tab=config&surface=popup"></iframe>
-    </div>
+
+    <a class="all-settings" id="allSettings" href="#" role="button">
+      All settings
+      <span class="chev" aria-hidden="true">→</span>
+    </a>
+
     <div id="status" role="status"></div>
     <script type="module" src="src/popup.js"></script>
   </body>

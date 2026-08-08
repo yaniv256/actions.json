@@ -49,14 +49,14 @@ dist="$repo_root/dist"
 mkdir -p "$dist"
 
 # --- Config (override via env) -----------------------------------------------
-MAC_HOST="${MAC_HOST:-$USER@10.42.0.4}"
+MAC_HOST="${MAC_HOST:-}"
 MAC_KEY="${MAC_KEY:-$HOME/.ssh/id_ed25519_mac}"
-MAC_REPO="${MAC_REPO:-/Users/agent-zara/Projects/actions.json}"
+MAC_REPO="${MAC_REPO:-$HOME/Projects/actions.json}"
 MAC_PATH_EXPORT='export PATH=/opt/homebrew/bin:$HOME/.cargo/bin:$PATH'
 
 # git and cargo are on the Windows PATH, so PowerShell can call them by name.
-WIN_REPO_WIN="${WIN_REPO_WIN:-C:\\Users\\yaniv\\Projects\\actions.json}"
-WIN_REPO_WSL="${WIN_REPO_WSL:-/mnt/c/Users/yaniv/Projects/actions.json}"
+WIN_REPO_WIN="${WIN_REPO_WIN:-C:\\actions-json\\actions.json}"
+WIN_REPO_WSL="${WIN_REPO_WSL:-/mnt/c/actions-json/actions.json}"
 PWSH="${PWSH:-/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe}"
 
 GIT_URL="https://github.com/${repo}.git"
@@ -82,7 +82,7 @@ package() {
 }
 
 # Package the chrome-launcher-helper as its OWN standalone release asset.
-# Rationale (Yaniv 2026-07-09): the helper must be installed where the BROWSER
+# Rationale (the product owner 2026-07-09): the helper must be installed where the BROWSER
 # runs, which in the WSL→Windows topology is a DIFFERENT machine than the one
 # that pulls the bridge tarball (the agent host, typically linux-x64). Bundling
 # it inside the win-x64 bridge tarball only serves an all-Windows setup and hides

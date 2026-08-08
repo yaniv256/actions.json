@@ -1,4 +1,4 @@
-// X-CLICK path (Yaniv's idea): run the WHOLE thing locally in an Xvfb display with Playwright's
+// X-CLICK path (the product owner idea): run the WHOLE thing locally in an Xvfb display with Playwright's
 // own Chromium — which supports --load-extension (unbranded) — and ACTIVATE the extension by a
 // REAL mouse CLICK on the popup's claim button (#authorize), exactly like a human. Everything is
 // co-located in WSL: the serve bridge runs on 127.0.0.1, the browser runs in the same box, so

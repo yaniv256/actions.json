@@ -27,10 +27,26 @@
   let primitiveQueue = Promise.resolve();
   let lastHumanInteractionStartedAt = 0;
   let stateProjectionModulePromise = null;
+  let projectionSnapshotStoreModulePromise = null;
+  let projectionGraphQueryModulePromise = null;
+  let projectionSnapshotStore = null;
+  const projectionSnapshotAuthorities = new Map();
+  const projectionCursorAuthorities = new Map();
+  const projectionAuthorityTabIds = new Set();
+  let projectionNavigationPoller = null;
+  let projectionNavigationEpoch = globalThis.crypto?.randomUUID?.()
+    || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  let projectionNavigationHref = location.href;
 
   const LAUNCHER_ATTR = "data-actions-json-overlay-launcher";
   const OVERLAY_REGISTRY_STORAGE_KEY = "actionsJsonOverlayRegistry.v1";
   const MENU_OVERLAY_STATE_STORAGE_KEY = "actionsJsonMenuOverlayState.v1";
+  const PROTOFACE_SETTINGS_STORAGE_KEY = "ACTIONS_JSON_PROTOFACE_SETTINGS_V1";
+  // Mirrors OVERLAY_SETTINGS_STORAGE_KEY / DEFAULT_OVERLAY_SETTINGS.showCost in
+  // src/agent/overlay-settings-store.mjs. content.js is not a module, so the key
+  // is repeated rather than imported; the default stays false in both places.
+  const OVERLAY_SETTINGS_STORAGE_KEY = "ACTIONS_JSON_OVERLAY_SETTINGS_V1";
+  let overlayShowCost = false;
   const STORAGE_BUNDLE_KEY = "actionsJsonStorageBundle";
   const OVERLAY_BUNDLE_MARKER = "actions.json.overlay.bundle";
   const BOOKMARKLET_RELAY_SOURCE = "ajbm";
@@ -1002,6 +1018,7 @@
     }
     const menu = document.getElementById("__actions_json_menu_overlay_host");
     if (menu) {
+      menu.__actionsJsonMenuControl?.dispose?.();
       menu.remove();
       persistMenuOverlayState({ open: false }).catch((_error) => {});
       emitDomEvent("actions-json:overlay-closed", { overlay_id: "actions-json-menu" });
@@ -1100,18 +1117,48 @@
     const restoreState = options.restoreState && typeof options.restoreState === "object" ? options.restoreState : {};
     const existing = document.getElementById("__actions_json_menu_overlay_host");
     if (existing) {
+      existing.__actionsJsonMenuControl?.dispose?.();
       existing.remove();
     }
 
     const host = document.createElement("div");
     host.id = "__actions_json_menu_overlay_host";
+    const DISCLOSURE_STATES = new Set(["resting", "controls", "opened"]);
+    // The host uses border-box sizing, so include its two border pixels around
+    // the iframe's 74px resting content and 128px controls content.
+    const RESTING_GEOMETRY = Object.freeze({ width: "min(340px, calc(100vw - 48px))", height: "76px" });
+    const CONTROLS_GEOMETRY = Object.freeze({ width: "min(340px, calc(100vw - 48px))", height: "130px" });
+    const OPENED_GEOMETRY = Object.freeze({
+      width: "min(340px, calc(100vw - 48px))",
+      height: "min(420px, calc(100vh - 48px))",
+    });
     const restoredGeometry = restoreState.geometry && typeof restoreState.geometry === "object"
       ? restoreState.geometry
       : null;
+    const restoredOpenedGeometry = restoreState.opened_geometry
+      && typeof restoreState.opened_geometry === "object"
+      ? restoreState.opened_geometry
+      : null;
+    const initialDisclosureState = DISCLOSURE_STATES.has(restoreState.disclosure_state)
+      ? restoreState.disclosure_state
+      : "resting";
+    const defaultGeometry = initialDisclosureState === "opened"
+      ? OPENED_GEOMETRY
+      : initialDisclosureState === "controls"
+        ? CONTROLS_GEOMETRY
+        : RESTING_GEOMETRY;
     const initialLeft = restoredGeometry?.left || null;
     const initialTop = restoredGeometry?.top || null;
-    const initialWidth = restoredGeometry?.width || "min(340px, calc(100vw - 48px))";
-    const initialHeight = restoredGeometry?.height || "min(420px, calc(100vh - 48px))";
+    // Resting and controls are content-sized states, not user-resizable states.
+    // Persist their position, but always normalize dimensions on startup so an
+    // older release cannot permanently restore obsolete/clipping geometry.
+    const initialWidth = initialDisclosureState === "opened"
+      ? restoredGeometry?.width || defaultGeometry.width
+      : defaultGeometry.width;
+    const initialHeight = initialDisclosureState === "opened"
+      ? restoredGeometry?.height || defaultGeometry.height
+      : defaultGeometry.height;
+    host.dataset.disclosureState = initialDisclosureState;
     host.style.cssText = [
       "position:fixed",
       initialLeft ? `left:${initialLeft}` : "right:24px",
@@ -1122,7 +1169,7 @@
       "min-width:220px",
       "min-height:42px",
       "z-index:2147483647",
-      "resize:both",
+      `resize:${initialDisclosureState === "opened" ? "both" : "none"}`,
       "overflow:hidden",
       "box-sizing:border-box",
       "background:white",
@@ -1132,6 +1179,9 @@
     ].join(";");
 
     const shadow = host.attachShadow({ mode: "open" });
+    const defaultAgentUrl = chrome.runtime.getURL(
+      `agent-surface.html?surface=overlay&tab=agent&parentOrigin=${encodeURIComponent(location.origin)}&disclosure=${initialDisclosureState}`
+    );
     shadow.innerHTML = `
       <style>
         :host {
@@ -1153,22 +1203,72 @@
           background: #f7f8fb;
           color: var(--ink);
         }
+        :host([data-disclosure-state="resting"]) .panel,
+        :host([data-disclosure-state="controls"]) .panel {
+          grid-template-rows: minmax(0, 1fr);
+        }
+        :host([data-disclosure-state="resting"]) .bar,
+        :host([data-disclosure-state="controls"]) .bar {
+          display: none;
+        }
+        :host([data-disclosure-state="resting"]) .body,
+        :host([data-disclosure-state="controls"]) .body {
+          grid-row: 1;
+        }
+        :host([data-disclosure-state="resting"]) .cost-meter,
+        :host([data-disclosure-state="controls"]) .cost-meter {
+          display: none;
+        }
+        :host([data-disclosure-state]) .panel[data-collapsed="true"] .bar {
+          display: grid;
+        }
+        /* Collapsed, the panel IS the 42px box: the header bar is layered
+           over the body rather than stacked above it, so the whole square is
+           the live agent surface with the collapse control on top of it. */
         .panel[data-collapsed="true"] {
           grid-template-rows: 42px;
+          grid-template-columns: 42px;
         }
+        /* NOT display:none.
+           The live-status pill renders INSIDE the agent iframe — page-world
+           shadow DOM cannot request microphone permission, so the pill cannot
+           move out here (docs/chrome-extension.md:78-80). Hiding .body would
+           hide the very surface that tells the user the session is still live,
+           and would also tear down the iframe's rendering. Instead the body is
+           clipped to the 42px square and stacked under the header controls.
+           The characterization spec's "agent iframe is still mounted while
+           collapsed" assertion is the guard on this rule. */
         .panel[data-collapsed="true"] .body {
-          display: none;
+          grid-row: 1;
+          grid-column: 1;
+          width: 42px;
+          height: 42px;
+          overflow: hidden;
+        }
+        .panel[data-collapsed="true"] .bar {
+          grid-row: 1;
+          grid-column: 1;
+          z-index: 1;
+          grid-template-columns: 30px;
+          padding: 6px;
+          background: transparent;
         }
         .panel[data-collapsed="true"] .cost-meter {
           display: none;
         }
-        .panel[data-collapsed="true"] .bar {
-          grid-template-columns: 30px;
-          padding: 6px;
-        }
         .panel[data-collapsed="true"] .title,
         .panel[data-collapsed="true"] [data-close] {
           display: none;
+        }
+        /* The collapse control sits over a live surface now, so it needs its
+           own contrast rather than inheriting the header's solid bar. */
+        .panel[data-collapsed="true"] [data-minimize] {
+          border-color: rgba(15, 23, 42, 0.28);
+          background: rgba(255, 255, 255, 0.82);
+          color: #18202c;
+        }
+        .panel[data-collapsed="true"] [data-minimize]:hover {
+          background: #ffffff;
         }
         .panel[data-collapsed="true"] .actions {
           gap: 0;
@@ -1271,13 +1371,18 @@
         <header class="bar" data-drag-handle>
           <div class="title">actions.json agent</div>
           <div class="actions">
-            <button class="icon" type="button" title="Collapse" data-minimize>☰</button>
+            <!-- NOT a hamburger. A ☰ promises "open a menu" everywhere else on
+                 the web; this control makes the panel disappear into a 42px
+                 square, and a live install ended with the user believing the
+                 overlay had closed. The glyph and the accessible name both
+                 describe collapsing. -->
+            <button class="icon" type="button" title="Collapse panel" aria-label="Collapse panel" data-minimize>▁</button>
             <button class="icon" type="button" title="Close" data-close>×</button>
           </div>
         </header>
         <main class="body">
           <section class="panel-view active" data-panel="agent" role="tabpanel">
-            <iframe title="actions.json agent" allow="microphone; autoplay" src="${chrome.runtime.getURL("sidepanel.html?surface=overlay&tab=agent")}"></iframe>
+            <iframe title="actions.json agent" allow="microphone; autoplay" src="${defaultAgentUrl}"></iframe>
           </section>
         </main>
         <footer class="cost-meter" data-cost-meter hidden>
@@ -1287,15 +1392,32 @@
       </section>
     `;
     document.documentElement.appendChild(host);
-    if (lastCostMeterState) applyCostMeter(lastCostMeterState);
-
+    const agentIframe = shadow.querySelector("iframe[title='actions.json agent']");
+    const agentOrigin = new URL(defaultAgentUrl).origin;
+    const assignAvatarAgentUrl = (stored = {}) => {
+      const enabled = stored?.[PROTOFACE_SETTINGS_STORAGE_KEY]?.enabled === true;
+      if (enabled) {
+        agentIframe.src = `${defaultAgentUrl}&avatar=protoface`;
+      }
+    };
+    try {
+      chrome.storage.local.get(PROTOFACE_SETTINGS_STORAGE_KEY, (stored) => {
+        if (chrome.runtime?.lastError) {
+          return;
+        }
+        assignAvatarAgentUrl(stored);
+      });
+    } catch {}
     const panel = shadow.querySelector(".panel");
     const bar = shadow.querySelector("[data-drag-handle]");
     const minimize = shadow.querySelector("[data-minimize]");
     const close = shadow.querySelector("[data-close]");
     let drag = null;
     let restoreGeometry = restoredGeometry;
+    let openedGeometry = restoredOpenedGeometry
+      || (initialDisclosureState === "opened" && restoredGeometry ? restoredGeometry : null);
     let persistTimer = null;
+    let initialRestingPlacementEligible = true;
 
     const persistCurrentState = (extra = {}) => {
       clearTimeout(persistTimer);
@@ -1308,7 +1430,9 @@
           open: true,
           selected_tab: "agent",
           collapsed,
+          disclosure_state: host.dataset.disclosureState,
           geometry,
+          opened_geometry: openedGeometry,
           ...extra,
         }).catch((_error) => {});
       }, 0);
@@ -1322,7 +1446,125 @@
       host.style.right = "auto";
       host.style.bottom = "auto";
     };
-    const setCollapsed = (collapsed) => {
+    const geometryForDisclosure = (state) => {
+      if (state === "opened") {
+        return {
+          ...OPENED_GEOMETRY,
+          ...(openedGeometry || {}),
+        };
+      }
+      return state === "controls" ? CONTROLS_GEOMETRY : RESTING_GEOMETRY;
+    };
+    const setDisclosureState = (state) => {
+      if (!DISCLOSURE_STATES.has(state)) return false;
+      if (host.dataset.disclosureState === state) return true;
+      initialRestingPlacementEligible = false;
+      const wasCollapsed = panel.dataset.collapsed === "true";
+      const currentState = host.dataset.disclosureState;
+      if (currentState === "opened" && !wasCollapsed) {
+        openedGeometry = menuOverlayGeometryFrom(host);
+      }
+      host.dataset.disclosureState = state;
+      if (!wasCollapsed) {
+        const rect = host.getBoundingClientRect();
+        const target = geometryForDisclosure(state);
+        host.style.width = target.width;
+        host.style.height = target.height;
+        host.style.minWidth = target.minWidth || "220px";
+        host.style.minHeight = target.minHeight || "42px";
+        host.style.resize = state === "opened" ? (target.resize || "both") : "none";
+        place(rect.left, rect.top);
+      }
+      persistCurrentState();
+      return true;
+    };
+    const applyRestingCorner = (corner) => {
+      if (!initialRestingPlacementEligible) return;
+      if (
+        restoredGeometry?.left
+        || restoredGeometry?.top
+        || restoredGeometry?.right
+        || restoredGeometry?.bottom
+      ) return;
+      const rect = host.getBoundingClientRect();
+      const margin = 24;
+      const positions = {
+        "top-left": [margin, margin],
+        "top-right": [window.innerWidth - rect.width - margin, margin],
+        "bottom-left": [margin, window.innerHeight - rect.height - margin],
+        "bottom-right": [window.innerWidth - rect.width - margin, window.innerHeight - rect.height - margin],
+      };
+      const position = positions[corner] || positions["bottom-right"];
+      place(position[0], position[1]);
+      initialRestingPlacementEligible = false;
+      persistCurrentState();
+    };
+    const handleDisclosureMessage = (event) => {
+      const data = event.data;
+      if (event.source !== agentIframe.contentWindow) return;
+      if (event.origin !== agentOrigin) return;
+      if (data?.type !== "actions-json:overlay-disclosure" || data.version !== 1) return;
+      if (!DISCLOSURE_STATES.has(data.state)) return;
+      setDisclosureState(data.state);
+    };
+    window.addEventListener("message", handleDisclosureMessage);
+    const handleOverlaySettingsChanged = (changes, area) => {
+      if (area !== "local" || !changes[OVERLAY_SETTINGS_STORAGE_KEY]) return;
+      const settings = changes[OVERLAY_SETTINGS_STORAGE_KEY].newValue || {};
+      overlayShowCost = settings.showCost === true;
+      if (lastCostMeterState) applyCostMeter(lastCostMeterState);
+    };
+
+    // Read placement and cost preferences only after the geometry controller
+    // exists. The test storage shim calls `get` synchronously, while Chrome
+    // normally calls it asynchronously, so initializing earlier would create
+    // an order-dependent temporal-dead-zone bug.
+    try {
+      chrome.storage.local.get(OVERLAY_SETTINGS_STORAGE_KEY, (stored) => {
+        if (chrome.runtime?.lastError) return;
+        const settings = stored?.[OVERLAY_SETTINGS_STORAGE_KEY] || {};
+        overlayShowCost = settings.showCost === true;
+        applyRestingCorner(settings.restingCorner);
+        if (lastCostMeterState) applyCostMeter(lastCostMeterState);
+      });
+      chrome.storage.onChanged?.addListener(handleOverlaySettingsChanged);
+    } catch {}
+    if (lastCostMeterState) applyCostMeter(lastCostMeterState);
+    const COLLAPSED_SIZE = 42;
+    // Where the collapsed square should land.
+    //
+    // The shipped behaviour pinned the PANEL'S OWN top-left, so a wide panel
+    // collapsed leftward — away from the header control on its right edge that
+    // the user had just pressed. During a live install the user pressed
+    // collapse, the panel vanished from under his finger and reappeared
+    // hundreds of pixels away, and he concluded the overlay had closed.
+    //
+    // So the collapsed box is anchored to the PRESSED CONTROL instead: it is
+    // centred on that control's centre, which guarantees the 42px box CONTAINS
+    // the point the finger is already on. Clamping is left entirely to `place`
+    // above — it already solves the viewport problem and must not be
+    // reimplemented here.
+    const collapsedOriginFor = (anchorElement) => {
+      const anchor = anchorElement || minimize;
+      const anchorRect = anchor.getBoundingClientRect();
+      // A detached or zero-box anchor tells us nothing; fall back to the
+      // panel's own top-left rather than collapsing to 0,0.
+      if (!anchorRect.width && !anchorRect.height) {
+        const hostRect = host.getBoundingClientRect();
+        return { left: hostRect.left, top: hostRect.top };
+      }
+      return {
+        left: anchorRect.left + anchorRect.width / 2 - COLLAPSED_SIZE / 2,
+        top: anchorRect.top + anchorRect.height / 2 - COLLAPSED_SIZE / 2,
+      };
+    };
+    const setCollapsed = (collapsed, anchorElement = null) => {
+      // The no-op guard. Repeated collapse must NOT re-capture geometry: the
+      // second capture would save the already-collapsed 42x42 box as the state
+      // to restore, and expand would never bring the panel back.
+      // A mutation is not successful until its terminal outcome is observed.
+      if (panel.dataset.collapsed === String(collapsed)) return;
+      initialRestingPlacementEligible = false;
       if (collapsed) {
         const rect = host.getBoundingClientRect();
         restoreGeometry = {
@@ -1336,17 +1578,21 @@
           right: host.style.right,
           bottom: host.style.bottom,
         };
+        // Read the anchor BEFORE the collapse mutates layout — once the panel
+        // is 42x42 the header button has already moved.
+        const origin = collapsedOriginFor(anchorElement);
         panel.dataset.collapsed = "true";
-        host.style.left = `${rect.left}px`;
-        host.style.top = `${rect.top}px`;
-        host.style.right = "auto";
-        host.style.bottom = "auto";
-        host.style.width = "42px";
-        host.style.height = "42px";
-        host.style.minWidth = "42px";
-        host.style.minHeight = "42px";
+        host.style.width = `${COLLAPSED_SIZE}px`;
+        host.style.height = `${COLLAPSED_SIZE}px`;
+        host.style.minWidth = `${COLLAPSED_SIZE}px`;
+        host.style.minHeight = `${COLLAPSED_SIZE}px`;
         host.style.resize = "none";
-        minimize.title = "Expand";
+        // Size first, then place: `place` measures the host to clamp, so it
+        // must see the collapsed box, not the expanded one.
+        place(origin.left, origin.top);
+        minimize.title = "Expand panel";
+        minimize.setAttribute("aria-label", "Expand panel");
+        minimize.textContent = "▢";
         persistCurrentState({ collapsed: true, geometry: restoreGeometry });
         return;
       }
@@ -1363,7 +1609,9 @@
         host.style.bottom = restoreGeometry.bottom;
       }
       restoreGeometry = null;
-      minimize.title = "Collapse";
+      minimize.title = "Collapse panel";
+      minimize.setAttribute("aria-label", "Collapse panel");
+      minimize.textContent = "▁";
       place(host.getBoundingClientRect().left, host.getBoundingClientRect().top);
       persistCurrentState({ collapsed: false });
     };
@@ -1374,7 +1622,11 @@
     // logic the header buttons use, including geometry persistence and clamping.
     host.__actionsJsonMenuControl = {
       setCollapsed,
-      place,
+      setDisclosureState,
+      place: (left, top) => {
+        initialRestingPlacementEligible = false;
+        place(left, top);
+      },
       isCollapsed: () => panel.dataset.collapsed === "true",
       setHidden: (hidden) => {
         // Hide removes the overlay from hit-testing entirely so it cannot
@@ -1387,21 +1639,24 @@
       isHidden: () => host.dataset.hidden === "true",
       geometry: () => {
         const rect = host.getBoundingClientRect();
-        const visibleCenter = {
-          x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
-          y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2
-        };
-        const result = {
+        return {
           left: Math.round(rect.left),
           top: Math.round(rect.top),
           width: Math.round(rect.width),
           height: Math.round(rect.height),
         };
       },
+      dispose: () => {
+        window.removeEventListener("message", handleDisclosureMessage);
+        chrome.storage.onChanged?.removeListener?.(handleOverlaySettingsChanged);
+        clearTimeout(persistTimer);
+        resizeObserver?.disconnect();
+      },
     };
 
     bar.addEventListener("pointerdown", (event) => {
       if (event.target.closest("button")) return;
+      initialRestingPlacementEligible = false;
       const rect = host.getBoundingClientRect();
       drag = { pointerId: event.pointerId, dx: event.clientX - rect.left, dy: event.clientY - rect.top };
       bar.setPointerCapture(event.pointerId);
@@ -1422,11 +1677,13 @@
     minimize.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      setCollapsed(panel.dataset.collapsed !== "true");
+      // Pass the pressed control so the collapsed square lands ON the user's
+      // finger instead of at the panel's far top-left corner.
+      setCollapsed(panel.dataset.collapsed !== "true", event.currentTarget);
     });
     close.addEventListener("click", () => {
+      host.__actionsJsonMenuControl?.dispose?.();
       host.remove();
-      clearTimeout(persistTimer);
       persistMenuOverlayState({ open: false }).catch((_error) => {});
       emitDomEvent("actions-json:overlay-closed", { overlay_id: "actions-json-menu" });
     });
@@ -1476,7 +1733,12 @@
           return;
         }
         if (!response?.ok) {
-          reject(new Error(response?.error || "screenshot capture failed"));
+          const responseError = response?.error;
+          const messageText =
+            typeof responseError === "string"
+              ? responseError
+              : (responseError?.message || `runtime message ${message?.type || "unknown"} returned no error detail`);
+          reject(new Error(messageText));
           return;
         }
         resolve(response);
@@ -2039,24 +2301,58 @@
     return ancestors;
   };
 
+  const pointerCandidatePointsFor = (visibleRect) => {
+    const width = rectWidth(visibleRect);
+    const height = rectHeight(visibleRect);
+    const insetX = Math.min(4, width / 4);
+    const insetY = Math.min(4, height / 4);
+    const left = visibleRect.left + insetX;
+    const right = visibleRect.right - insetX;
+    const top = visibleRect.top + insetY;
+    const bottom = visibleRect.bottom - insetY;
+    const centerX = visibleRect.left + width / 2;
+    const centerY = visibleRect.top + height / 2;
+    return [
+      { x: centerX, y: centerY },
+      { x: left, y: centerY },
+      { x: right, y: centerY },
+      { x: centerX, y: top },
+      { x: centerX, y: bottom },
+      { x: left, y: top },
+      { x: right, y: top },
+      { x: left, y: bottom },
+      { x: right, y: bottom }
+    ];
+  };
+
   const pointerHitFor = (element, visibleRect) => {
     if (!(element instanceof Element) || !visibleRect) {
       return { receives_events: false, point: null, hit_element: null, occluded_by: null };
     }
-    const point = {
-      x: visibleRect.left + rectWidth(visibleRect) / 2,
-      y: visibleRect.top + rectHeight(visibleRect) / 2
-    };
-    const hitElement = document.elementFromPoint(point.x, point.y);
-    const receivesEvents = hitElement === element || element.contains(hitElement);
+    const candidates = pointerCandidatePointsFor(visibleRect);
+    const centerPoint = candidates[0];
+    let centerHit = null;
+    for (const point of candidates) {
+      const hitElement = document.elementFromPoint(point.x, point.y);
+      if (point === centerPoint) centerHit = hitElement;
+      if (hitElement === element || element.contains(hitElement)) {
+        return {
+          receives_events: true,
+          point,
+          hit_element: hitElement,
+          occluded_by: null
+        };
+      }
+    }
+    const hitElement = centerHit;
     const hitRect = hitElement instanceof Element
       ? rectFromClientRect(hitElement.getBoundingClientRect())
       : null;
     return {
-      receives_events: receivesEvents,
-      point,
+      receives_events: false,
+      point: centerPoint,
       hit_element: hitElement,
-      occluded_by: receivesEvents || !(hitElement instanceof Element) ? null : {
+      occluded_by: !(hitElement instanceof Element) ? null : {
         target_label: elementLabel(hitElement),
         tag_name: hitElement.tagName.toLowerCase(),
         rect: hitRect
@@ -2574,7 +2870,7 @@
           visible_rect: geometry.visible_rect || visibleRect
         };
         if (geometry.clickable && geometry.receives_events !== false) {
-          result.clickable_center = visibleCenter;
+          result.clickable_center = geometry.action_point || visibleCenter;
         }
         return result;
       });
@@ -2908,6 +3204,14 @@
     if (!footer) return false;
     const label = footer.querySelector("[data-cost-meter-label]");
     const drain = meter.cacheState === "drain";
+    // Opt-in: the cost meter is off until the user turns it on in the popup.
+    // Defaulting it visible put a running dollar figure on every page an agent
+    // touched, which is a distraction for most sessions and a privacy surprise
+    // when screen-sharing.
+    if (!overlayShowCost) {
+      footer.hidden = true;
+      return false;
+    }
     footer.hidden = false;
     footer.dataset.cacheState = drain ? "drain" : "ok";
     label.textContent =
@@ -3056,17 +3360,37 @@
       return locator.text_equals ? haystack === text : haystack.includes(text);
     });
     const retarget = locator.retarget;
-    if (!retarget || typeof retarget !== "object") return identityCandidates;
-    if (typeof retarget.selector !== "string" || !retarget.selector.trim()) return [];
-    const targets = identityCandidates.flatMap((identity) => {
-      const scope = typeof retarget.closest === "string" && retarget.closest.trim()
-        ? identity.closest(retarget.closest.trim())
-        : identity;
-      return scope
-        ? queryRelative(scope, retarget.selector.trim(), { visible_only: false })
-        : [];
-    });
-    return Array.from(new Set(targets));
+    let resolvedCandidates = identityCandidates;
+    if (retarget && typeof retarget === "object") {
+      if (typeof retarget.selector !== "string" || !retarget.selector.trim()) return [];
+      const targets = identityCandidates.flatMap((identity) => {
+        const scope = typeof retarget.closest === "string" && retarget.closest.trim()
+          ? identity.closest(retarget.closest.trim())
+          : identity;
+        return scope
+          ? queryRelative(scope, retarget.selector.trim(), { visible_only: false })
+          : [];
+      });
+      resolvedCandidates = Array.from(new Set(targets));
+      const retargetText = normalizeText(retarget.text || retarget.text_contains || retarget.text_equals);
+      if (retargetText) {
+        resolvedCandidates = resolvedCandidates.filter((element) => {
+          const haystack = normalizeText(
+            [
+              element.textContent,
+              element.getAttribute("aria-label"),
+              element.getAttribute("title"),
+              element.getAttribute("value")
+            ].filter(Boolean).join(" ")
+          );
+          return retarget.text_equals ? haystack === retargetText : haystack.includes(retargetText);
+        });
+      }
+    }
+    if (locator.match_index === undefined) return resolvedCandidates;
+    const matchIndex = Number(locator.match_index);
+    if (!Number.isInteger(matchIndex) || matchIndex < 0) return [];
+    return resolvedCandidates[matchIndex] ? [resolvedCandidates[matchIndex]] : [];
   };
 
   const resolveSingleVisibleLocator = (locator) => resolveLocatorCandidates(locator).find(isElementVisible) || null;
@@ -3155,7 +3479,7 @@
           right: rect.right,
           bottom: rect.bottom
         },
-        clickable_center: {
+        clickable_center: candidateVisibility.action_point || {
           x: visibleRect.left + (visibleRect.right - visibleRect.left) / 2,
           y: visibleRect.top + (visibleRect.bottom - visibleRect.top) / 2
         },
@@ -3412,6 +3736,420 @@
     }, 140);
   };
 
+  // --- overlay.cursor.point: the ghost cursor -------------------------------
+  //
+  // An animated pointer that TRAVELS to the element the agent is acting on and
+  // lands on it, so the user sees WHERE the agent acted and THAT it acted.
+  //
+  // Technique borrowed (Apache-2.0) from openai/realtime-voice-component's
+  // `useGhostCursor` + docs/widget-and-cursor.md, reimplemented in vanilla JS.
+  // Behaviours adopted because they already solved the hard cases:
+  //   - scroll an off-screen target into view BEFORE animating; never point at
+  //     something the user cannot see
+  //   - chain moves from the previous position so a sequence reads as one
+  //     continuous journey rather than unrelated flashes
+  //   - reduced-motion users get arrival feedback WITHOUT travel animation
+  //   - scroll / wheel / touch input dismisses the cursor
+  //   - point at real elements to CONFIRM real state changes, never to simulate
+  //     them; cursor motion stays secondary to the real page update
+  //
+  // The correctness rule this primitive exists to honour
+  // A clickable center is only a coordinate until hit-testing proves its target:
+  // a bounding-rect midpoint is a COORDINATE, not a hit-tested target. Drawing
+  // the cursor at a rect midpoint would confidently point at a spot the click
+  // never reached — the documented case had a fully in-viewport row whose
+  // centre resolved, via elementFromPoint, to the page's sticky header. So we
+  // render at the HIT-TESTED point and, when the hit-test resolves a DIFFERENT
+  // element, we report `occluded_by` instead of claiming success.
+  //
+  // Three separate booleans, never conflated
+  // Viewport visibility and DOM existence are distinct states:
+  //   exists      -> the element is in the DOM
+  //   on_screen   -> its rect intersects the viewport (after our scroll)
+  //   receives_events -> elementFromPoint at the point resolves to it
+  // Vocabulary is the established one from
+  // Accessibility matches still require an independent actionability attestation.
+  //
+  // Written as a single dependency-injected factory so the decision logic is
+  // testable off-browser against a fake DOM, and so the tests exercise THIS
+  // shipped source rather than a copy of it.
+  const createGhostCursorController = (deps) => {
+    const {
+      doc,
+      win,
+      render,
+      now,
+      schedule,
+      cancelScheduled,
+      prefersReducedMotion,
+      overlayHostId,
+      travelMs = 520,
+      arrivalMs = 260,
+      frameMs = 16,
+    } = deps;
+
+    let position = null;
+    let animation = null;
+    let dismissListenersBound = false;
+    let lastDismissal = null;
+
+    const rectOf = (element) => element.getBoundingClientRect();
+
+    const viewport = () => ({
+      width: win.innerWidth,
+      height: win.innerHeight,
+    });
+
+    const intersectsViewport = (rect) => {
+      const view = viewport();
+      return rect.right > 0 && rect.bottom > 0
+        && rect.left < view.width && rect.top < view.height
+        && rect.right > rect.left && rect.bottom > rect.top;
+    };
+
+    const describe = (element) => {
+      if (!element || element.nodeType !== 1) return null;
+      const attr = (name) => (typeof element.getAttribute === "function" ? element.getAttribute(name) : null);
+      return {
+        tag_name: String(element.tagName || "").toLowerCase(),
+        target_label: attr("aria-label")
+          || attr("data-testid")
+          || (element.id ? `#${element.id}` : null)
+          || String(element.tagName || "").toLowerCase(),
+      };
+    };
+
+    // Is `hit` the target, inside it, or its container? Mirrors pointerHitFor's
+    // containment rule so the two attestations cannot disagree.
+    const hitSatisfies = (target, hit) => {
+      if (!hit) return false;
+      if (hit === target) return true;
+      if (typeof target.contains === "function" && target.contains(hit)) return true;
+      if (typeof hit.contains === "function" && hit.contains(target)) return true;
+      return false;
+    };
+
+    // Is the occluder our own overlay pill? The pill is ITSELF a potential
+    // occluder of the element being pointed at, and an agent that knows the
+    // pill is in the way can call overlay.menu.hide — so name it explicitly
+    // rather than reporting a generic obstruction.
+    const isOverlayPill = (element) => {
+      let node = element;
+      while (node && node.nodeType === 1) {
+        if (node.id === overlayHostId) return true;
+        node = node.parentElement || null;
+      }
+      return false;
+    };
+
+    const cancelAnimation = (reason) => {
+      if (!animation) return false;
+      if (animation.timer !== null && animation.timer !== undefined) cancelScheduled(animation.timer);
+      const cancelled = animation;
+      animation = null;
+      cancelled.settle({ completed: false, dismissed: true, dismissed_by: reason });
+      return true;
+    };
+
+    // Scroll / wheel / touch dismisses the cursor: the user has taken over, and
+    // a pointer left behind on a page that has moved under it is pointing at
+    // the wrong thing.
+    const dismiss = (reason) => {
+      lastDismissal = { reason, at: now() };
+      const hadAnimation = cancelAnimation(reason);
+      position = null;
+      render({ visible: false, reason });
+      return hadAnimation;
+    };
+
+    // Dismissal must fire on USER input only. Our own scrollIntoView emits a
+    // `scroll` event, and a naive listener treats that as the user taking over
+    // and cancels the very animation we just started — the agent's own scroll
+    // dismissing the agent's own cursor. Caught by the live smoke, which is the
+    // only harness where a real scroll event actually fires.
+    //
+    // `wheel` and `touchstart` are unambiguously user-generated, so they always
+    // dismiss. `scroll` is not: it is emitted by programmatic and user scrolling
+    // alike, and a scrollIntoView-generated event carries no flag distinguishing
+    // it from a user's. A time window is the wrong instrument — a real browser
+    // keeps emitting settling `scroll` events for an unbounded interval, so any
+    // grace period is either too short (self-dismissal returns) or long enough
+    // to swallow genuine user scrolls.
+    //
+    // Instead: suppress by POSITION. Record where our own scroll put the page;
+    // absorb scroll events while the page is still at (or settling toward) that
+    // offset, and dismiss as soon as the page moves somewhere we did not put it
+    // — which is exactly what a user scroll does.
+    let selfScrollTarget = null;
+
+    const currentScrollOffset = () => ({
+      x: win.scrollX || 0,
+      y: win.scrollY || 0,
+    });
+
+    const onUserInput = (event) => {
+      const type = event && event.type ? event.type : "user_input";
+      if (type === "scroll" && selfScrollTarget) {
+        const at = currentScrollOffset();
+        // Within a couple of pixels of where WE scrolled to: this is our own
+        // scroll (or its settling tail), not the user.
+        if (Math.abs(at.x - selfScrollTarget.x) <= 2 && Math.abs(at.y - selfScrollTarget.y) <= 2) {
+          return;
+        }
+        // The page moved somewhere we did not put it — the user has taken over.
+        selfScrollTarget = null;
+      }
+      dismiss(type);
+    };
+
+    const bindDismissListeners = () => {
+      if (dismissListenersBound) return;
+      dismissListenersBound = true;
+      for (const type of ["scroll", "wheel", "touchstart"]) {
+        win.addEventListener(type, onUserInput, { passive: true, capture: true });
+      }
+    };
+
+    // Travel from the previous position so a sequence of points reads as one
+    // continuous journey. The FIRST point has no origin to chain from, so it
+    // arrives in place rather than flying in from an arbitrary corner.
+    const animateTo = (from, to) => new Promise((resolve) => {
+      const startedAt = now();
+      const state = {
+        timer: null,
+        settle: (outcome) => resolve(outcome),
+      };
+      animation = state;
+      const step = () => {
+        if (animation !== state) return;
+        const elapsed = now() - startedAt;
+        const progress = travelMs <= 0 ? 1 : Math.min(1, elapsed / travelMs);
+        // easeOutCubic — decelerate into the target so the landing reads as
+        // deliberate rather than as an abrupt stop.
+        const eased = 1 - Math.pow(1 - progress, 3);
+        const point = {
+          x: from.x + (to.x - from.x) * eased,
+          y: from.y + (to.y - from.y) * eased,
+        };
+        position = point;
+        render({ visible: true, point, phase: "travel", progress });
+        if (progress >= 1) {
+          animation = null;
+          resolve({ completed: true, dismissed: false });
+          return;
+        }
+        state.timer = schedule(step, frameMs);
+      };
+      step();
+    });
+
+    const point = async (target, options = {}) => {
+      const label = options.label ?? null;
+      bindDismissListeners();
+
+      // exists / on_screen / receives_events are three separate facts. Compute
+      // each one, never infer one from another.
+      const exists = Boolean(target && target.nodeType === 1 && doc.contains(target));
+      if (!exists) {
+        return {
+          ok: false,
+          code: "target_not_found",
+          exists: false,
+          on_screen: false,
+          receives_events: false,
+        };
+      }
+
+      // Scroll an off-screen target into view BEFORE animating. Pointing at a
+      // spot the user cannot see is worse than not pointing at all.
+      let scrolled = false;
+      if (!intersectsViewport(rectOf(target))) {
+        if (typeof target.scrollIntoView === "function") {
+          // block:"center" deliberately, NOT the default top-alignment: the
+          // documented failure is that top-aligning parks the target directly
+          // beneath a sticky header, which is exactly the occlusion this
+          // primitive is supposed to detect rather than cause.
+          target.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+          // Record where OUR scroll left the page, so the scroll events it
+          // emits are recognised as ours rather than as the user taking over.
+          selfScrollTarget = currentScrollOffset();
+          scrolled = true;
+        }
+      }
+
+      const rect = rectOf(target);
+      const onScreen = intersectsViewport(rect);
+      // `visible_center` is GEOMETRY ONLY — the midpoint of a rectangle. It is
+      // never the thing we render at until a hit-test has vouched for it.
+      const visibleCenter = {
+        x: rect.left + (rect.right - rect.left) / 2,
+        y: rect.top + (rect.bottom - rect.top) / 2,
+      };
+
+      if (!onScreen) {
+        return {
+          ok: false,
+          code: "target_off_screen",
+          exists: true,
+          on_screen: false,
+          receives_events: false,
+          scrolled_into_view: scrolled,
+          visible_center: visibleCenter,
+        };
+      }
+
+      const hit = doc.elementFromPoint(visibleCenter.x, visibleCenter.y);
+      const receivesEvents = hitSatisfies(target, hit);
+
+      if (!receivesEvents) {
+        // Do NOT draw a cursor here. A pointer rendered at this coordinate
+        // would be a confident lie: it would sit on top of whatever is actually
+        // painted there. Report the obstruction so the caller can clear it.
+        const occluder = describe(hit);
+        return {
+          ok: false,
+          code: "target_occluded",
+          exists: true,
+          on_screen: true,
+          receives_events: false,
+          scrolled_into_view: scrolled,
+          visible_center: visibleCenter,
+          occluded_by: occluder
+            ? { ...occluder, is_overlay_pill: isOverlayPill(hit) }
+            : null,
+        };
+      }
+
+      // Attested: this point is hit-tested and the target owns it. Only now is
+      // it a `clickable_center` rather than a bare coordinate.
+      const clickableCenter = visibleCenter;
+      const origin = position;
+      const reducedMotion = prefersReducedMotion();
+
+      let travelled = false;
+      let dismissedBy = null;
+
+      if (reducedMotion || !origin) {
+        // Reduced motion: NO travel animation. Arrival feedback still appears —
+        // the user must still learn WHERE the agent acted; they just do not get
+        // a moving object to track across the screen.
+        position = clickableCenter;
+        render({ visible: true, point: clickableCenter, phase: "arrive", reduced_motion: reducedMotion, label });
+      } else {
+        const outcome = await animateTo(origin, clickableCenter);
+        travelled = true;
+        if (outcome.dismissed) {
+          return {
+            ok: false,
+            code: "cursor_dismissed",
+            exists: true,
+            on_screen: true,
+            receives_events: true,
+            scrolled_into_view: scrolled,
+            clickable_center: clickableCenter,
+            dismissed_by: outcome.dismissed_by,
+            animated: true,
+          };
+        }
+        position = clickableCenter;
+        render({ visible: true, point: clickableCenter, phase: "arrive", reduced_motion: false, label });
+      }
+
+      return {
+        ok: true,
+        exists: true,
+        on_screen: true,
+        receives_events: true,
+        scrolled_into_view: scrolled,
+        visible_center: visibleCenter,
+        clickable_center: clickableCenter,
+        clickable: true,
+        actionability_attested: true,
+        occluded_by: null,
+        animated: travelled,
+        reduced_motion: reducedMotion,
+        chained_from: origin ? { x: origin.x, y: origin.y } : null,
+        dismissed_by: dismissedBy,
+        label,
+      };
+    };
+
+    return {
+      point,
+      dismiss,
+      position: () => (position ? { ...position } : null),
+      lastDismissal: () => lastDismissal,
+      handleUserInput: onUserInput,
+    };
+  };
+
+  let ghostCursorController = null;
+
+  const ghostCursorInstance = () => {
+    if (ghostCursorController) return ghostCursorController;
+    ghostCursorController = createGhostCursorController({
+      doc: document,
+      win: window,
+      // Reuse the EXISTING visible-pointer element rather than minting a second
+      // cursor: moveVisiblePointer already owns #actions-json-ghost-pointer and
+      // its arrival pulse, and two independent cursors on one page would be a
+      // UX bug, not a feature.
+      render: ({ visible, point }) => {
+        if (!visible) {
+          const existing = document.getElementById("actions-json-ghost-pointer");
+          if (existing) existing.style.opacity = "0";
+          return;
+        }
+        const existing = document.getElementById("actions-json-ghost-pointer");
+        if (existing) existing.style.opacity = "1";
+        moveVisiblePointer(point.x, point.y);
+      },
+      now: () => Date.now(),
+      schedule: (fn, ms) => setTimeout(fn, ms),
+      cancelScheduled: (timer) => clearTimeout(timer),
+      prefersReducedMotion: () => Boolean(
+        window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+      ),
+      overlayHostId: "__actions_json_menu_overlay_host",
+    });
+    return ghostCursorController;
+  };
+
+  const overlayCursorPoint = async (args = {}) => {
+    const locator = args.locator;
+    if (!locator || typeof locator !== "object") {
+      return primitiveError("overlay.cursor.point", "target_not_found", "overlay.cursor.point requires a locator identifying the element to point at.", {
+        locator: locator ?? null,
+      });
+    }
+    const target = resolveSingleLocator(locator);
+    if (!target) {
+      return primitiveError("overlay.cursor.point", "target_not_found", "No element matched the locator, so there is nothing to point at.", {
+        locator,
+        exists: false,
+        on_screen: false,
+        receives_events: false,
+      });
+    }
+    const result = await ghostCursorInstance().point(target, { label: args.label });
+    if (!result.ok) {
+      const messages = {
+        target_off_screen: "The target could not be brought on screen, so the cursor was not drawn; pointing at an element the user cannot see would be misleading.",
+        target_occluded: "Something else owns the hit-test at the target's centre, so the cursor was NOT drawn there — drawing it would point at a spot a click never reaches. Clear the occluder (overlay.menu.hide if it is the actions.json overlay) and retry.",
+        cursor_dismissed: "The user scrolled or touched the page while the cursor was travelling, so it was dismissed before arriving.",
+        target_not_found: "The resolved element left the document before the cursor could point at it.",
+      };
+      return primitiveError("overlay.cursor.point", result.code, messages[result.code] || "The cursor could not point at the target.", {
+        locator,
+        ...result,
+      });
+    }
+    return primitiveSuccess("overlay.cursor.point", {
+      pointed: true,
+      ...result,
+    });
+  };
+
   const validateViewportPoint = (primitive, x, y, evidence) => {
     if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) {
       return primitiveError(primitive, "point_out_of_viewport", "Point is outside the current viewport.", {
@@ -3546,12 +4284,10 @@
   const KNOWN_POINTER_MODIFIERS = new Set(["shift", "alt", "option", "control", "ctrl", "meta", "cmd", "command"]);
 
   const pointerClick = (args = {}) => {
-    const missingError = requirePointCoordinates("pointer.click", args);
-    if (missingError) return missingError;
-    const x = Number(args.x);
-    const y = Number(args.y);
-    const viewportError = validateViewportPoint("pointer.click", x, y, args);
-    if (viewportError) return viewportError;
+    const resolved = pointFromViewportPointOrLocator("pointer.click", args, "target");
+    if (resolved.error) return resolved.error;
+    const x = resolved.point.x;
+    const y = resolved.point.y;
     const modifiers = (Array.isArray(args.modifiers) ? args.modifiers : [])
       .map((modifier) => String(modifier).toLowerCase());
     const unknownModifier = modifiers.find((modifier) => !KNOWN_POINTER_MODIFIERS.has(modifier));
@@ -3560,7 +4296,7 @@
         modifiers: args.modifiers
       });
     }
-    const target = document.elementFromPoint(x, y);
+    const target = resolved.element || document.elementFromPoint(x, y);
     if (!target) {
       return primitiveError("pointer.click", "target_not_found", "No element exists at the requested point.", { x, y });
     }
@@ -3571,6 +4307,7 @@
       x,
       y,
       modifiers,
+      geometry: resolved.geometry,
       target: clickTargetDiagnostic(target)
     });
   };
@@ -3892,16 +4629,33 @@
 
   // clipboard.paste — write into a DOM element via a synthetic paste event
   // (clipboard -> page). With args.text: paste that text. Without: paste the
-  // current system clipboard. Dispatches at the focused element by default, or a
-  // resolved target; an iframe target falls back to the focused inner element
-  // (pasteTargetKind). This is the write path for iframe-hosted editors (Google
-  // Docs/Sheets/Slides) that text.insert cannot reach.
+  // current system clipboard. Requires a resolved target unless the caller
+  // deliberately opts into the focused element for a canvas/model-backed editor;
+  // an iframe target falls back to the focused inner element (pasteTargetKind).
+  // This is the write path for iframe-hosted editors (Google Docs/Sheets/Slides)
+  // that text.insert cannot reach.
   const clipboardPaste = async (args = {}) => {
+    const usesActiveElement = !args.target && args.use_active_element === true;
+    if (!args.target && !usesActiveElement) {
+      return primitiveError("clipboard.paste", "paste_target_required",
+        "clipboard.paste requires an explicit target. Set use_active_element:true only for a canvas/iframe editor whose receiving element cannot be addressed directly.", {});
+    }
     const resolved = args.target ? resolveEditableTarget(args.target) : null;
     const { target, target_kind } = pasteTargetKind(resolved, document.activeElement);
     if (!target) {
       return primitiveError("clipboard.paste", "no_paste_target",
         "No focused or resolvable element to paste into; click into the editor first.", {});
+    }
+    if (!target.isConnected) {
+      return primitiveError("clipboard.paste", "paste_target_stale",
+        "The resolved paste target is no longer connected to the document. Re-resolve it before retrying.", {});
+    }
+    if (!isEditableElement(target)) {
+      return primitiveError("clipboard.paste", "paste_target_not_editable",
+        "The resolved paste target is not an editable input, textarea, or contenteditable element.", {
+          tag_name: target.tagName?.toLowerCase?.() || null,
+          target_kind,
+        });
     }
     let payload = args.text;
     let source = "argument";
@@ -3916,8 +4670,76 @@
     }
     payload = String(payload);
     target.focus?.();
+    const focusOwner = target.ownerDocument?.activeElement || null;
+    if (focusOwner !== target) {
+      return primitiveError("clipboard.paste", "paste_focus_not_acquired",
+        "The resolved paste target did not retain focus. No paste event was dispatched.", {
+          expected_tag_name: target.tagName?.toLowerCase?.() || null,
+          actual_tag_name: focusOwner?.tagName?.toLowerCase?.() || null,
+          target_kind,
+        });
+    }
+    const target_identity = {
+      tag_name: target.tagName?.toLowerCase?.() || null,
+      id: target.id || null,
+      class_name: typeof target.className === "string" ? target.className : null,
+      role: target.getAttribute?.("role") || null,
+      aria_label: target.getAttribute?.("aria-label") || null,
+      contenteditable: target.getAttribute?.("contenteditable") || null,
+      focus_attested: true,
+    };
+
+    // A synthetic paste has no native default insertion. On standard controls,
+    // dispatching a bubbling/composed paste event lets an ancestor editor consume
+    // the payload while the intended textarea remains unchanged. Use the same
+    // native-value-setter/input path as text.insert so the write cannot escape
+    // the explicitly resolved field.
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+      const result = await insertTextIntoEditable("clipboard.paste", {
+        text: payload,
+        target: args.target,
+        mode: "append",
+      });
+      if (!result?.ok) return result;
+      return {
+        ...result,
+        value: {
+          ...result.value,
+          pasted: true,
+          source,
+          target_kind,
+          target_identity,
+          scoped_write: "native-control",
+        },
+      };
+    }
+
+    const beforeText = target.textContent || "";
     const pasteEvent = syntheticClipboardEvent(payload, args.html);
-    target.dispatchEvent(pasteEvent);
+    const dispatchReturned = target.dispatchEvent(pasteEvent);
+    await waitForEditableHandlers();
+    const afterText = target.textContent || "";
+    // An explicit contenteditable target must itself change. A prevented event
+    // is not proof of correct scope: an ancestor can claim the paste while
+    // mutating a sibling (the LinkedIn incident class). Only the deliberate
+    // active-element compatibility path may accept a claimed event without a
+    // DOM-text delta, because canvas/model-backed editors store state elsewhere.
+    if (afterText === beforeText && !usesActiveElement) {
+      return primitiveError("clipboard.paste", "paste_unverified",
+        "The explicit contenteditable target did not change. A prevented ancestor event is not proof that the intended target received the paste.", {
+          target_kind,
+          target_identity,
+          default_prevented: pasteEvent.defaultPrevented,
+          dispatch_returned: dispatchReturned,
+        });
+    }
+    if (afterText === beforeText && dispatchReturned && !pasteEvent.defaultPrevented) {
+      return primitiveError("clipboard.paste", "paste_unverified",
+        "The opted-in active element did not change and no handler claimed the paste event.", {
+          target_kind,
+          target_identity,
+        });
+    }
     return primitiveSuccess("clipboard.paste", {
       pasted: true,
       inserted_length: payload.length,
@@ -3925,6 +4747,11 @@
       default_prevented: pasteEvent.defaultPrevented,
       html_provided: typeof args.html === "string" && args.html.length > 0,
       target_kind,
+      target_identity,
+      dispatch_returned: dispatchReturned,
+      target_text_changed: afterText !== beforeText,
+      scope_verification: afterText !== beforeText ? "target-text-changed" : "active-element-handler-claimed",
+      scope_mode: usesActiveElement ? "active-element-opt-in" : "explicit-target",
       source,
     });
   };
@@ -3964,6 +4791,16 @@
     return primitiveSuccess("text.select", {
       selected: true,
       selected_length: (selected || "").length,
+      selected_text: selected || "",
+      large_selection: (selected || "").length >= 500,
+      target_identity: {
+        tag_name: target.tagName?.toLowerCase?.() || null,
+        id: target.id || null,
+        class_name: typeof target.className === "string" ? target.className : null,
+        role: target.getAttribute?.("role") || null,
+        aria_label: target.getAttribute?.("aria-label") || null,
+        contenteditable: target.getAttribute?.("contenteditable") || null,
+      },
       target_kind,
     });
   };
@@ -4043,6 +4880,202 @@
       return primitiveError(primitive, "transfer_failed", "Transfer buffer returned an invalid response.", { primitive });
     }
     return result;
+  };
+
+  const fileTransferAction = async (primitive, args = {}) => {
+    const response = await sendRuntimeMessage({
+      type: "actions-json:file-transfer",
+      primitive,
+      arguments: args,
+    });
+    const result = response?.result;
+    if (!result || typeof result !== "object") {
+      return primitiveError(primitive, "file_transfer_failed", "File transfer store returned an invalid response.", {
+        primitive,
+        transfer_id: args.transfer_id || null,
+      });
+    }
+    return result;
+  };
+
+  const bytesFromBase64 = (base64) => {
+    const binary = atob(base64 || "");
+    return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  };
+
+  const base64FromBytes = (bytes) => {
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return btoa(binary);
+  };
+
+  const FILE_TRANSFER_MAX_BYTES = 25 * 1024 * 1024;
+  const FILE_TRANSFER_CHUNK_BYTES = 192 * 1024;
+  const sha256Hex = async (bytes) => {
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+  };
+
+  const normalizeTransferOrigin = (value) => {
+    try {
+      return new URL(value).origin;
+    } catch {
+      return null;
+    }
+  };
+
+  const fileTransferUploadConsume = async (args = {}) => {
+    const primitive = "file.transfer.upload.consume";
+    const expectedOrigin = normalizeTransferOrigin(args.origin);
+    if (!expectedOrigin || expectedOrigin !== window.location.origin) {
+      return primitiveError(primitive, "transfer_origin_mismatch", "Current page origin does not match the transfer origin.", {
+        expected_origin: expectedOrigin,
+        actual_origin: window.location.origin,
+      });
+    }
+    const selector = args.file_input?.selector;
+    if (typeof selector !== "string" || !selector) {
+      return primitiveError(primitive, "transfer_file_input_invalid", "file_input.selector is required.");
+    }
+    let input;
+    try {
+      input = document.querySelector(selector);
+    } catch (error) {
+      return primitiveError(primitive, "transfer_file_input_invalid", "file_input.selector is not valid CSS.", {
+        message: error.message || String(error),
+      });
+    }
+    if (!(input instanceof HTMLInputElement) || input.type !== "file") {
+      return primitiveError(primitive, "transfer_file_input_not_found", "The selector did not resolve one file input.", {
+        selector,
+      });
+    }
+    const stored = await fileTransferAction(primitive, {
+      transfer_id: args.transfer_id,
+      origin: expectedOrigin,
+    });
+    if (stored.ok === false) return stored;
+    const currentInput = document.querySelector(selector);
+    if (!(currentInput instanceof HTMLInputElement) || currentInput.type !== "file" || !currentInput.isConnected) {
+      return primitiveError(primitive, "transfer_file_input_stale", "The file input changed while transfer bytes were loading.", { selector });
+    }
+    const bytes = bytesFromBase64(stored.value?.base64 || "");
+    const file = new File([bytes], stored.value.filename, {
+      type: stored.value.mime_type || "application/octet-stream",
+      lastModified: Date.now(),
+    });
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    currentInput.files = transfer.files;
+    currentInput.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    currentInput.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+    const completed = await fileTransferAction("file.transfer.upload.complete", {
+      transfer_id: args.transfer_id,
+      origin: expectedOrigin,
+    });
+    if (completed.ok === false) return completed;
+    return {
+      ok: true,
+      primitive,
+      adapter: "extension",
+      value: {
+        ...completed.value,
+        base64: undefined,
+        attached: true,
+        selector,
+      },
+    };
+  };
+
+  const fileTransferDownloadCapture = async (args = {}) => {
+    const primitive = "file.transfer.download.capture";
+    let url;
+    try {
+      url = new URL(args.url, window.location.href);
+    } catch {
+      return primitiveError(primitive, "transfer_download_url_invalid", "Download URL is invalid.");
+    }
+    const expectedOrigin = normalizeTransferOrigin(args.origin);
+    if (!expectedOrigin || expectedOrigin !== window.location.origin || url.origin !== expectedOrigin) {
+      return primitiveError(primitive, "transfer_origin_mismatch", "Download URL and current page must match the authorized origin.", {
+        expected_origin: expectedOrigin,
+        page_origin: window.location.origin,
+        url_origin: url.origin,
+      });
+    }
+    let response;
+    try {
+      response = await fetch(url.href, { credentials: "include", redirect: "follow" });
+    } catch (error) {
+      return primitiveError(primitive, "transfer_download_failed", "Browser download fetch failed.", {
+        message: error.message || String(error),
+      });
+    }
+    if (!response.ok) {
+      return primitiveError(primitive, "transfer_download_failed", `Browser download returned HTTP ${response.status}.`, {
+        status: response.status,
+      });
+    }
+    if (normalizeTransferOrigin(response.url) !== expectedOrigin) {
+      return primitiveError(primitive, "transfer_origin_mismatch", "Download redirected outside the authorized origin.", {
+        expected_origin: expectedOrigin,
+        actual_origin: normalizeTransferOrigin(response.url),
+      });
+    }
+    const contentLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(contentLength) && contentLength > FILE_TRANSFER_MAX_BYTES) {
+      return primitiveError(primitive, "transfer_oversize", "Download exceeds the configured size limit.", { max_bytes: FILE_TRANSFER_MAX_BYTES, content_length: contentLength });
+    }
+    const reader = response.body?.getReader();
+    const chunks = [];
+    let size = 0;
+    if (reader) {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > FILE_TRANSFER_MAX_BYTES) {
+          await reader.cancel("transfer_oversize").catch(() => {});
+          return primitiveError(primitive, "transfer_oversize", "Download exceeds the configured size limit.", { max_bytes: FILE_TRANSFER_MAX_BYTES, size });
+        }
+        chunks.push(Uint8Array.from(value));
+      }
+    } else {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      size = bytes.byteLength;
+      if (size > FILE_TRANSFER_MAX_BYTES) return primitiveError(primitive, "transfer_oversize", "Download exceeds the configured size limit.", { max_bytes: FILE_TRANSFER_MAX_BYTES, size });
+      chunks.push(bytes);
+    }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    const filename = args.filename || decodeURIComponent(url.pathname.split("/").filter(Boolean).at(-1) || "download.bin");
+    const actualMimeType = response.headers.get("content-type") || "application/octet-stream";
+    if (args.mime_type && args.mime_type !== actualMimeType) {
+      return primitiveError(primitive, "transfer_mime_mismatch", "Download MIME type does not match the expected value.", { expected_mime_type: args.mime_type, actual_mime_type: actualMimeType });
+    }
+    const expectedSha256 = await sha256Hex(bytes);
+    let result = await fileTransferAction("file.transfer.create", {
+      transfer_id: args.transfer_id,
+      direction: "download",
+      filename,
+      mime_type: actualMimeType,
+      origin: expectedOrigin,
+      expected_size: bytes.byteLength,
+      expected_sha256: expectedSha256,
+    });
+    if (result.ok === false) return result;
+    for (let chunkOffset = 0, index = 0; chunkOffset < bytes.byteLength; chunkOffset += FILE_TRANSFER_CHUNK_BYTES, index += 1) {
+      result = await fileTransferAction("file.transfer.chunk", {
+        transfer_id: args.transfer_id,
+        index,
+        base64: base64FromBytes(bytes.slice(chunkOffset, chunkOffset + FILE_TRANSFER_CHUNK_BYTES)),
+      });
+      if (result.ok === false) return result;
+    }
+    return fileTransferAction("file.transfer.finalize", { transfer_id: args.transfer_id });
   };
 
   const transferInsert = async (args = {}, reportProgress) => {
@@ -4134,12 +5167,507 @@
     return stateProjectionModulePromise;
   };
 
+  const loadProjectionRetrievalModules = async () => {
+    projectionSnapshotStoreModulePromise ||= import(chrome.runtime.getURL("src/agent/projection-snapshot-store.mjs"));
+    projectionGraphQueryModulePromise ||= import(chrome.runtime.getURL("src/agent/projection-graph-query.mjs"));
+    const [storeModule, queryModule] = await Promise.all([
+      projectionSnapshotStoreModulePromise,
+      projectionGraphQueryModulePromise,
+    ]);
+    projectionSnapshotStore ||= storeModule.createProjectionSnapshotStore();
+    return { store: projectionSnapshotStore, queryModule };
+  };
+
+  const projectionAuthority = (message = {}, projectionName = message.projection_name) => {
+    const authority = {
+      runtime_id: RUNTIME_ID,
+      // The store itself lives in one content realm, but retaining the tab id
+      // in every authority/cursor also prevents a forwarded handle replay.
+      tab_id: message.tab_id ?? message.authority?.tab_id ?? "content-realm",
+      navigation_epoch: projectionNavigationEpoch,
+      projection: projectionName,
+      catalog_revision: message.catalog_revision
+        ?? message.effective_revision
+        ?? message.authority?.catalog_revision
+        ?? message.bundle?.effective_revision
+        ?? message.bundle?.provenance?.effective_revision
+        ?? "catalog-unversioned",
+    };
+    projectionAuthorityTabIds.add(authority.tab_id);
+    return authority;
+  };
+
+  const normalizeProjectionRetrievalMessage = (message = {}) => {
+    const args = message.arguments && typeof message.arguments === "object" ? message.arguments : {};
+    return {
+      ...message,
+      ...args,
+      cursor: args.cursor ?? args.continuation ?? message.cursor ?? message.continuation,
+      arguments: args,
+    };
+  };
+
+  const authorityForProjectionHandle = (message) => {
+    const authority = message.cursor
+      ? projectionCursorAuthorities.get(message.cursor)
+      : projectionSnapshotAuthorities.get(message.snapshot_id);
+    if (!authority) return null;
+    const claimedTab = message.tab_id ?? message.authority?.tab_id;
+    const claimedRevision = message.catalog_revision ?? message.effective_revision ?? message.authority?.catalog_revision;
+    if ((claimedTab !== undefined && claimedTab !== authority.tab_id)
+      || (claimedRevision !== undefined && claimedRevision !== authority.catalog_revision)) {
+      const error = new Error("The projection handle belongs to another tab or catalog revision.");
+      error.code = "snapshot_authority_mismatch";
+      throw error;
+    }
+    return authority;
+  };
+
+  const projectionRetrievalError = (error) => ({
+    ok: false,
+    error: {
+      code: error?.code || "projection_retrieval_failed",
+      message: error?.message || String(error),
+      ...(error?.details && Object.keys(error.details).length > 0 ? { details: error.details } : {}),
+    },
+  });
+
+  const clampProjectionPageSize = (value) => {
+    const requested = Number(value ?? 5);
+    if (!Number.isInteger(requested) || requested <= 0 || requested > 50) {
+      const error = new Error("page_size must be an integer from 1 through 50.");
+      error.code = "projection_page_size_invalid";
+      throw error;
+    }
+    return requested;
+  };
+
+  const compactProjectionNode = (node) => {
+    const attributeEntries = Object.entries(node.attributes || {});
+    const shown = attributeEntries.slice(0, 12).map(([name, value]) => [
+      name,
+      typeof value === "string" ? value.slice(0, 160) : value,
+    ]);
+    return {
+      ref: node.ref,
+      type: node.type,
+      ...(node.label != null ? { label: String(node.label).slice(0, 160) } : {}),
+      ...(shown.length > 0 ? { attributes: Object.fromEntries(shown) } : {}),
+      ...(attributeEntries.length > shown.length ? { omitted_attribute_count: attributeEntries.length - shown.length } : {}),
+    };
+  };
+
+  const projectionNavigationUrl = (node) => {
+    const attributes = node?.attributes || {};
+    const candidate = [attributes.url, attributes.href].find((value) => typeof value === "string" && value.trim());
+    if (!candidate) return null;
+    try {
+      const resolved = new URL(candidate, location.href);
+      if (!['http:', 'https:'].includes(resolved.protocol)) return null;
+      return resolved.href.slice(0, 2048);
+    } catch (_error) {
+      return null;
+    }
+  };
+
+  const enrichProjectionSearchMatch = (match, graph) => {
+    const node = graph.nodes.find((candidate) => candidate.ref === match.ref);
+    const navigationUrl = projectionNavigationUrl(node);
+    return {
+      ...match,
+      ...(node?.label != null ? { label: String(node.label).slice(0, 160) } : {}),
+      ...(navigationUrl ? { navigation_url: navigationUrl } : {}),
+    };
+  };
+
+  const enforceProjectionAnswerBudget = (answer, maxBytes) => {
+    const requested = Number(maxBytes ?? 16 * 1024);
+    const budget = Number.isFinite(requested) && requested > 0 ? Math.min(requested, 64 * 1024) : 16 * 1024;
+    const bytes = new TextEncoder().encode(JSON.stringify(answer)).length;
+    if (bytes <= budget) return answer;
+    const error = new Error("Projection retrieval answer exceeded the configured byte budget; request a smaller page.");
+    error.code = "projection_answer_too_large";
+    error.details = { response_bytes: bytes, response_max_bytes: budget };
+    throw error;
+  };
+
+  const resolveProjectionRequest = (store, message, operation) => {
+    const authority = authorityForProjectionHandle(message);
+    if (!authority) {
+      const error = new Error("Run state_read first and provide its active snapshot_id.");
+      error.code = "snapshot_required";
+      throw error;
+    }
+    if (message.cursor) {
+      const cursor = store.resolveCursor({ authority, handle: message.cursor });
+      if (cursor.query?.operation !== operation) {
+        const error = new Error("The continuation belongs to another projection operation.");
+        error.code = "cursor_operation_mismatch";
+        throw error;
+      }
+      return {
+        authority,
+        snapshot: store.getSnapshot(authority, cursor.snapshot_id),
+        args: cursor.query.arguments,
+        pageSize: cursor.page_size,
+        offset: cursor.offset,
+      };
+    }
+    if (typeof message.snapshot_id !== "string" || !message.snapshot_id) {
+      const error = new Error("Run state_read first and provide its active snapshot_id.");
+      error.code = "snapshot_required";
+      throw error;
+    }
+    return {
+      authority,
+      snapshot: store.getSnapshot(authority, message.snapshot_id),
+      args: message.arguments || {},
+      pageSize: clampProjectionPageSize(message.page_size),
+      offset: 0,
+    };
+  };
+
+  const pageProjectionResults = ({ store, authority, snapshot, operation, args, items, pageSize, offset }) => {
+    const page = items.slice(offset, offset + pageSize);
+    const nextOffset = offset + page.length;
+    const more = nextOffset < items.length;
+    const nextCursorRecord = more
+      ? store.createCursor({
+          authority,
+          snapshot_id: snapshot.snapshot_id,
+          query: { operation, arguments: args },
+          scope: args.scope_refs || null,
+          order: args.order_by_measure ? { measure: args.order_by_measure, descending: args.descending === true } : null,
+          page_size: pageSize,
+          offset: nextOffset,
+          retrieval_revision: "projection-lexical-v1",
+        })
+      : null;
+    const nextCursor = nextCursorRecord?.handle || null;
+    if (nextCursor) {
+      projectionCursorAuthorities.set(nextCursor, authority);
+      while (projectionCursorAuthorities.size > 256) {
+        projectionCursorAuthorities.delete(projectionCursorAuthorities.keys().next().value);
+      }
+    }
+    return { page, more, nextCursor };
+  };
+
+  const executeProjectionNavigate = async (message = {}) => {
+    try {
+      message = normalizeProjectionRetrievalMessage(message);
+      const { store, queryModule } = await loadProjectionRetrievalModules();
+      const request = resolveProjectionRequest(store, message, "navigate");
+      const { snapshot, args } = request;
+      const graph = snapshot.graph;
+      const mode = args.operation || (args.node_ref ? "node" : "roots");
+      let refs;
+      if (mode === "roots") {
+        refs = [...graph.roots];
+      } else if (mode === "node") {
+        refs = [args.node_ref].filter(Boolean);
+        const known = new Set(graph.nodes.map((node) => node.ref));
+        if (refs.length !== 1 || !known.has(refs[0])) {
+          const error = new Error(`Unknown projection node ${args.node_ref}.`);
+          error.code = "graph_node_not_found";
+          throw error;
+        }
+      } else if (mode === "neighbors" || mode === "traverse") {
+        if (args.measure_filter !== undefined) {
+          const error = new Error("measure_filter is not supported by this retrieval revision.");
+          error.code = "graph_constraint_unsupported";
+          throw error;
+        }
+        const requestedDepth = mode === "neighbors" ? 1 : Number(args.max_depth ?? 3);
+        if (!Number.isInteger(requestedDepth) || requestedDepth < 0 || requestedDepth > 10) {
+          const error = new Error("max_depth must be an integer from 0 through 10.");
+          error.code = "graph_depth_invalid";
+          throw error;
+        }
+        const measureOrder = args.measure_order;
+        const orderByMeasure = typeof measureOrder === "string" ? measureOrder : measureOrder?.name;
+        const traversed = queryModule.traverseGraph(graph, {
+          start_refs: [args.node_ref],
+          direction: args.direction,
+          edge_types: args.edge_types,
+          max_depth: requestedDepth,
+          limit: 1000,
+          order_by_measure: orderByMeasure,
+          descending: typeof measureOrder === "object" && measureOrder?.descending === true,
+        });
+        refs = mode === "neighbors" ? traversed.filter((ref) => ref !== args.node_ref) : traversed;
+      } else {
+        const error = new Error(`Unknown projection navigation operation ${mode}.`);
+        error.code = "graph_navigation_operation_invalid";
+        throw error;
+      }
+      const nodeByRef = new Map(graph.nodes.map((node) => [node.ref, node]));
+      const items = refs.map((ref) => nodeByRef.get(ref)).filter(Boolean).map(compactProjectionNode);
+      const paged = pageProjectionResults({ store, ...request, operation: "navigate", items });
+      return enforceProjectionAnswerBudget({
+        ok: true,
+        operation: "navigate",
+        snapshot_id: snapshot.snapshot_id,
+        mode,
+        nodes: paged.page,
+        coverage: graph.coverage?.graph,
+        ...(paged.nextCursor ? { continuation: paged.nextCursor } : {}),
+      }, message.max_bytes);
+    } catch (error) {
+      return projectionRetrievalError(error);
+    }
+  };
+
+  const executeProjectionSearch = async (message = {}) => {
+    try {
+      message = normalizeProjectionRetrievalMessage(message);
+      const { store, queryModule } = await loadProjectionRetrievalModules();
+      const request = resolveProjectionRequest(store, message, "search");
+      const { snapshot, args } = request;
+      const searchMode = args.search_mode || args.mode || "lexical";
+      if (searchMode !== "lexical") {
+        const error = new Error("The content realm currently accepts lexical projection search only.");
+        error.code = "semantic_provider_unavailable";
+        throw error;
+      }
+      let scopeRefs = args.scope_refs;
+      if (!scopeRefs && Array.isArray(args.scope)) scopeRefs = args.scope;
+      if (!scopeRefs && typeof args.scope === "string") scopeRefs = [args.scope];
+      if (!scopeRefs && args.scope && typeof args.scope === "object") {
+        const scopeDepth = Number(args.scope.max_depth ?? 10);
+        if (!Number.isInteger(scopeDepth) || scopeDepth < 0 || scopeDepth > 10) {
+          const error = new Error("scope.max_depth must be an integer from 0 through 10.");
+          error.code = "graph_depth_invalid";
+          throw error;
+        }
+        scopeRefs = queryModule.traverseGraph(snapshot.graph, {
+          start_refs: [args.scope.node_ref],
+          direction: args.scope.direction,
+          edge_types: args.scope.edge_types,
+          max_depth: scopeDepth,
+          limit: 1000,
+        });
+      }
+      const result = queryModule.searchLexicalIndex(snapshot.graph, args.query, {
+        scope_refs: scopeRefs,
+        limit: snapshot.graph.nodes.length || 1,
+      });
+      const items = result.matches.map((match) => ({
+        ref: match.ref,
+        type: match.node_type,
+        score: match.score,
+        match_kind: match.match_kind,
+        fields: match.fields.map((field) => ({
+          field: field.field,
+          path: field.path,
+          snippet: String(field.text).slice(0, 160),
+          matched_terms: field.matched_terms,
+        })),
+      })).map((match) => enrichProjectionSearchMatch(match, snapshot.graph));
+      const paged = pageProjectionResults({ store, ...request, operation: "search", items });
+      return enforceProjectionAnswerBudget({
+        ok: true,
+        operation: "search",
+        mode: "lexical",
+        snapshot_id: snapshot.snapshot_id,
+        status: result.status,
+        matches: paged.page,
+        coverage: result.coverage,
+        ...(paged.nextCursor ? { continuation: paged.nextCursor } : {}),
+      }, message.max_bytes);
+    } catch (error) {
+      return projectionRetrievalError(error);
+    }
+  };
+
+  // Privileged-background preparation route. This never reaches the model: it
+  // returns bounded local field candidates so background can apply the trusted
+  // projection policy before any query or page text is sent to a provider.
+  const prepareProjectionSemanticSearch = async (message = {}) => {
+    try {
+      message = normalizeProjectionRetrievalMessage(message);
+      const { store, queryModule } = await loadProjectionRetrievalModules();
+      const request = resolveProjectionRequest(store, message, "search");
+      const { authority, snapshot, args } = request;
+      let scopeRefs = args.scope_refs;
+      if (!scopeRefs && Array.isArray(args.scope)) scopeRefs = args.scope;
+      if (!scopeRefs && typeof args.scope === "string") scopeRefs = [args.scope];
+      if (!scopeRefs && args.scope && typeof args.scope === "object") {
+        const scopeDepth = Number(args.scope.max_depth ?? 10);
+        if (!Number.isInteger(scopeDepth) || scopeDepth < 0 || scopeDepth > 10) {
+          const error = new Error("scope.max_depth must be an integer from 0 through 10.");
+          error.code = "graph_depth_invalid";
+          throw error;
+        }
+        scopeRefs = queryModule.traverseGraph(snapshot.graph, {
+          start_refs: [args.scope.node_ref],
+          direction: args.scope.direction,
+          edge_types: args.scope.edge_types,
+          max_depth: scopeDepth,
+          limit: 1000,
+        });
+      }
+      const scope = scopeRefs ? new Set(scopeRefs) : null;
+      const lexical = queryModule.searchLexicalIndex(snapshot.graph, args.query, {
+        scope_refs: scopeRefs,
+        limit: snapshot.graph.nodes.length || 1,
+      });
+      const lexicalMatches = lexical.matches.slice(0, 50).map((match) => ({
+        ref: match.ref,
+        type: match.node_type,
+        score: match.score,
+        fields: match.fields.slice(0, 4).map((field) => ({
+          field: field.field,
+          path: field.path,
+          snippet: String(field.text).slice(0, 160),
+          matched_terms: field.matched_terms,
+        })),
+      }));
+      const nodes = new Map(snapshot.graph.nodes.map((node) => [node.ref, node]));
+      const parents = new Map();
+      for (const edge of snapshot.graph.edges) {
+        if (!snapshot.graph.containment_edge_types.includes(edge.type)) continue;
+        const list = parents.get(edge.to) || [];
+        if (list.length < 8) list.push(edge.from);
+        parents.set(edge.to, list);
+      }
+      const ancestryFor = (ref) => {
+        const output = [];
+        const seen = new Set([ref]);
+        let frontier = [ref];
+        for (let depth = 0; depth < 8 && frontier.length; depth += 1) {
+          const next = [];
+          for (const current of frontier) {
+            for (const parent of parents.get(current) || []) {
+              if (seen.has(parent)) continue;
+              seen.add(parent);
+              output.push(parent);
+              next.push(parent);
+            }
+          }
+          frontier = next;
+        }
+        return output;
+      };
+      const candidates = [];
+      let candidateBytes = 0;
+      let candidateComplete = snapshot.graph.coverage?.lexical?.complete === true;
+      for (let index = 0; index < snapshot.graph.lexical_index.records.length; index += 1) {
+        const record = snapshot.graph.lexical_index.records[index];
+        if (scope && !scope.has(record.node_ref)) continue;
+        if (candidates.length >= 100_000) { candidateComplete = false; break; }
+        const candidate = {
+          id: `${record.node_ref}\u001f${record.path}`,
+          node_ref: record.node_ref,
+          field: record.field,
+          path: record.path,
+          node_type: nodes.get(record.node_ref)?.type || "unknown",
+          ancestry: ancestryFor(record.node_ref),
+          value: record.text,
+        };
+        const bytes = new TextEncoder().encode(JSON.stringify(candidate)).byteLength;
+        if (candidateBytes + bytes > 8_000_000) { candidateComplete = false; break; }
+        candidateBytes += bytes;
+        candidates.push(candidate);
+      }
+      return {
+        ok: true,
+        snapshot_id: snapshot.snapshot_id,
+        semantic_namespace: authority.projection,
+        projection_name: authority.projection,
+        catalog_revision: authority.catalog_revision,
+        lexical_result: {
+          ok: true,
+          operation: "search",
+          mode: "lexical",
+          snapshot_id: snapshot.snapshot_id,
+          status: lexical.status,
+          matches: lexicalMatches,
+          coverage: lexical.coverage,
+        },
+        candidates,
+        coverage: {
+          graph: snapshot.graph.coverage?.graph,
+          lexical: snapshot.graph.coverage?.lexical,
+          candidates: { complete: candidateComplete, candidate_count: candidates.length },
+        },
+      };
+    } catch (error) {
+      return projectionRetrievalError(error);
+    }
+  };
+
+  const finalizeProjectionSemanticSearch = async (message = {}) => {
+    try {
+      message = normalizeProjectionRetrievalMessage(message);
+      const { store } = await loadProjectionRetrievalModules();
+      const request = resolveProjectionRequest(store, message, "search");
+      const supplied = Array.isArray(message.ranked_matches) ? message.ranked_matches : null;
+      const items = (supplied || request.args.__semantic_ranked_matches)
+        ?.map((match) => enrichProjectionSearchMatch(match, request.snapshot.graph));
+      const semantic = message.semantic || request.args.__semantic_metadata;
+      if (!Array.isArray(items) || !semantic || typeof semantic !== "object") {
+        const error = new Error("The semantic result page is missing its frozen ranked result set.");
+        error.code = "semantic_cursor_invalid";
+        throw error;
+      }
+      const cursorArgs = supplied
+        ? { ...request.args, __semantic_ranked_matches: structuredClone(items), __semantic_metadata: structuredClone(semantic) }
+        : request.args;
+      const paged = pageProjectionResults({
+        store,
+        ...request,
+        operation: "search",
+        args: cursorArgs,
+        items,
+      });
+      return enforceProjectionAnswerBudget({
+        ok: true,
+        operation: "search",
+        mode: "hybrid",
+        snapshot_id: request.snapshot.snapshot_id,
+        status: semantic.complete ? (paged.page.length ? "matches" : "no_confident_match") : "incomplete",
+        matches: paged.page,
+        coverage: semantic.coverage,
+        semantic: semantic.semantic,
+        ...(paged.nextCursor ? { continuation: paged.nextCursor } : {}),
+      }, message.max_bytes);
+    } catch (error) {
+      return projectionRetrievalError(error);
+    }
+  };
+
+  const advanceProjectionNavigationEpoch = async () => {
+    if (location.href === projectionNavigationHref) return;
+    projectionNavigationHref = location.href;
+    projectionNavigationEpoch = globalThis.crypto?.randomUUID?.()
+      || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    if (!projectionSnapshotStore) return;
+    for (const tabId of projectionAuthorityTabIds) {
+      projectionSnapshotStore.cleanupNavigation({
+        runtime_id: RUNTIME_ID,
+        tab_id: tabId,
+        retain_navigation_epoch: projectionNavigationEpoch,
+      });
+    }
+  };
+
+  // SPA history transitions do not reload a content script. Polling the URL is
+  // intentionally cheap and gives those transitions the same fail-closed
+  // cursor cleanup as a full document navigation (which destroys this realm).
+  projectionNavigationPoller = setInterval(() => {
+    advanceProjectionNavigationEpoch().catch(() => {});
+  }, 500);
+  window.addEventListener("popstate", advanceProjectionNavigationEpoch);
+  window.addEventListener("hashchange", advanceProjectionNavigationEpoch);
+
   // Per-tab marker registry (KTD3): markers are stable anchors minted by a
   // projection run; coordinates are NEVER stored (KTD4) — the marker-runner
   // resolves a marker's recipe live at query/move time. Cleared naturally on
   // navigation (content script reload); re-running a projection replaces its
   // own markers.
   const stateMarkerRegistry = new Map();
+  const stateProjectionSnapshots = new Map();
 
   const registerStateMarkers = (projectionName, markers) => {
     for (const [id, existing] of stateMarkerRegistry) {
@@ -4156,18 +5684,132 @@
 
   const executeStateProjection = async (message) => {
     const module = await loadStateProjectionModule();
+    const { store } = await loadProjectionRetrievalModules();
+    const authority = projectionAuthority(message);
     const result = await module.executeStateProjection({
       bundle: message.bundle,
       pageUrl: location.href,
       document,
       projectionName: message.projection_name,
       summaryName: message.summary_name || null,
+      summaryArguments: message.summary_arguments || {},
       maxBytes: message.max_bytes,
+      projectionCache: message.projection_cache || {},
+      activateGraph: ({ graph }) => {
+        const activated = store.activate({
+          authority,
+          graph,
+          declaredKeys: Array.isArray(message.continuity_keys) ? message.continuity_keys : [],
+        });
+        projectionSnapshotAuthorities.set(activated.snapshot_id, authority);
+        while (projectionSnapshotAuthorities.size > 32) {
+          projectionSnapshotAuthorities.delete(projectionSnapshotAuthorities.keys().next().value);
+        }
+        return {
+          snapshot_id: activated.snapshot_id,
+          roots: activated.graph.roots,
+          active: true,
+          navigation_ready: true,
+          transitions: activated.transitions,
+        };
+      },
     });
     if (result?.ok && Array.isArray(result.markers)) {
       registerStateMarkers(result.projection || message.projection_name, result.markers);
     }
+    if (message.record_snapshot === true && result?.ok && result.state !== undefined) {
+      stateProjectionSnapshots.set(message.projection_name, {
+        state: result.state,
+        state_hash: result.state_hash || null,
+        observed_at: result.observed_at || new Date().toISOString(),
+      });
+    }
     return result;
+  };
+
+  const executeStatePostcondition = async (message) => {
+    const module = await loadStateProjectionModule();
+    const projection = await module.executeStateProjection({
+      bundle: message.bundle,
+      pageUrl: location.href,
+      document,
+      projectionName: message.projection_name,
+      maxBytes: message.max_bytes,
+      consumer: "internal_compute",
+      projectionCache: message.projection_cache || {},
+    });
+    if (projection?.ok && Array.isArray(projection.markers)) {
+      registerStateMarkers(projection.projection || message.projection_name, projection.markers);
+    }
+    if (projection?.ok === false) {
+      return projection;
+    }
+    const verification = await module.verifyStatePostcondition({
+      postcondition: message.postcondition,
+      state: projection.state,
+      input: message.input || {},
+    });
+    const { state: _state, ...metadata } = projection;
+    return {
+      ...metadata,
+      verification,
+      ...(verification?.ok === false ? { error: verification.error } : {}),
+    };
+  };
+
+  const executeStateDiff = async (message) => {
+    const module = await loadStateProjectionModule();
+    const projection = await module.executeStateProjection({
+      bundle: message.bundle,
+      pageUrl: location.href,
+      document,
+      projectionName: message.projection_name,
+      maxBytes: message.compute_max_bytes,
+      consumer: "internal_compute",
+      projectionCache: message.projection_cache || {},
+    });
+    if (projection?.ok === false) {
+      return projection;
+    }
+    const key = message.projection_name;
+    const previous = stateProjectionSnapshots.get(key);
+    const patches = previous?.state === undefined
+      ? []
+      : module.diffStates(previous.state, projection.state);
+    stateProjectionSnapshots.set(key, {
+      state: projection.state,
+      state_hash: projection.state_hash || null,
+      observed_at: projection.observed_at || new Date().toISOString(),
+    });
+    const output = {
+      ok: true,
+      projection: message.projection_name,
+      baseline: previous ? "previous_snapshot" : "initialized",
+      patch_format: "json_patch",
+      patches,
+      semantic_deltas: module.buildSemanticDeltas(patches),
+      previous_state_hash: previous?.state_hash || null,
+      state_hash: projection.state_hash || null,
+      observed_at: projection.observed_at || null,
+      ...(Array.isArray(projection.cache_updates) ? { cache_updates: projection.cache_updates } : {}),
+    };
+    const requested = Number(message.response_max_bytes);
+    const responseBudget = Number.isFinite(requested) && requested > 0
+      ? Math.min(requested, module.STATE_PROJECTION_LIMITS.diffResponseBytes)
+      : module.STATE_PROJECTION_LIMITS.diffResponseBytes;
+    const responseBytes = new TextEncoder().encode(JSON.stringify(output)).length;
+    if (responseBytes > responseBudget) {
+      return {
+        ok: false,
+        error: {
+          code: "state_diff_payload_too_large",
+          message: "State diff output exceeded the configured response budget.",
+          response_bytes: responseBytes,
+          response_max_bytes: responseBudget,
+        },
+      };
+    }
+    return output;
   };
 
   // --- Marker-runner (action layer, KTD1/KTD2) -------------------------------
@@ -4341,6 +5983,8 @@
       output = hideMenuOverlay();
     } else if (message.name === "overlay.menu.show") {
       output = showMenuOverlay();
+    } else if (message.name === "overlay.cursor.point") {
+      output = await overlayCursorPoint(message.arguments || {});
     } else if (message.name === "task.add") {
       output = await taskAdd(message.arguments || {});
     } else if (message.name === "task.next") {
@@ -4425,6 +6069,12 @@
       output = await transferBufferAction("transfer.clear", message.arguments || {});
     } else if (message.name === "transfer.insert") {
       output = await transferInsert(message.arguments || {}, reportProgress);
+    } else if (message.name === "file.transfer.upload.consume") {
+      output = await fileTransferUploadConsume(message.arguments || {});
+    } else if (message.name === "file.transfer.download.capture") {
+      output = await fileTransferDownloadCapture(message.arguments || {});
+    } else if (message.name?.startsWith("file.transfer.")) {
+      output = await fileTransferAction(message.name, message.arguments || {});
     } else if (message.name === "storage.read_file") {
       output = await storageReadFile(message.arguments || {});
     } else if (message.name === "keyboard.press") {
@@ -4501,6 +6151,12 @@
         type: "action_error",
         call_id: callId,
         runtime_id: RUNTIME_ID,
+        output: {
+          progress: {
+            last_entered_content_phase: lastEnteredContentPhase,
+            last_completed_content_phase: lastCompletedContentPhase,
+          },
+        },
         error: {
           code: "handler_failed",
           message: error.message || String(error)
@@ -4580,6 +6236,7 @@
         type: "action_error",
         call_id: callId,
         runtime_id: RUNTIME_ID,
+        ...(response?.output !== undefined ? { output: response.output } : {}),
         error: response?.error || response?.output?.error || {
           code: "state_projection_failed",
           message: "State projection execution failed in the extension runtime.",
@@ -4620,6 +6277,7 @@
         type: "action_error",
         call_id: callId,
         runtime_id: RUNTIME_ID,
+        ...(response?.output !== undefined ? { output: response.output } : {}),
         error: response?.error || response?.output?.error || {
           code: "site_action_failed",
           message: "Site action execution failed in the extension runtime.",
@@ -4715,6 +6373,18 @@
   };
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message?.type === "actions-json:file-transfer-test") {
+      const operation = message.name === "file.transfer.upload.consume"
+        ? fileTransferUploadConsume(message.arguments || {})
+        : message.name === "file.transfer.download.capture"
+          ? fileTransferDownloadCapture(message.arguments || {})
+          : fileTransferAction(message.name, message.arguments || {});
+      Promise.resolve(operation).then(sendResponse, (error) => sendResponse({
+        ok: false,
+        error: error.message || String(error),
+      }));
+      return true;
+    }
     if (message?.type === "actions-json:connect") {
       runtimeKey = message.runtimeKey || runtimeKey;
       authorizationId = message.authorizationId || authorizationId;
@@ -4783,6 +6453,60 @@
       );
       return true;
     }
+    if (message?.type === "actions-json:execute-projection-navigate") {
+      executeProjectionNavigate(message).then(
+        (output) => sendResponse({ ok: output?.ok !== false, output, error: output?.error || null }),
+        (error) => sendResponse({ ok: false, error: projectionRetrievalError(error).error })
+      );
+      return true;
+    }
+    if (message?.type === "actions-json:execute-projection-search") {
+      executeProjectionSearch(message).then(
+        (output) => sendResponse({ ok: output?.ok !== false, output, error: output?.error || null }),
+        (error) => sendResponse({ ok: false, error: projectionRetrievalError(error).error })
+      );
+      return true;
+    }
+    if (message?.type === "actions-json:prepare-projection-semantic-search") {
+      prepareProjectionSemanticSearch(message).then(
+        (output) => sendResponse({ ok: output?.ok !== false, output, error: output?.error || null }),
+        (error) => sendResponse({ ok: false, error: projectionRetrievalError(error).error })
+      );
+      return true;
+    }
+    if (message?.type === "actions-json:finalize-projection-semantic-search") {
+      finalizeProjectionSemanticSearch(message).then(
+        (output) => sendResponse({ ok: output?.ok !== false, output, error: output?.error || null }),
+        (error) => sendResponse({ ok: false, error: projectionRetrievalError(error).error })
+      );
+      return true;
+    }
+    if (message?.type === "actions-json:execute-state-postcondition") {
+      executeStatePostcondition(message).then(
+        (output) => sendResponse({ ok: output?.ok !== false, output, error: output?.error || null }),
+        (error) => sendResponse({
+          ok: false,
+          error: {
+            code: "state_postcondition_failed",
+            message: error.message || String(error)
+          }
+        })
+      );
+      return true;
+    }
+    if (message?.type === "actions-json:execute-state-diff") {
+      executeStateDiff(message).then(
+        (output) => sendResponse({ ok: output?.ok !== false, output, error: output?.error || null }),
+        (error) => sendResponse({
+          ok: false,
+          error: {
+            code: "state_diff_failed",
+            message: error.message || String(error)
+          }
+        })
+      );
+      return true;
+    }
     return false;
   });
 
@@ -4803,11 +6527,22 @@
         clearInterval(launcherUrlPoller);
         launcherUrlPoller = null;
       }
+      if (projectionNavigationPoller) {
+        clearInterval(projectionNavigationPoller);
+        projectionNavigationPoller = null;
+      }
+      if (projectionSnapshotStore) {
+        for (const tabId of projectionAuthorityTabIds) {
+          projectionSnapshotStore.cleanupTab({ runtime_id: RUNTIME_ID, tab_id: tabId });
+        }
+      }
       relayedRuntimeIds.clear();
       relayedRuntimeReady.clear();
       window.removeEventListener("message", handleBookmarkletRelayMessage);
       window.removeEventListener("popstate", scheduleLauncherRefresh);
       window.removeEventListener("hashchange", scheduleLauncherRefresh);
+      window.removeEventListener("popstate", advanceProjectionNavigationEpoch);
+      window.removeEventListener("hashchange", advanceProjectionNavigationEpoch);
     }
   };
 })();

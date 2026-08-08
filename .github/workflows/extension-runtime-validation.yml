@@ -1,0 +1,66 @@
+name: Extension runtime validation
+
+on:
+  pull_request:
+    paths:
+      - "extensions/chrome-overlay-runtime/**"
+      - "package.json"
+      - "package-lock.json"
+      - "playwright.config.*"
+      - ".gitmodules"
+      - "scripts/package-extension.sh"
+      - "scripts/tests/package-extension-completeness.test.mjs"
+      - "third_party/chromevox"
+      - "third_party/chromevox/**"
+      - "tests/menu-collapse-smoke-timeout.test.mjs"
+      - "tests/package-extension.test.mjs"
+      - ".github/workflows/extension-runtime-validation.yml"
+  push:
+    branches: [main]
+    paths:
+      - "extensions/chrome-overlay-runtime/**"
+      - "package.json"
+      - "package-lock.json"
+      - "playwright.config.*"
+      - ".gitmodules"
+      - "scripts/package-extension.sh"
+      - "scripts/tests/package-extension-completeness.test.mjs"
+      - "third_party/chromevox"
+      - "third_party/chromevox/**"
+      - "tests/menu-collapse-smoke-timeout.test.mjs"
+      - "tests/package-extension.test.mjs"
+      - ".github/workflows/extension-runtime-validation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  characterize-extension-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run extension runtime characterizations
+        run: npm run test:overlay-runtime
+      - name: Verify live-smoke timeout cleanup
+        run: node --test tests/menu-collapse-smoke-timeout.test.mjs
+      - name: Verify extension package contract
+        run: node --test tests/package-extension.test.mjs scripts/tests/package-extension-completeness.test.mjs
+      - name: Build and extract packaged extension
+        run: |
+          bash scripts/package-extension.sh --version ci --out-dir /tmp/actions-json-extension
+          mkdir -p /tmp/actions-json-extension/unpacked
+          unzip -q /tmp/actions-json-extension/actions-json-overlay-runtime-ci.zip -d /tmp/actions-json-extension/unpacked
+      - name: Run packaged live menu collapse smoke
+        env:
+          ACTIONS_JSON_EXTENSION_DIR: /tmp/actions-json-extension/unpacked
+        run: npm run test:menu-collapse-live

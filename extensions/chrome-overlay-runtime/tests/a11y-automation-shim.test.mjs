@@ -33,6 +33,8 @@ const fixtureCdp = async (method, params) => {
   }
   if (method === 'Runtime.callFunctionOn') {
     assert.strictEqual(params.objectId, 'fixture-button');
+    assert.match(params.functionDeclaration, /const candidates = \[/);
+    assert.match(params.functionDeclaration, /document\.elementFromPoint\(point\.x, point\.y\)/);
     return {result: {value: {
       visible_center: {x: 60, y: 40},
       visible_rect: {left: 10, top: 20, right: 110, bottom: 60, width: 100, height: 40},
@@ -46,6 +48,21 @@ const fixtureCdp = async (method, params) => {
 };
 
 const makeTree = async () => new ShimTree({cdp: fixtureCdp, tabId: 7, url: 'https://example.test/', focused: true}).refresh();
+
+const partialFixtureCdp = async (method, params) => {
+  if (method === 'Runtime.callFunctionOn') {
+    assert.strictEqual(params.objectId, 'fixture-button');
+    return {result: {value: {
+      visible_center: {x: 60, y: 40},
+      clickable_center: {x: 14, y: 40},
+      visible_rect: {left: 10, top: 20, right: 110, bottom: 60, width: 100, height: 40},
+      receives_events: true,
+      clickable: true,
+      occluded_by: null,
+    }}};
+  }
+  return fixtureCdp(method, params);
+};
 
 test('role/name/state mapping and tree walking match the fixture', async () => {
   const tree = await makeTree();
@@ -72,6 +89,23 @@ test('actionability attestation separates AX identity from hit-test ownership', 
   assert.strictEqual(attestation.clickable, false);
   assert.deepStrictEqual(attestation.visible_center, {x: 60, y: 40});
   assert.deepStrictEqual(attestation.occluded_by, {tag_name: 'div', id: 'sticky-cover', text: 'Sticky cover'});
+});
+
+test('actionability exposes a non-center click point when the center alone is occluded', async () => {
+  const tree = await new ShimTree({
+    cdp: partialFixtureCdp,
+    tabId: 7,
+    url: 'https://example.test/',
+    focused: true,
+  }).refresh();
+  const hit = tree.query({role: 'button', name: 'Reply'});
+  const attestation = await tree.actionability(hit);
+  assert.strictEqual(attestation.actionability_attested, true);
+  assert.strictEqual(attestation.receives_events, true);
+  assert.strictEqual(attestation.clickable, true);
+  assert.deepStrictEqual(attestation.visible_center, {x: 60, y: 40});
+  assert.deepStrictEqual(attestation.clickable_center, {x: 14, y: 40});
+  assert.strictEqual(attestation.occluded_by, null);
 });
 
 test('synthetic desktop→window topology serves the suppression walk', async () => {
