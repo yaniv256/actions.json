@@ -216,7 +216,7 @@ build_macos_on_github() {
   log "macOS native assets (GitHub-hosted runner)"
   gh api --method POST "repos/${repo}/actions/workflows/${MACOS_WORKFLOW}/dispatches" \
     -f ref="$tag" -f "inputs[version]=$version" -f "inputs[commit]=$commit" \
-    -f "inputs[request_id]=$request_id"
+    -f "inputs[request_id]=$request_id" >&2
   deadline=$((SECONDS + MACOS_RUN_TIMEOUT_SECONDS))
   run_id=""
   while [[ -z "$run_id" && $SECONDS -lt $deadline ]]; do
@@ -225,13 +225,14 @@ build_macos_on_github() {
     [[ -n "$run_id" ]] || sleep 3
   done
   [[ -n "$run_id" ]] || { echo "timed out locating dispatched macOS workflow run" >&2; return 1; }
-  gh run watch "$run_id" --repo "$repo" --exit-status || return 1
+  # gh progress goes to stderr: this function's stdout is the artifact list.
+  gh run watch "$run_id" --repo "$repo" --exit-status >&2 || return 1
   [[ "$(gh api "repos/${repo}/actions/runs/${run_id}" --jq .head_sha)" == "$commit" ]] || {
     echo "macOS workflow run commit mismatch" >&2; return 1;
   }
   for slug in macos-arm64 macos-x64; do
     artifact="actions-json-${version}-${slug}"
-    gh run download "$run_id" --repo "$repo" --name "$artifact" --dir "$dist/$artifact" || return 1
+    gh run download "$run_id" --repo "$repo" --name "$artifact" --dir "$dist/$artifact" >&2 || return 1
     archive="$dist/$artifact/actions-json-${version}-${slug}.tar.gz"
     [[ -s "$archive" ]] || { echo "missing macOS workflow artifact: $archive" >&2; return 1; }
     mv "$archive" "$dist/actions-json-${version}-${slug}.tar.gz"

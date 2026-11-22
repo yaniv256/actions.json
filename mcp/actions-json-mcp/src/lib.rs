@@ -1158,14 +1158,14 @@ impl BridgeHttpAuthRejection {
             Self::SecretMissing => {
                 "This bridge route requires the per-installation handshake secret. \
                  Send it as `Authorization: Bearer <secret>` or `?secret=<secret>`. \
-                 The bridge prints the secret at startup and stores it as \
-                 `bridge_handshake_secret` in .actions-json.local.json."
+                 It is `bridge_handshake_secret` in ~/.actions-json/config.json; \
+                 `actions-json pair inspect --reveal-secret` shows it."
             }
             Self::SecretMismatch => {
                 "The presented handshake secret does not match this installation's. \
                  It is per-installation, not per-process: re-read \
-                 `bridge_handshake_secret` from .actions-json.local.json, or the value \
-                 the bridge printed at startup."
+                 `bridge_handshake_secret` from ~/.actions-json/config.json \
+                 (`actions-json pair inspect --reveal-secret`)."
             }
         }
     }

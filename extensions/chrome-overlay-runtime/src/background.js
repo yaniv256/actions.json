@@ -3896,9 +3896,9 @@ const verifyBridgeAuthorization = async (bridgeUrl, secret) => {
   const code = payload?.error?.code || `bridge_auth_http_${response.status}`;
   const messages = {
     handshake_secret_missing:
-      "The bridge handshake secret is missing. Open Settings and paste the secret issued by this bridge.",
+      "No bridge passphrase or secret is saved. Open Settings and enter the one in the bridge's config.json (bridge_handshake_secret).",
     handshake_secret_mismatch:
-      "The saved handshake secret does not match this bridge. Open Settings and replace it with the current bridge secret.",
+      "The saved passphrase or secret does not match this bridge. Open Settings and enter the value of bridge_handshake_secret from the bridge's config.json.",
     origin_rejected:
       `This bridge does not allow extension ${chrome.runtime.id}. Rebuild the bridge with this extension ID.`,
   };
@@ -7114,15 +7114,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     };
     verifyPairing()
       .then((result) => sendResponse(result))
-      .catch((error) =>
+      .catch(async (error) => {
+        // Record the failure in the connection log too: a pairing that fails at
+        // the authorization preflight never opens a WebSocket, so without this the
+        // log shows only "Attempt". The message never contains the secret.
+        await appendBackgroundDiagnosticEvent({
+          type: "transport",
+          name: "background.bridge.pairing.failed",
+          ok: false,
+          summary: "Bridge pairing failed.",
+          input: {
+            bridge_url: message.bridgeUrl || null,
+            extension_id: chrome.runtime.id,
+            extension_version: chrome.runtime.getManifest().version,
+          },
+          output: { error_message: error?.message || String(error) },
+        }).catch(() => {});
         sendResponse({
           ok: false,
           error: {
             code: "bridge_reconnect_failed",
             message: error?.message || String(error),
           },
-        }),
-      );
+        });
+      });
     return true;
   }
 

@@ -518,9 +518,9 @@ Expected stable flow:
    ```
 
    `/actions`, `/mcp/tools/list`, and `/mcp/tools/call` require the
-   per-installation handshake secret the bridge prints at startup
-   (`extension handshake secret: <secret>`, also stored as
-   `bridge_handshake_secret` in `.actions-json.local.json`); without it they
+   installation's pairing secret: `bridge_handshake_secret` in
+   `~/.actions-json/config.json`, which may be a passphrase the human chose at
+   install time (`actions-json pair inspect --reveal-secret` shows it); without it they
    answer `401 bridge_secret_missing`.
 
 4. If storage changed, sync/reload the storage bundle without restarting the

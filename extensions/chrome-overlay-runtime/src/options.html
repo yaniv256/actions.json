@@ -283,7 +283,7 @@
         />
       </label>
       <label>
-        Bridge handshake secret
+        Bridge passphrase or secret
         <input
           id="bridgeHandshakeSecret"
           type="password"
@@ -293,8 +293,9 @@
         />
       </label>
       <p id="bridge-pairing-help" class="note">
-        Stored only in this extension's local Chrome storage. The saved value is
-        never displayed again.
+        The value of <code>bridge_handshake_secret</code> in the bridge's
+        config.json. It can be a passphrase you choose. Stored only in this
+        extension's local Chrome storage. The saved value is never displayed again.
       </p>
       <div class="button-row">
         <button id="save-bridge-pairing">Connect coding agent</button>

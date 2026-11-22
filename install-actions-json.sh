@@ -109,6 +109,7 @@ if [[ -e "$config_file" ]]; then
   existing_bind="$(jq -r '.bind // empty' "$config_file")"
   existing_storage="$(jq -r '.storage_root // empty' "$config_file")"
   existing_actions="$(jq -r '.actions // empty' "$config_file")"
+  existing_secret="$(jq -r '.bridge_handshake_secret // empty' "$config_file")"
   [[ "$state_explicit" == 0 || "$configured_state_dir" == "$existing_state" ]] || { echo "--state-dir conflicts with existing config: $config_file" >&2; exit 2; }
   [[ "$bind_explicit" == 0 || "$bind" == "$existing_bind" ]] || { echo "--bind conflicts with existing config: $config_file" >&2; exit 2; }
   [[ "$storage_explicit" == 0 || "$storage_root" == "$existing_storage" ]] || { echo "--storage-root conflicts with existing config: $config_file" >&2; exit 2; }
@@ -117,6 +118,41 @@ if [[ -e "$config_file" ]]; then
   [[ -z "$existing_bind" ]] || bind="$existing_bind"
   [[ -z "$existing_storage" ]] || storage_root="$existing_storage"
   [[ -z "$existing_actions" ]] || actions_path="$existing_actions"
+fi
+# Bridge pairing. The extension and the bridge share one secret, and it may be a
+# passphrase the user chooses. An existing secret is never replaced here (that would
+# unpair every browser; use `actions-json pair rotate`). Otherwise take
+# ACTIONS_JSON_BRIDGE_SECRET, or ask on the terminal when there is one. With
+# neither, the bridge generates a secret on first start, as before.
+min_bridge_secret_length=8
+bridge_secret=""
+if [[ -z "${existing_secret:-}" ]]; then
+  if [[ -n "${ACTIONS_JSON_BRIDGE_SECRET:-}" ]]; then
+    bridge_secret="$(printf '%s' "$ACTIONS_JSON_BRIDGE_SECRET" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    (( ${#bridge_secret} >= min_bridge_secret_length )) || {
+      echo "ACTIONS_JSON_BRIDGE_SECRET must be at least $min_bridge_secret_length characters" >&2; exit 2; }
+  elif [[ -t 0 ]] && { : </dev/tty; } 2>/dev/null && { : >/dev/tty; } 2>/dev/null; then
+    {
+      echo "Choose a bridge passphrase. You will type the same one into the extension's"
+      echo "Bridge pairing field. At least $min_bridge_secret_length characters; press Enter to generate one instead."
+    } >/dev/tty
+    while :; do
+      IFS= read -r -s -p "Bridge passphrase: " first </dev/tty; echo >/dev/tty
+      first="$(printf '%s' "$first" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+      if [[ -z "$first" ]]; then
+        echo "A secret will be generated. Show it later with: actions-json pair inspect --reveal-secret" >/dev/tty
+        break
+      fi
+      if (( ${#first} < min_bridge_secret_length )); then
+        echo "Too short: use at least $min_bridge_secret_length characters." >/dev/tty; continue
+      fi
+      IFS= read -r -s -p "Repeat it: " second </dev/tty; echo >/dev/tty
+      second="$(printf '%s' "$second" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+      if [[ "$first" != "$second" ]]; then echo "They did not match. Try again." >/dev/tty; continue; fi
+      bridge_secret="$first"; break
+    done
+    unset first second
+  fi
 fi
 state_dir="${configured_state_dir:-${XDG_STATE_HOME:-$HOME/.local/state}/actions-json}"
 state_dir="$(realpath -m -- "$state_dir")"
@@ -160,6 +196,10 @@ else
   cp -- "$tmp/config-defaults.json" "$config_file.new"
   created_config=1
 fi
+if [[ -n "$bridge_secret" ]]; then
+  AJ_BRIDGE_SECRET="$bridge_secret" jq '.bridge_handshake_secret = env.AJ_BRIDGE_SECRET | del(.bridge_pairing_revoked)' \
+    "$config_file.new" > "$config_file.secret" && mv -f "$config_file.secret" "$config_file.new"
+fi
 chmod 600 "$config_file.new"; mv "$config_file.new" "$config_file"
 if [[ ! -e "$prefix/bin/aj" && ! -L "$prefix/bin/aj" ]]; then
   ln -s actions-json "$prefix/bin/aj"
@@ -181,3 +221,4 @@ else
 fi
 install_succeeded=1
 echo "installed actions-json $version ($slug); aj alias $([[ -L "$prefix/bin/aj" ]] && echo available || echo preserved-existing)"
+[[ -z "$bridge_secret" ]] || echo "bridge passphrase saved to $config_file; enter the same passphrase in the extension's Bridge pairing field"

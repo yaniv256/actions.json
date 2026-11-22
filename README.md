@@ -64,15 +64,25 @@ executable-and-state-store update with rollback on failed readiness. Windows
 replaces the verified executable atomically when possible, or leaves a verified
 staged replacement for a short helper after the running process exits.
 
-Once the CLI and Chrome extension are installed, create the one-time secure pairing:
+The bridge and the extension share one pairing secret, and it can be a
+passphrase you choose (at least 8 characters). On a first install the
+installer asks for one, hidden and typed twice. Press Enter instead to have a
+secret generated. For an unattended install, set `ACTIONS_JSON_BRIDGE_SECRET`.
+The installer never replaces an existing secret; `actions-json pair rotate`
+does that deliberately. The secret lives in `~/.actions-json/config.json` as
+`bridge_handshake_secret`.
+
+Once the CLI and Chrome extension are installed, type the same passphrase
+into the extension's **Bridge pairing** field. If a secret was generated,
+reveal it once to paste it there:
 
 ```bash
 actions-json doctor
-actions-json pair create --reveal-secret
+actions-json pair inspect --reveal-secret
 ```
 
-Paste the revealed secret into the extension's **Bridge pairing** field, claim
-an ordinary website tab, then verify the connection without trusting the UI:
+Then claim an ordinary website tab and verify the connection without trusting
+the UI:
 
 ```bash
 actions-json status

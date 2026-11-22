@@ -3,6 +3,10 @@ export const BRIDGE_PAIRING_UPDATED_MESSAGE = "actions-json:bridge-pairing-updat
 
 const normalizedSecret = (value) => String(value ?? "").trim();
 
+// The bridge compares the full value and is the real check. This minimum only
+// catches an accidental partial entry, so a typed passphrase is enough.
+export const MIN_BRIDGE_SECRET_LENGTH = 8;
+
 export const bridgePairingState = async (storageArea) => {
   const stored = await storageArea.get(BRIDGE_HANDSHAKE_SECRET_KEY);
   return {
@@ -12,11 +16,11 @@ export const bridgePairingState = async (storageArea) => {
 
 export const saveBridgePairingSecret = async ({ storageArea, runtime, value, bridgeUrl = "" }) => {
   const secret = normalizedSecret(value);
-  if (secret.length < 32) {
+  if (secret.length < MIN_BRIDGE_SECRET_LENGTH) {
     return {
       ok: false,
       code: "secret_too_short",
-      message: "Paste the complete bridge handshake secret (at least 32 characters).",
+      message: `Enter the bridge passphrase or secret (at least ${MIN_BRIDGE_SECRET_LENGTH} characters).`,
     };
   }
 

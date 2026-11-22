@@ -69,6 +69,32 @@ try {
     if ($existing.storage_root) { $StorageRoot = [string]$existing.storage_root }
     $Actions = $existingActions
   }
+  # Bridge pairing: the extension and the bridge share one secret, which may be a
+  # passphrase the user chooses. Never replace an existing secret here (that would
+  # unpair every browser; use `actions-json pair rotate`). Otherwise take
+  # ACTIONS_JSON_BRIDGE_SECRET, or ask when the session is interactive. With
+  # neither, the bridge generates a secret on first start, as before.
+  $minBridgeSecretLength = 8
+  $bridgeSecret = ''
+  $existingSecret = if ($existing -and $existing.bridge_handshake_secret) { [string]$existing.bridge_handshake_secret } else { '' }
+  if (-not $existingSecret) {
+    if ($env:ACTIONS_JSON_BRIDGE_SECRET) {
+      $bridgeSecret = $env:ACTIONS_JSON_BRIDGE_SECRET.Trim()
+      if ($bridgeSecret.Length -lt $minBridgeSecretLength) { throw "ACTIONS_JSON_BRIDGE_SECRET must be at least $minBridgeSecretLength characters" }
+    } elseif ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+      Write-Host "Choose a bridge passphrase. You will type the same one into the extension's"
+      Write-Host "Bridge pairing field. At least $minBridgeSecretLength characters; press Enter to generate one instead."
+      while ($true) {
+        $first = [Net.NetworkCredential]::new('', (Read-Host -AsSecureString 'Bridge passphrase')).Password.Trim()
+        if (-not $first) { Write-Host 'A secret will be generated. Show it later with: actions-json pair inspect --reveal-secret'; break }
+        if ($first.Length -lt $minBridgeSecretLength) { Write-Host "Too short: use at least $minBridgeSecretLength characters."; continue }
+        $second = [Net.NetworkCredential]::new('', (Read-Host -AsSecureString 'Repeat it')).Password.Trim()
+        if ($first -ne $second) { Write-Host 'They did not match. Try again.'; continue }
+        $bridgeSecret = $first; break
+      }
+      Remove-Variable first,second -ErrorAction SilentlyContinue
+    }
+  }
   if (-not $StateDir) { $StateDir = $configRoot }
   $state = [IO.Path]::GetFullPath($StateDir)
   $StorageRoot = [IO.Path]::GetFullPath($StorageRoot)
@@ -106,6 +132,7 @@ try {
   }
   $config.schema_version = 1; $config.state_dir = $state; $config.bind = $Bind; $config.storage_root = $StorageRoot
   if ($Actions) { $config.actions = $Actions }
+  if ($bridgeSecret) { $config.bridge_handshake_secret = $bridgeSecret; $config.Remove('bridge_pairing_revoked') }
   $utf8NoBom = New-Object Text.UTF8Encoding($false)
   [IO.File]::WriteAllText("$configFile.new", ($config | ConvertTo-Json), $utf8NoBom)
   Move-Item -Force "$configFile.new" $configFile
@@ -129,6 +156,7 @@ try {
   $installSucceeded = $true
   Remove-Item -Force $binaryBackup,$aliasBackup,$counterBackup -ErrorAction SilentlyContinue
   Write-Output "installed actions-json $Version (windows-x64)"
+  if ($bridgeSecret) { Write-Output "bridge passphrase saved to $configFile; enter the same passphrase in the extension's Bridge pairing field" }
 } finally {
   if (-not $installSucceeded -and $createdConfig -and $configFile) {
     Remove-Item -Force $configFile -ErrorAction SilentlyContinue

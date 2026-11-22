@@ -39,10 +39,13 @@ and are not the canonical CLI installer asset.
 ## First run
 
 1. Run `actions-json doctor` and read the structured result.
-2. Run `actions-json pair create`. The result is redacted by default. Use
-   `--reveal-secret` only when the human is ready to paste the secret into the
-   extension's Bridge pairing field; do not log or repeat it.
-3. In the extension, set the bridge socket, save the pairing secret, and take
+2. Pairing uses one shared secret, which may be a passphrase the human chose
+   when the installer asked (at least 8 characters). If it was generated
+   instead, run `actions-json pair inspect` (redacted by default). Use
+   `--reveal-secret` only when the human is ready to paste it into the
+   extension's Bridge pairing field; do not log or repeat it. Never ask the
+   human to say a passphrase aloud or paste it into chat.
+3. In the extension, set the bridge socket, enter the pairing secret, and take
    control of the intended ordinary website tab. Extension settings pages can
    configure the connection but are not operable site targets.
 4. Run `actions-json status`, then `actions-json target list`. Treat a runtime as
