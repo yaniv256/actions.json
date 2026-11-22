@@ -1,5 +1,6 @@
 import { chromium } from "@playwright/test";
 import fs from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,17 +8,34 @@ import { WebSocketServer } from "ws";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const EXTENSION_DIR = path.resolve(HERE, "../..");
-const TEST_SECRET = "a".repeat(64);
-const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+// A typed passphrase, shorter than a generated secret: 0.1.271 wrongly required 32+.
+const TEST_SECRET = "quiet-fox9";
+// A fake bridge: the extension preflights GET /extension/auth-check before it opens
+// the WebSocket, so the fixture must answer that route the way the real bridge does.
+const httpServer = http.createServer((request, response) => {
+  const url = new URL(request.url, "http://127.0.0.1");
+  if (url.pathname !== "/extension/auth-check") {
+    response.writeHead(404).end();
+    return;
+  }
+  const authorized = url.searchParams.get("secret") === TEST_SECRET;
+  response.writeHead(authorized ? 200 : 401, { "content-type": "application/json" });
+  response.end(JSON.stringify(authorized
+    ? { authorized: true }
+    : { authorized: false, error: { code: "handshake_secret_mismatch" } }));
+});
+const server = new WebSocketServer({ server: httpServer });
 await new Promise((resolve, reject) => {
-  server.once("listening", resolve);
-  server.once("error", reject);
+  httpServer.once("listening", resolve);
+  httpServer.once("error", reject);
+  httpServer.listen(0, "127.0.0.1");
 });
 const stopServer = async () => {
   for (const client of server.clients) client.terminate();
   await new Promise((resolve) => server.close(resolve));
+  await new Promise((resolve) => httpServer.close(resolve));
 };
-const bridgePort = server.address().port;
+const bridgePort = httpServer.address().port;
 const BRIDGE_URL = `ws://127.0.0.1:${bridgePort}/extension`;
 
 const context = await chromium.launchPersistentContext(
@@ -102,7 +120,8 @@ try {
     () => document.querySelector("#bridge-pairing-status")?.classList.contains("err"),
   );
   const failedLog = await page.locator("#bridge-connection-log").innerText();
-  if (!failedLog.includes("failed") || !failedLog.includes("WebSocket failed to open")) {
+  // With the bridge down, the HTTP authorization preflight fails before any WebSocket opens.
+  if (!failedLog.includes("failed") || !(failedLog.includes("WebSocket failed to open") || failedLog.includes("could not verify"))) {
     throw new Error(`failed bridge connection was not visible in the log: ${failedLog}`);
   }
   if ((await page.locator("#bridgeHandshakeSecret").inputValue()) !== TEST_SECRET) {
@@ -128,6 +147,6 @@ try {
 
   console.log("BRIDGE PAIRING OPTIONS LIVE SMOKE PASS");
 } finally {
-  if (server.address()) await stopServer().catch(() => {});
+  if (httpServer.listening) await stopServer().catch(() => {});
   await context.close();
 }

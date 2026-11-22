@@ -65,13 +65,29 @@ test("short input fails before storage or reconnect", async () => {
   const result = await saveBridgePairingSecret({
     storageArea: h.storageArea,
     runtime: h.runtime,
-    value: "not-a-complete-secret",
+    value: "7-chars",
   });
 
   assert.equal(result.ok, false);
   assert.equal(result.code, "secret_too_short");
   assert.equal(h.values.size, 0);
   assert.deepEqual(h.messages, []);
+});
+
+test("a typed passphrase shorter than a generated secret is accepted", async () => {
+  // The bridge accepts any non-empty secret and is the real check; the extension
+  // only guards against an accidental partial entry. An 11-character passphrase
+  // (the length of the one that 0.1.271 wrongly rejected) must save and reconnect.
+  const h = harness();
+  const result = await saveBridgePairingSecret({
+    storageArea: h.storageArea,
+    runtime: h.runtime,
+    value: "  quiet-fox9  ",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(h.values.get(BRIDGE_HANDSHAKE_SECRET_KEY), "quiet-fox9");
+  assert.equal(h.messages.length, 1);
 });
 
 test("a refused reconnect preserves the saved secret and names the failure", async () => {

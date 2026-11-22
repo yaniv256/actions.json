@@ -122,4 +122,42 @@ test('Windows installer persists BOM-free config and rolls back the installation
   assert.match(source, /binaryBackup/);
   assert.match(source, /aliasBackup/);
   assert.match(source, /counterBackup/);
+  // Bridge passphrase: prompted securely, never replacing an existing secret.
+  assert.match(source, /Read-Host -AsSecureString 'Bridge passphrase'/);
+  assert.match(source, /if \(-not \$existingSecret\)/);
+  assert.match(source, /ACTIONS_JSON_BRIDGE_SECRET must be at least/);
+});
+
+function runWithEnv(f, prefix, env, extra = []) {
+  return spawnSync('bash', [f.installerPath, '--version', '0.1.300', '--prefix', prefix, '--base-url', `file://${f.release}`, ...extra], { cwd: f.dir, env: { ...process.env, HOME: path.join(f.dir, 'home'), XDG_STATE_HOME: path.join(f.dir, 'state'), ...env }, encoding: 'utf8' });
+}
+
+test('installer stores a chosen bridge passphrase without echoing it', () => {
+  const f = setup(); const prefix = path.join(f.dir, 'prefix');
+  const result = runWithEnv(f, prefix, { ACTIONS_JSON_BRIDGE_SECRET: '  quiet-fox9  ' });
+  assert.equal(result.status, 0, result.stderr);
+  const configPath = path.join(f.dir, 'home', '.actions-json', 'config.json');
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  assert.equal(config.bridge_handshake_secret, 'quiet-fox9');
+  assert.equal((fs.statSync(configPath).mode & 0o777), 0o600);
+  assert.equal(`${result.stdout}${result.stderr}`.includes('quiet-fox9'), false);
+  assert.match(result.stdout, /bridge passphrase saved/);
+});
+
+test('installer rejects a bridge passphrase shorter than the minimum before installing', () => {
+  const f = setup(); const prefix = path.join(f.dir, 'prefix');
+  const result = runWithEnv(f, prefix, { ACTIONS_JSON_BRIDGE_SECRET: 'short' });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /at least 8 characters/);
+  assert.equal(fs.existsSync(path.join(prefix, 'bin', 'actions-json')), false);
+});
+
+test('installer never replaces an existing bridge secret', () => {
+  const f = setup(); const prefix = path.join(f.dir, 'prefix');
+  const home = path.join(f.dir, 'home'); fs.mkdirSync(path.join(home, '.actions-json'), { recursive: true });
+  fs.writeFileSync(path.join(home, '.actions-json', 'config.json'), JSON.stringify({ schema_version: 1, bridge_handshake_secret: 'already-paired-secret' }));
+  const result = runWithEnv(f, prefix, { ACTIONS_JSON_BRIDGE_SECRET: 'a-different-one' });
+  assert.equal(result.status, 0, result.stderr);
+  const config = JSON.parse(fs.readFileSync(path.join(home, '.actions-json', 'config.json'), 'utf8'));
+  assert.equal(config.bridge_handshake_secret, 'already-paired-secret');
 });
