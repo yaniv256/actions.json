@@ -66,6 +66,20 @@ test("routeBridgeItemToTab intercepts background actions before forwarding to th
   );
 });
 
+test("an unroutable durable action receives a terminal bridge error", () => {
+  const routerStart = backgroundSource.indexOf("const routeBridgeItemToTab");
+  assert.ok(routerStart >= 0, "routeBridgeItemToTab must exist");
+  const routerBody = backgroundSource.slice(routerStart, routerStart + 3000);
+  const missingTabStart = routerBody.indexOf("if (!Number.isInteger(tabId))");
+  assert.ok(missingTabStart >= 0, "the missing-tab branch must exist");
+  const missingTabBranch = routerBody.slice(missingTabStart, missingTabStart + 1800);
+  assert.match(
+    missingTabBranch,
+    /await sendBridgeOutputItem\(\{[\s\S]*?type: "action_error"[\s\S]*?code: "bridge_tab_unavailable"/,
+    "the missing-tab branch must terminalize the durable receipt before returning",
+  );
+});
+
 test("the background interception dispatches through executeBackgroundHostedToolCall", () => {
   const routerStart = backgroundSource.indexOf("const routeBridgeItemToTab");
   const routerBody = backgroundSource.slice(routerStart, routerStart + 6000);

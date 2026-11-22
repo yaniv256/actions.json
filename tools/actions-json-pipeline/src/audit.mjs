@@ -37,6 +37,7 @@ export function runAudit(context, { ledger = null } = {}) {
     ...auditContainerBoundControls(context.map),
     ...auditLossyProjections(context.map),
     ...auditUnadvertisedProjections(context.map),
+    ...auditRouteScopeClosure(context.map),
     ...auditMissingDeclaredFiles(context.declaredFiles),
   ];
   const { findings: overlaidFindings, staleEntries } = applyAcceptedGapLedger(findings, ledger);
@@ -350,6 +351,55 @@ export function auditUnadvertisedProjections(map) {
         recommendation: `Name ${name} in the map prompt with the exact call (actions.site mode=state_summary projection_name='${name}'), and say when to read it. An undiscoverable projection is equivalent to an absent one.`,
       }),
     );
+  }
+  return findings;
+}
+
+export function auditRouteScopeClosure(map) {
+  const mapScope = map?.scope?.url_matches;
+  if (typeof mapScope !== "string" || !mapScope.trim()) return [];
+
+  const projections = new Map(
+    (Array.isArray(map?.state_projections) ? map.state_projections : [])
+      .filter((projection) => typeof projection?.name === "string")
+      .map((projection) => [projection.name, projection]),
+  );
+  const findings = [];
+
+  for (const ownerProjection of projections.values()) {
+    for (const [actionName, postcondition] of Object.entries(
+      ownerProjection?.postconditions || {},
+    )) {
+      const targetName =
+        typeof postcondition?.projection === "string"
+          ? postcondition.projection
+          : ownerProjection.name;
+      const targetScope = projections.get(targetName)?.scope?.url_matches;
+      if (
+        typeof targetScope !== "string" ||
+        wildcardPatternContains(mapScope, targetScope)
+      ) {
+        continue;
+      }
+
+      findings.push(
+        finding({
+          id: `route-scope-closure:${actionName}:${targetName}`,
+          code: "route_scope_not_closed",
+          severity: "high",
+          action: actionName,
+          context: `state_projections.${ownerProjection.name}.postconditions.${actionName}`,
+          evidence: {
+            map_scope: mapScope,
+            destination_projection: targetName,
+            destination_scope: targetScope,
+          },
+          message: `Action ${actionName} verifies destination projection ${targetName} on ${JSON.stringify(targetScope)}, outside the map-level scope ${JSON.stringify(mapScope)}.`,
+          recommendation:
+            "Widen the map-level scope to cover every reachable destination route while keeping individual projections narrowly scoped.",
+        }),
+      );
+    }
   }
   return findings;
 }
@@ -774,6 +824,13 @@ function hiddenStateEntries(step) {
 
 function mapTools(map) {
   return Array.isArray(map?.tools) ? map.tools.filter((tool) => tool?.name) : [];
+}
+
+function wildcardPatternContains(containerPattern, candidatePattern) {
+  if (containerPattern === candidatePattern) return true;
+  const witness = String(candidatePattern).replaceAll("*", "__route_scope__");
+  const escaped = String(containerPattern).replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped.replaceAll("*", ".*")}$`).test(witness);
 }
 
 function selectorEntries(value, path = []) {

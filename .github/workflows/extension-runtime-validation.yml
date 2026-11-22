@@ -4,12 +4,27 @@ on:
   pull_request:
     paths:
       - "extensions/chrome-overlay-runtime/**"
+      - "runtime/actions-json-runtime/**"
       - "package.json"
       - "package-lock.json"
       - "playwright.config.*"
       - ".gitmodules"
       - "scripts/package-extension.sh"
       - "scripts/tests/package-extension-completeness.test.mjs"
+      - "scripts/release-manifest.mjs"
+      - "scripts/RELEASE-SIGNING.md"
+      - "scripts/release-trust.json"
+      - "scripts/release-binaries.sh"
+      - "scripts/package-mcp-bridge.sh"
+      - ".github/workflows/build-macos-native.yml"
+      - "scripts/tests/release-manifest.test.mjs"
+      - "scripts/tests/release-binaries-postcondition.test.mjs"
+      - "scripts/tests/release-binaries-contract-executable.test.mjs"
+      - "scripts/tests/install-actions-json.test.mjs"
+      - "install-actions-json.sh"
+      - "install-actions-json.ps1"
+      - "adapters/npm-bridge/**"
+      - "mcp/**"
       - "third_party/chromevox"
       - "third_party/chromevox/**"
       - "tests/menu-collapse-smoke-timeout.test.mjs"
@@ -19,12 +34,27 @@ on:
     branches: [main]
     paths:
       - "extensions/chrome-overlay-runtime/**"
+      - "runtime/actions-json-runtime/**"
       - "package.json"
       - "package-lock.json"
       - "playwright.config.*"
       - ".gitmodules"
       - "scripts/package-extension.sh"
       - "scripts/tests/package-extension-completeness.test.mjs"
+      - "scripts/release-manifest.mjs"
+      - "scripts/RELEASE-SIGNING.md"
+      - "scripts/release-trust.json"
+      - "scripts/release-binaries.sh"
+      - "scripts/package-mcp-bridge.sh"
+      - ".github/workflows/build-macos-native.yml"
+      - "scripts/tests/release-manifest.test.mjs"
+      - "scripts/tests/release-binaries-postcondition.test.mjs"
+      - "scripts/tests/release-binaries-contract-executable.test.mjs"
+      - "scripts/tests/install-actions-json.test.mjs"
+      - "install-actions-json.sh"
+      - "install-actions-json.ps1"
+      - "adapters/npm-bridge/**"
+      - "mcp/**"
       - "third_party/chromevox"
       - "third_party/chromevox/**"
       - "tests/menu-collapse-smoke-timeout.test.mjs"
@@ -35,6 +65,38 @@ permissions:
   contents: read
 
 jobs:
+  validate-native-cli:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mcp/actions-json-mcp
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --manifest-path mcp/actions-json-mcp/Cargo.toml -- --check
+      - name: Test native CLI and resident
+        run: cargo test --locked --manifest-path mcp/actions-json-mcp/Cargo.toml
+      - name: Parse Windows installer under PowerShell
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./install-actions-json.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) { throw ($errors | Out-String) }
+
   characterize-extension-runtime:
     runs-on: ubuntu-latest
     steps:
@@ -51,10 +113,20 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Run extension runtime characterizations
         run: npm run test:overlay-runtime
+      # The runtime's browser specs were matched by no testMatch and triggered
+      # by no path filter, so they ran nowhere: locally `npm run test:runtime`
+      # ended in "No tests found" (exit 1), and CI never looked at them.
+      - name: Run runtime browser specs
+        run: npx playwright test runtime/actions-json-runtime/tests
       - name: Verify live-smoke timeout cleanup
         run: node --test tests/menu-collapse-smoke-timeout.test.mjs
       - name: Verify extension package contract
         run: node --test tests/package-extension.test.mjs scripts/tests/package-extension-completeness.test.mjs
+      - name: Verify signed native release and installer contracts
+        run: |
+          bash -n install-actions-json.sh scripts/package-mcp-bridge.sh scripts/release-binaries.sh
+          node --test scripts/tests/release-manifest.test.mjs scripts/tests/release-binaries-postcondition.test.mjs scripts/tests/release-binaries-contract-executable.test.mjs scripts/tests/github-hosted-macos-workflow.test.mjs scripts/tests/install-actions-json.test.mjs
+          node --test --test-name-pattern='signed manifest|signed metadata|asset corruption|compatibility parser|packed npm' adapters/npm-bridge/test/*.test.js
       - name: Build and extract packaged extension
         run: |
           bash scripts/package-extension.sh --version ci --out-dir /tmp/actions-json-extension

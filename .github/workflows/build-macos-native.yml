@@ -1,0 +1,93 @@
+name: Build macOS native release assets
+
+run-name: macOS native ${{ inputs.version || 'PR validation' }} @ ${{ inputs.commit || github.event.pull_request.head.sha }} (${{ inputs.request_id || github.run_id }})
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/build-macos-native.yml"
+      - "scripts/package-mcp-bridge.sh"
+      - "mcp/Cargo.lock"
+      - "mcp/Cargo.toml"
+      - "mcp/actions-json-mcp/**"
+      - "extensions/chrome-overlay-runtime/manifest.json"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the extension-v prefix
+        required: true
+        type: string
+      commit:
+        description: Exact 40-character release commit
+        required: true
+        type: string
+      request_id:
+        description: Unique dispatch identity used to bind the downloaded run
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slug: macos-x64
+            target: x86_64-apple-darwin
+          - slug: macos-arm64
+            target: aarch64-apple-darwin
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit || github.event.pull_request.head.sha }}
+          submodules: recursive
+
+      - name: Verify immutable source identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_commit="${{ inputs.commit || github.event.pull_request.head.sha }}"
+          [[ "$expected_commit" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$expected_commit"
+          cargo_version="$(awk -F '"' '/^version = "/ { print $2; exit }' mcp/actions-json-mcp/Cargo.toml)"
+          extension_version="$(node -p "require('./extensions/chrome-overlay-runtime/manifest.json').version")"
+          test "$cargo_version" = "$extension_version"
+          requested_version="${{ inputs.version }}"
+          test -z "$requested_version" || test "$cargo_version" = "$requested_version"
+          echo "version=$cargo_version" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mcp/actions-json-mcp
+          key: ${{ matrix.target }}
+
+      - name: Build and package ${{ matrix.slug }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/package-mcp-bridge.sh \
+            --version "${{ steps.identity.outputs.version }}" \
+            --slug "${{ matrix.slug }}" \
+            --target "${{ matrix.target }}" \
+            --out-dir dist
+          test "$(tar -xOf "dist/actions-json-${{ steps.identity.outputs.version }}-${{ matrix.slug }}.tar.gz" VERSION)" = "${{ steps.identity.outputs.version }}"
+          tar -xOf "dist/actions-json-${{ steps.identity.outputs.version }}-${{ matrix.slug }}.tar.gz" actions-json > /tmp/actions-json
+          test -s /tmp/actions-json
+          file /tmp/actions-json | grep -q 'Mach-O'
+
+      - name: Upload ${{ matrix.slug }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: actions-json-${{ steps.identity.outputs.version }}-${{ matrix.slug }}
+          path: dist/actions-json-${{ steps.identity.outputs.version }}-${{ matrix.slug }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7

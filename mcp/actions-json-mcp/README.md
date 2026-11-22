@@ -1,13 +1,23 @@
 # actions-json-mcp
 
-`actions-json-mcp` is the MCP bridge for `actions.json`.
+`actions-json-mcp` is the native `actions.json` CLI and resident bridge. The
+installed command is `actions-json`, with `aj` as its short alias.
 
-It gives local coding agents a real Model Context Protocol server while also
-hosting the browser WebSocket endpoint used by the Chrome extension runtime.
-Agents should use MCP `tools/list`, `tools/call`, `resources/list`, and
-`resources/read`. The browser extension connects to `/extension`.
+The primary agent interface is the noninteractive CLI: submit a JSON envelope
+on stdin with `aj`, or use explicit subcommands for discovery, profiles,
+leases, receipts, and audit. A protected per-user resident hosts the browser
+WebSocket endpoint used by the Chrome extension. MCP remains a compatibility
+adapter over the same resident authority; it is not a separate execution path.
+The browser extension connects to `/extension`.
 
-## Run As MCP
+## Run As CLI
+
+```bash
+printf '%s\n' '{"operation":"catalog.list"}' | aj
+aj submit --json '{"operation":"catalog.list"}'
+```
+
+## Run The MCP Compatibility Adapter
 
 ```bash
 cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- mcp \

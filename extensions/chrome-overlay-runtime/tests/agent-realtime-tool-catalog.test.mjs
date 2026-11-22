@@ -294,3 +294,30 @@ test("realtime tool catalog removes only browser.run_javascript for site JavaScr
   assert.equal(names.includes("browser.run_javascript"), false);
   assert.equal(names.includes("debug.run_javascript"), true);
 });
+
+test("canonical dictionary advertises keyboard.press to an embed host", async () => {
+  // Guards the catalog-level consequence of the canonical `keyboard.press` embed
+  // adapter, not just the descriptor value. `shouldAdvertise` requires
+  // support === "supported", so while the adapter read "partial" this primitive was
+  // withheld from an embed agent entirely despite being implemented and callable.
+  //
+  // Scope: this asserts the canonical dictionary's projection. No shipped page-JS
+  // host consumes that dictionary today -- the extension loads
+  // actions/overlay.actions.json and the bookmarklet carries its own hardcoded
+  // metadata -- so this proves the contract a served embed host will inherit, not a
+  // change in any currently shipped catalog.
+  const dictionary = await loadPrimitiveDictionary();
+  const tools = buildRealtimeToolCatalog({ dictionary, host: "embed" });
+  const names = tools.map((tool) => tool.name);
+  assert.ok(
+    names.includes("keyboard.press"),
+    `embed catalog should advertise keyboard.press; got ${names.join(", ")}`,
+  );
+
+  // Positive control: a primitive that must NOT be advertised to an embed host, so a
+  // catalog that advertised everything could not satisfy this test.
+  assert.ok(
+    !names.includes("browser.close_tab"),
+    "embed catalog must not advertise privileged browser.close_tab",
+  );
+});

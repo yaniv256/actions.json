@@ -25,7 +25,7 @@ Use this page to choose what to read next.
 | Audit, score, package, or prepare a site map for review | [Production Pipeline](actions-json-production-pipeline.md) |
 | Use local storage for site maps and context | [actions.json.storage](actions-json-storage.md) |
 | Reuse overlay templates without sharing private data | [Overlay Templates And Data](overlay-template-data.md) |
-| Connect an external coding agent | [Bridge Architecture](bridge-architecture.md), then [Actions Bridge Protocol](actions-bridge-protocol.md) |
+| Connect an external coding agent | [Operate actions.json](../skills/operate-actions-json/SKILL.md), then [Bridge Architecture](bridge-architecture.md) |
 | Debug a broken setup | [Troubleshooting](troubleshooting.md) |
 | Contribute to the repo structure | [Repository Structure](repo-structure.md) |
 
@@ -74,6 +74,9 @@ Use this page to choose what to read next.
 
 ## Use The Bridge Or Runtime
 
+- [Operate actions.json](../skills/operate-actions-json/SKILL.md): primary CLI
+  contract for scripts and coding agents, including profiles, stable targets,
+  leases, receipts, logs, and diagnostics.
 - [Bridge Architecture](bridge-architecture.md): how external agents, the
   hosted extension agent, browser runtimes, storage, and `actions.site` fit
   together.

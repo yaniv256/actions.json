@@ -3330,9 +3330,60 @@
     return result.root;
   };
 
+  // The complete locator vocabulary. A key outside this set used to be silently
+  // ignored, which left a locator like {role, name} or {css} with no identity —
+  // it then matched every interactive element and pointer.click hit the first
+  // one in DOM order (on dash.cloudflare.com: the sidebar logo, navigating
+  // away). Unknown keys are now a hard error that names the supported keys.
+  const LOCATOR_KEYS = new Set(["selector", "text", "text_contains", "text_equals", "frame", "retarget", "match_index"]);
+  const LOCATOR_KEY_HINTS = {
+    css: "use `selector`",
+    role: "use a11y.query for role/name, or `selector` + `text_equals`",
+    name: "use a11y.query for role/name, or `selector` + `text_equals`",
+    testid: "use `selector: \"[data-testid='...']\"`",
+  };
+
+  const locatorShapeError = (locator) => {
+    const unknownKeys = Object.keys(locator).filter((key) => !LOCATOR_KEYS.has(key));
+    if (!unknownKeys.length) return null;
+    const hints = unknownKeys.filter((key) => LOCATOR_KEY_HINTS[key]).map((key) => `${key}: ${LOCATOR_KEY_HINTS[key]}`);
+    return {
+      code: "invalid_locator",
+      frame: null,
+      unknown_keys: unknownKeys,
+      supported_keys: Array.from(LOCATOR_KEYS),
+      message: `Unsupported locator key(s): ${unknownKeys.join(", ")}. Supported: ${Array.from(LOCATOR_KEYS).join(", ")}.`
+        + (hints.length ? ` ${hints.join("; ")}.` : ""),
+    };
+  };
+
+  // Text identity sources. text_equals must equal ONE source (visible text,
+  // aria-label, title, value) — not the space-joined concatenation, which made
+  // any control whose aria-label repeats its visible text unmatchable by
+  // exact text (dash.cloudflare.com "Create Token", 2026-11-20).
+  // text / text_contains keep matching the joined haystack.
+  function elementTextSources(element) {
+    return [
+      element.textContent,
+      element.getAttribute("aria-label"),
+      element.getAttribute("title"),
+      element.getAttribute("value"),
+    ].filter(Boolean).map(normalizeText).filter(Boolean);
+  }
+
+  function elementTextMatches(element, text, exact) {
+    const sources = elementTextSources(element);
+    return exact ? sources.includes(text) : sources.join(" ").includes(text);
+  }
+
   const resolveLocatorCandidates = (locator) => {
     lastLocatorFrameError = null;
     if (!locator || typeof locator !== "object") return [];
+    const shapeError = locatorShapeError(locator);
+    if (shapeError) {
+      lastLocatorFrameError = shapeError;
+      return [];
+    }
     const frameResult = resolveFrameRoot(locator.frame, document);
     if (!frameResult.ok) {
       lastLocatorFrameError = frameResult.error;
@@ -3349,15 +3400,7 @@
     }
     const text = normalizeText(locator.text || locator.text_contains || locator.text_equals);
     const identityCandidates = !text ? candidates : candidates.filter((element) => {
-      const haystack = normalizeText(
-        [
-          element.textContent,
-          element.getAttribute("aria-label"),
-          element.getAttribute("title"),
-          element.getAttribute("value")
-        ].filter(Boolean).join(" ")
-      );
-      return locator.text_equals ? haystack === text : haystack.includes(text);
+      return elementTextMatches(element, text, Boolean(locator.text_equals));
     });
     const retarget = locator.retarget;
     let resolvedCandidates = identityCandidates;
@@ -3375,15 +3418,7 @@
       const retargetText = normalizeText(retarget.text || retarget.text_contains || retarget.text_equals);
       if (retargetText) {
         resolvedCandidates = resolvedCandidates.filter((element) => {
-          const haystack = normalizeText(
-            [
-              element.textContent,
-              element.getAttribute("aria-label"),
-              element.getAttribute("title"),
-              element.getAttribute("value")
-            ].filter(Boolean).join(" ")
-          );
-          return retarget.text_equals ? haystack === retargetText : haystack.includes(retargetText);
+          return elementTextMatches(element, retargetText, Boolean(retarget.text_equals));
         });
       }
     }
@@ -4161,6 +4196,22 @@
     return null;
   };
 
+  // A mutating locator primitive used to require the target to be inside the
+  // viewport already and reported an offscreen-but-rendered control as
+  // "target_not_found", while locator.element_info auto-scrolled the same
+  // locator into view (dash.cloudflare.com "Add new policy", 2026-11-20).
+  // Scroll the first rendered candidate into view instead, and say so.
+  function resolveVisibleLocatorScrollingIfNeeded(locator) {
+    const visible = resolveSingleVisibleLocator(locator);
+    if (visible) return { element: visible, scrolled_into_view: false };
+    const rendered = resolveLocatorCandidates(locator).find(isElementRendered) || null;
+    if (!rendered || typeof rendered.scrollIntoView !== "function") return { element: null, scrolled_into_view: false };
+    rendered.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+    return isElementVisible(rendered)
+      ? { element: rendered, scrolled_into_view: true }
+      : { element: null, scrolled_into_view: false };
+  }
+
   const pointFromViewportPointOrLocator = (primitive, value, role) => {
     if (!value || typeof value !== "object") {
       return { error: primitiveError(primitive, "target_not_found", `No ${role} point or locator was provided.`, { [role]: value || null }) };
@@ -4179,8 +4230,24 @@
         geometry: { source: "coordinates", input: value, point: { x, y } },
       };
     }
-    const locator = value.locator && typeof value.locator === "object" ? value.locator : value;
-    const element = resolveSingleVisibleLocator(locator);
+    // An explicit `locator` object is validated strictly; the legacy top-level
+    // form shares its object with click options (button, modifiers), so only
+    // the locator keys are taken from it.
+    const locator = value.locator && typeof value.locator === "object"
+      ? value.locator
+      : Object.fromEntries(Object.entries(value).filter(([key]) => LOCATOR_KEYS.has(key)));
+    const { element, scrolled_into_view: scrolledIntoView } = resolveVisibleLocatorScrollingIfNeeded(locator);
+    if (!element && lastLocatorFrameError) {
+      return {
+        error: primitiveError(primitive, lastLocatorFrameError.code,
+          lastLocatorFrameError.message || `Frame '${lastLocatorFrameError.frame}' could not be targeted.`, {
+            [role]: locator,
+            frame: lastLocatorFrameError.frame,
+            unknown_keys: lastLocatorFrameError.unknown_keys,
+            supported_keys: lastLocatorFrameError.supported_keys,
+          }),
+      };
+    }
     if (!element) {
       return {
         error: primitiveError(primitive, "target_not_found", `No visible element matched the ${role} locator.`, {
@@ -4215,6 +4282,7 @@
       element,
       geometry: {
         source: "locator",
+        scrolled_into_view: scrolledIntoView,
         locator,
         tag_name: element.tagName.toLowerCase(),
         text: normalizeText(element.textContent),

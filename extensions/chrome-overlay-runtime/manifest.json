@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "actions.json Overlay Runtime",
-  "version": "0.1.264",
+  "version": "0.1.271",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2wE10V6edS83HV7hCd/Y2tZxUvJsxCLbuGhWDZaisN8iCD1TdIxEGKqPk8GrcrwW77JuxKWU7GphWRz0hhYZ7AMtAddiHnBhvs0EXnpM+UQACF6dG91U5N1eDAM4NbOoQgRz/Wans9FS6/LZty5bRzhCG4KFZF/UDcH5jViEdueH1oX/Rs5bvpoW1ubPKTt0KPKnMKtlHbfnA/zf9cfhrUTzO1XHDcNvWwNCUTjnFW2cU89mLHDf9sIhfkGjEQep9SYM8wkwAUcek6ANTfukugJqtDjr0sSDTgyH+Z0D6E9wYna8DFcdbGUgRFgGCm0/aNqdJxxkVjFp2AimF50wzQIDAQAB",
   "description": "Experimental actions.json runtime that can render agent-provided HTML overlays on authorized tabs.",
   "action": {

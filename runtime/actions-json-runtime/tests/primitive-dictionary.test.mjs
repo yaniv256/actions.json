@@ -23,6 +23,18 @@ const requiredStage1Primitives = [
   "keyboard.press",
   "clipboard.read",
   "clipboard.write",
+  "database.page.read",
+  "database.page.search",
+  "file.transfer.cancel",
+  "file.transfer.chunk",
+  "file.transfer.create",
+  "file.transfer.download.capture",
+  "file.transfer.download.complete",
+  "file.transfer.download.read_chunk",
+  "file.transfer.finalize",
+  "file.transfer.status",
+  "file.transfer.upload.complete",
+  "file.transfer.upload.consume",
   "transfer.write",
   "transfer.read",
   "transfer.clear",
@@ -40,6 +52,8 @@ const requiredStage1Primitives = [
   "overlay.open",
   "overlay.register_launcher",
   "overlay.close",
+  "transcript.session.list",
+  "transcript.session.read",
 ];
 
 async function loadDictionary() {

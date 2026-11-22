@@ -60,13 +60,36 @@ skills, the GitHub release). Break none of them.
   **delete the older releases** (`gh release delete <tag> --cleanup-tag`) so exactly one exists.
 - Build real binaries on real machines via `scripts/release-binaries.sh --version <v> --tag extension-v<v>`
   (extension zip on this host; linux-x64 native; win-x64 over PowerShell; macos-arm64/x64 over SSH to the Mac).
-  Verify each artifact + SHA256SUMS before upload. The **`chrome-launcher-helper.exe`** (the native-Windows pipe owner) ships as its **OWN standalone release asset** — `chrome-launcher-helper-<v>-win-x64.tar.gz` — NOT inside the bridge tarball. Why (Yaniv 2026-07-09): the helper must be installed where the **BROWSER** runs, which in the WSL→Windows topology is a DIFFERENT machine than the one that pulls the bridge tarball (the agent host, typically linux-x64). Bundling it in the win-x64 bridge tarball only serves an all-Windows setup and hides it from the split setup it exists for. `release-binaries.sh` builds it natively on the Windows host (`build_windows`) and emits it via `package_helper()` as its own asset. After a release, CONFIRM it's a listed asset on the PUBLIC repo: `gh release view extension-v<v> --repo yaniv256/actions.json --json assets` must include `chrome-launcher-helper-<v>-win-x64.tar.gz`. (0.1.186 shipped the helper only *inside* the win-x64 tarball — the standalone-asset design is the corrected shape for the next release.)
+  Publish native CLI assets named `actions-json-<v>-<slug>.tar.gz` for
+  `linux-x64`, `macos-x64`, `macos-arm64`, and `win-x64`; each archive contains
+  canonical `actions-json[.exe]` and the legacy `actions-json-mcp[.exe]` name.
+  Keep npm-compat archives separately named
+  `actions-json-mcp-<v>-<slug>.tar.gz`. Generate and sign
+  `release-manifest.json` plus `release-manifest.sig`; verify the signature,
+  release identity/counter, every asset byte count, and SHA-256 before upload.
+  `SHA256SUMS.txt` remains useful human evidence but is not the installer's trust
+  root. The **`chrome-launcher-helper.exe`** (the native-Windows pipe owner) ships as its **OWN standalone release asset** — `chrome-launcher-helper-<v>-win-x64.tar.gz` — NOT inside the bridge tarball. Why (Yaniv 2026-07-09): the helper must be installed where the **BROWSER** runs, which in the WSL→Windows topology is a DIFFERENT machine than the one that pulls the bridge tarball (the agent host, typically linux-x64). Bundling it in the win-x64 bridge tarball only serves an all-Windows setup and hides it from the split setup it exists for. `release-binaries.sh` builds it natively on the Windows host (`build_windows`) and emits it via `package_helper()` as its own asset. After a release, CONFIRM it's a listed asset on the PUBLIC repo: `gh release view extension-v<v> --repo yaniv256/actions.json --json assets` must include `chrome-launcher-helper-<v>-win-x64.tar.gz`. (0.1.186 shipped the helper only *inside* the win-x64 tarball — the standalone-asset design is the corrected shape for the next release.)
 
-Two artifacts are usually involved and load out of band: **the extension** (installed from a GitHub release — the only way it reaches the browser) and **the bridge** (the Rust MCP bridge: its `--actions` manifest, read once at launch, and its Rust routing allow-list `extension_executor_supports_primitive`). A working-tree `cargo build` does NOT reach the running bridge — the active agent harness spawns it from the active MCP launcher config. Known locations are `~/.codex/config.toml` for Codex and `~/.claude.json` for Claude Code; neither path is universal truth.
+Two artifacts are usually involved and load out of band: **the extension**
+(installed from a GitHub release — the only way it reaches the browser) and the
+**actions.json executable** (the Rust CLI/resident with an MCP compatibility
+subcommand: its actions manifest is read at resident launch and its Rust routing
+allow-list is `extension_executor_supports_primitive`). A working-tree `cargo
+build` does NOT reach an already running resident. CLI-first installs update the
+executable and restart its per-user resident; MCP-only hosts must additionally
+point their launcher at that exact executable and manifest. Known MCP config
+locations are `~/.codex/config.toml` for Codex and `~/.claude.json` for Claude
+Code; neither path is universal truth.
 
 ### Phase 1: Make the change on a branch and pass focused tests
 
 Make ALL of the change on a feature branch: extension `content.js` handler + `executeAction` dispatch; `primitive_dictionary.primitives[]` (and `tools[]`) entry in `overlay.actions.json` for a new primitive; any Rust routing (`extension_executor_supports_primitive` in `mcp/actions-json-mcp/src/lib.rs`). Run the focused unit tests for the changed surface and `cargo build --manifest-path mcp/actions-json-mcp/Cargo.toml`. Do not proceed on a broken tree; a pre-existing unrelated failure must be confirmed pre-existing (test it on `main`) and noted, not fixed here.
+
+For CLI/resident changes, also run the CLI subprocess and stream tests. They must
+prove JSON-only stdout, quiet stderr, stable exit codes, malformed-line stream
+continuation, large-output spill, exact version handshake, profile-scoped
+targets, mutation serialization, bounded leases, and operation-status recovery.
+An MCP unit test does not substitute for the public CLI contract.
 
 ### Phase 2: Run the Playwright live test BEFORE any human round-trip
 
@@ -199,7 +222,7 @@ gh release create extension-v<v> --target <branch> --prerelease \
 
 Then verify the assets exist: `gh release view extension-v<v> --json assets`. Staging the bridge is NOT releasing the extension — if you cannot produce a release URL with verified assets, the human has nothing to install. Mark it clearly as a pre-release. Dev pre-releases in this private repo are routine and ungated; only promotion to distribution surfaces needs approval.
 
-### Phase 5: Stage the bridge and repoint the active launcher config
+### Phase 5: Stage the executable/resident and any MCP compatibility launcher
 
 Do this BEFORE asking for a restart — a restart only tests your new code if it is already staged:
 
@@ -214,7 +237,17 @@ chmod +x "$STAGE/actions-json-mcp"
 #   Claude Code: ~/.claude.json       mcpServers.actions-json
 ```
 
-Do not infer the active config from whichever familiar file exists: multiple harness configs may coexist and point at different staged packages. Identify the current harness first, inspect its actions.json server entry, and preserve all unrelated args and environment. Then run the pre-restart gate against that exact config:
+Do not infer the active config from whichever familiar file exists: multiple
+harness configs may coexist and point at different staged packages. For a
+CLI-first session, verify the executable resolved by `actions-json`, its
+installed manifest, and its resident generation. On POSIX upgrades, verify the
+signed installer staged the candidate and that `actions-json update apply`
+completed its executable/store fence; `update check` must show the consumed
+candidate version marker is absent and `status` must show the intended resident
+version. For an MCP-only harness, identify the active MCP launcher config first,
+then inspect its actions.json server entry and
+preserve all unrelated args and environment. Then run the pre-restart gate
+against that exact config:
 
 ```bash
 node scripts/verify-actions-json-launcher-config.mjs \
@@ -227,11 +260,23 @@ The checker must return `ok: true`; it verifies the configured `command`, the `-
 
 ### Phase 6: Ask the human for the single combined action
 
-One ask, everything staged: **"install extension-v<v> and restart my session."** The ask MUST contain the GitHub release URL with verified assets (Phase 4). Recurring failures: an agent reports "ready for restart" when the release does not exist, or updates a different harness's config while the active launcher still points at the old package. Do NOT ask for a restart before Phase 5's package and active-config checks pass (that tests stale code and wastes a round-trip).
+One ask, everything staged: **"install extension-v<v> and reconnect/restart the
+affected adapter."** A CLI-first resident can be shut down and restarted by the
+agent; do not demand a coding-agent restart when no MCP configuration changed.
+The ask MUST contain the GitHub release URL with verified assets (Phase 4).
+Recurring failures: an agent reports "ready for restart" when the release does
+not exist, or updates a different executable/config while the active adapter
+still points at old bytes. Do NOT ask before Phase 5's package and active-path
+checks pass.
 
 ### Phase 7: Verify by contract before testing
 
 After the restart, confirm the new build is actually live BEFORE running any site test — a stale artifact makes a delivery bug look like a code bug and burns an investigation:
+
+- `actions-json status` / `actions-json doctor` — client and resident versions
+  are the intended release and the exact-version handshake succeeds;
+- `actions-json list` / `actions-json describe <changed-operation>` — the live
+  target catalog contains the changed operation and schema;
 
 - `actions-json://bridge/launch` — `actions_manifest` is the NEW staged dir (not a stale one);
 - `actions-json://bridge/tools` — the new primitive/tool is present (parse the JSON; a substring grep can miss it);
@@ -242,6 +287,15 @@ If any is stale, the delivery failed: fix staging/config, do not proceed to test
 ### Phase 8: Validate end-to-end live, then promote
 
 Drive the actual changed behavior against a real runtime and confirm it works. Only after it is proven live: merge the branch and cut the non-prerelease release. Prefer the autonomous Playwright path (Phase 2) for as much as possible; reserve the human install/restart for the final verified build. Escalate to a human live-test only for cases the harness can't cover.
+
+For CLI-first or resident/concurrency changes, run
+`tests/live/agent-kanban-cli.mjs` against an already authenticated, explicitly
+claimed Trello test tab. It must use unique owned fixtures and independent
+projection reads to prove discovery, create, move, description, comment,
+checklist creation, item addition/completion, two profiles, interference,
+lease refusal, failure, indeterminate recovery, and CLI audit attribution. It
+must archive only its own fixture. Do not replace this with MCP calls or a
+screenshot.
 
 ---
 

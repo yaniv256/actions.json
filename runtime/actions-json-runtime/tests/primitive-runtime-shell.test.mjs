@@ -20,7 +20,24 @@ test("shared loader returns stable primitive catalogs for extension and embed ho
     extensionCatalog.map((primitive) => primitive.name),
     embedCatalog.map((primitive) => primitive.name),
   );
-  assert.deepEqual(extensionCatalog[0], {
+  // The projection is now a formatter over the resolver rather than a second
+  // authority engine, so it also reports which layer decided and whether the
+  // answer came from live host state or from the dictionary's adapters. The
+  // support values are unchanged.
+  // Indexed BY NAME, not by position. `catalog[0]` asserted against a sorted
+  // list, so any new namespace sorting before `browser.*` broke a test about
+  // browser.screenshot -- which is what #344's `database.*` primitives did
+  // (43 -> 45, and `database` sorts first). The resolver was right and the
+  // expectation was stale, but the failure named the wrong subject. Fixing the
+  // index rather than the position, because bumping it to [2] just relocates
+  // the fragility to the next namespace anyone adds.
+  const byName = (catalog, name) => {
+    const found = catalog.find((primitive) => primitive.name === name);
+    assert.ok(found, `${name} is not in the catalog (${catalog.length} entries)`);
+    return found;
+  };
+
+  assert.deepEqual(byName(extensionCatalog, "browser.screenshot"), {
     name: "browser.screenshot",
     version: 1,
     stage: 1,
@@ -29,17 +46,47 @@ test("shared loader returns stable primitive catalogs for extension and embed ho
     capability_class: "privileged",
     portable: false,
     summary: "Capture a true rendered screenshot where the host has browser-level authority.",
+    decided_by: "provider_registration",
+    authority_source: "dictionary_adapters",
   });
-  assert.deepEqual(embedCatalog[0], {
+  // NOTE for review: the reason here changed from `capability_unavailable` to
+  // `namespace_unavailable`, and this is a semantic change rather than a
+  // cosmetic one.
+  //
+  // Under the #335 ruling the two are different diagnoses with different
+  // remediation. No embed provider registers any `browser.*` primitive, so the
+  // namespace is genuinely absent -- which makes `namespace_unavailable` the
+  // more accurate answer and the one whose remediation ("activate a provider")
+  // is at least addressable. But it IS a change to a previously asserted
+  // value, so it is flagged here rather than absorbed silently. Support is
+  // unchanged: 41 supported for extension, 17 for embed, matching the adapters
+  // exactly on every primitive.
+  assert.deepEqual(byName(embedCatalog, "browser.screenshot"), {
     name: "browser.screenshot",
     version: 1,
     stage: 1,
     support: "unsupported",
-    reason: "capability_unavailable",
+    reason: "namespace_unavailable",
     capability_class: "privileged",
     portable: false,
     summary: "Capture a true rendered screenshot where the host has browser-level authority.",
+    decided_by: "host_state",
+    authority_source: "dictionary_adapters",
   });
+
+  // The guard that matters more than either exact reason: the formatter must
+  // reproduce the adapters' support verdict for every primitive on both hosts.
+  for (const host of ["extension", "embed"]) {
+    const projected = primitiveCatalogForHost(dictionary, host);
+    const fromAdapters = dictionary.primitives.map(
+      (primitive) => primitive.adapters?.[host]?.support ?? "unsupported",
+    );
+    assert.deepEqual(
+      projected.map((primitive) => primitive.support),
+      fromAdapters,
+      `${host}: formatter must not change any support verdict`,
+    );
+  }
 });
 
 test("shared result envelope formats primitive success and errors", () => {
@@ -77,6 +124,69 @@ test("shared result envelope formats primitive success and errors", () => {
       },
     },
   );
+});
+
+test("manifest schemas come from the selected provider descriptor", async () => {
+  const dictionary = await loadPrimitiveDictionary();
+  const primitive = "pointer.click";
+  const canonical = dictionary.primitives.find((entry) => entry.name === primitive);
+  const input_schema = structuredClone(canonical.input_schema);
+  input_schema.properties.provider_only = { type: "boolean" };
+  const hostState = {
+    host: "embed",
+    revision: "rev-provider-schema",
+    installation_id: "installation-1",
+    principal_id: "principal-1",
+    authority_mode: "caller_rights",
+    namespaces: {
+      pointer: {
+        provider: "embed-provider",
+        registrations: {
+          "embed-provider": {
+            implements: [primitive],
+            descriptors: {
+              [primitive]: {
+                summary: "Provider-specific pointer click.",
+                input_schema,
+                extensions: {
+                  input: {
+                    provider_only: { authority: "additional_policy", effect: "same_as_primitive" },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+  const manifest = primitiveManifestMetadata(dictionary, "embed", {
+    includeSchemas: true,
+    hostState,
+  });
+  const projected = manifest.primitives.find((entry) => entry.name === primitive);
+  assert.equal(projected.support, "supported");
+  assert.equal(projected.summary, "Provider-specific pointer click.");
+  assert.deepEqual(projected.input_schema, input_schema);
+
+  const readPrimitive = "database.page.read";
+  const canonicalRead = dictionary.primitives.find((entry) => entry.name === readPrimitive);
+  const readManifest = primitiveManifestMetadata(dictionary, "embed", {
+    includeSchemas: true,
+    hostState: {
+      ...hostState,
+      namespaces: {
+        database: {
+          provider: "database-provider",
+          registrations: {
+            "database-provider": { implements: [readPrimitive] },
+          },
+        },
+      },
+    },
+  });
+  const projectedRead = readManifest.primitives.find((entry) => entry.name === readPrimitive);
+  assert.deepEqual(projectedRead.output_schema, canonicalRead.output_schema);
 });
 
 test("bookmarklet and extension manifests expose shared primitive dictionary metadata", async () => {

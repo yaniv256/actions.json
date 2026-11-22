@@ -1,4 +1,4 @@
-import { lstat, readdir, readFile, readlink } from "node:fs/promises";
+import { lstat, readdir, readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -7,12 +7,16 @@ import { parseGitlinkPaths } from "./lib/gitlinks.mjs";
 
 const execFileAsync = promisify(execFile);
 
+const canonicalSkills = new Map([
+  ["skills/operate-actions-json/SKILL.md", { name: "operate-actions-json", title: "# Operate actions.json" }],
+  ["skills/write-actions-json/SKILL.md", { name: "write-actions-json", title: "# Write actions.json" }],
+]);
 const canonicalSkillPath = "skills/write-actions-json/SKILL.md";
 const openAiMetadataPath = "skills/write-actions-json/agents/openai.yaml";
 const gettingStartedPath = "skills/write-actions-json/references/getting-started.md";
 const gettingStartedPagesPath = "docs/getting-started.md";
-// Repo-internal operating skills are intentionally present but are not part of
-// the one installable public authoring-skill surface validated by this script.
+// Repo-internal development skills are intentionally present but are not part
+// of the installable public authoring/operating surfaces validated here.
 const nonInstallableSkillDirs = ["skills/actions-json-dev-cycle"];
 const publicDocReferences = [
   "actions-bridge-protocol.md",
@@ -40,7 +44,7 @@ async function findSkillFiles(dir) {
   return results.sort();
 }
 
-function parseFrontmatter(path, text) {
+function parseFrontmatter(path, text, expectedName) {
   const match = text.match(/^---\n([\s\S]*?)\n---\n/);
   if (!match) {
     throw new Error(`${path}: missing YAML frontmatter`);
@@ -57,8 +61,8 @@ function parseFrontmatter(path, text) {
         return [line.slice(0, index).trim(), line.slice(index + 1).trim()];
       }),
   );
-  if (fields.name !== "write-actions-json") {
-    throw new Error(`${path}: expected name write-actions-json`);
+  if (fields.name !== expectedName) {
+    throw new Error(`${path}: expected name ${expectedName}`);
   }
   if (!fields.description?.startsWith("Use when ")) {
     throw new Error(`${path}: description must start with "Use when "`);
@@ -71,17 +75,19 @@ const skillPaths = (await findSkillFiles("skills")).filter(
   (path) => ![...gitlinkDirs, ...nonInstallableSkillDirs]
     .some((dir) => path.startsWith(`${dir}/`)),
 );
-if (skillPaths.length !== 1 || skillPaths[0] !== canonicalSkillPath) {
+const expectedSkillPaths = [...canonicalSkills.keys()].sort();
+if (JSON.stringify(skillPaths) !== JSON.stringify(expectedSkillPaths)) {
   throw new Error(
-    `Expected exactly one inline installable skill at ${canonicalSkillPath}; found ${skillPaths.join(", ")}`,
+    `Expected exactly these inline installable skills: ${expectedSkillPaths.join(", ")}; found ${skillPaths.join(", ")}`,
   );
 }
 
 for (const path of skillPaths) {
   const text = await readFile(path, "utf8");
-  parseFrontmatter(path, text);
-  if (!text.includes("# Write actions.json")) {
-    throw new Error(`${path}: missing title`);
+  const contract = canonicalSkills.get(path);
+  parseFrontmatter(path, text, contract.name);
+  if (!text.includes(contract.title)) {
+    throw new Error(`${path}: missing title ${contract.title}`);
   }
 }
 
@@ -109,10 +115,16 @@ for (const phrase of [
 
 for (const filename of publicDocReferences) {
   const path = `skills/write-actions-json/references/docs/${filename}`;
-  const target = await readlink(path);
-  const expected = `../../../../docs/${filename}`;
-  if (target !== expected) {
-    throw new Error(`${path}: expected symlink to ${expected}, found ${target}`);
+  const stat = await lstat(path);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error(`${path}: expected a portable regular file`);
+  }
+  const [reference, publicDoc] = await Promise.all([
+    readFile(path, "utf8"),
+    readFile(`docs/${filename}`, "utf8"),
+  ]);
+  if (reference !== publicDoc) {
+    throw new Error(`${path}: must be byte-identical to docs/${filename}`);
   }
   if (!core.includes(path)) {
     throw new Error(`${canonicalSkillPath}: missing documentation routing entry for ${path}`);
@@ -165,4 +177,4 @@ for (const phrase of [
   }
 }
 
-console.log(`Validated canonical skill at ${canonicalSkillPath}.`);
+console.log(`Validated canonical skills: ${expectedSkillPaths.join(", ")}.`);

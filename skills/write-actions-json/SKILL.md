@@ -1854,6 +1854,30 @@ Prefer paired actions such as:
 - `site.nav.<destination>_info`: returns the child link center after its parent
   group is open.
 
+### Navigation Must Stay Inside The Catalog
+
+A stored navigation action must not commit a route on which its own map stops
+applying. Treat the map-level `scope.url_matches` as the catalog's route
+envelope and projection-level scopes as narrower state readers inside that
+envelope.
+
+Before shipping any action whose postcondition verifies a destination
+projection:
+
+1. record the action's starting route and destination projection;
+2. verify the destination projection's `scope.url_matches` is contained by the
+   map-level scope;
+3. list the catalog on the starting route, execute the stored action, and list
+   it again on the committed destination route;
+4. prove the destination retains both its operating actions and a safe
+   continuation or reversal action.
+
+Do not solve this by broadening every projection. Widen only the map-level
+catalog envelope enough to cover reachable routes; keep board-, thread-, modal-,
+or editor-specific projections narrow. The pipeline reports
+`route_scope_not_closed` when a postcondition names a destination projection
+outside the map envelope.
+
 ### Hidden DOM Is Not A Clickable Affordance
 
 It is common for links to exist in the DOM while their bounding box is zero or
@@ -3251,6 +3275,9 @@ Before calling a site map ready:
 - Broad replacements preserve and compare the fresh live document, account for
   concurrent human edits, and preflight expected plus forbidden sentinels.
 - Existing stored actions were tried before debugger fallback.
+- Every navigation destination remains inside the map-level catalog scope, and
+  a stored-action route transition proved that its destination retains the
+  expected operating and reversal actions.
 - Any debugger discovery was converted into `actions.json`.
 - The updated storage bundle was synced/reloaded without a bridge restart.
 - The workflow was repeated through stored actions only.

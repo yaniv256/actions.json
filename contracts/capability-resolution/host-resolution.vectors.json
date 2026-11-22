@@ -1,0 +1,2781 @@
+{
+  "schema": "actions-json/capability-resolution-vectors/v4",
+  "description": "Language-neutral vectors for host capability resolution. Every resolver implementation -- JS, Rust, or otherwise -- runs against this file. A vector states inputs and the expected effective answer; it never states how the answer is computed.",
+  "issue": "#335",
+  "status": "characterization-and-target",
+  "notes": [
+    "Vectors marked expectation:'current-defect' record behaviour that is WRONG TODAY and must change. They are pinned so the fix is provably a change rather than a claim. They are not desired compatibility.",
+    "Vectors marked expectation:'target' describe the contract after the resolver lands. They are expected to fail until then.",
+    "A vector's `document_kind` names which input contract it exercises: canonical | resolved_snapshot | legacy_flat."
+  ],
+  "documents": {
+    "canonical": {
+      "kind": "canonical",
+      "description": "Host-independent primitive contracts. Carries `adapters` only as a migration compatibility input. Must not carry effective flat `support` at primitive level.",
+      "path": "runtime/actions-json-runtime/src/primitives/dictionary.v1.json",
+      "declared_kind": "canonical",
+      "compatibility_open_as": "canonical_pre_kind",
+      "note": "predates `kind`; opened by named compatibility descriptor, never inferred"
+    },
+    "packaged_extension": {
+      "kind": "legacy_flat",
+      "description": "Today's shipped packaged dictionary. Flat `support`, no `adapters`, declares its own host.",
+      "path": "extensions/chrome-overlay-runtime/actions/overlay.actions.json",
+      "pointer": "/primitive_dictionary",
+      "declared_kind": "legacy_flat",
+      "compatibility_open_as": "legacy_flat",
+      "note": "predates `kind`; declares host, opened as legacy_flat"
+    }
+  },
+  "vectors": [
+    {
+      "id": "canonical-extension-differs-from-embed",
+      "expectation": "target",
+      "document_kind": "canonical",
+      "description": "The canonical dictionary distinguishes hosts on authority-bound primitives. Support originates at provider registration, so the input supplies explicit registrations and active host state -- a bare document expecting support would restore authority to the dictionary, which the contract forbids.",
+      "input": {
+        "document": "canonical",
+        "host_state": {
+          "extension": {
+            "host": "extension",
+            "revision": "rev-fixture-ext",
+            "principal_id": "principal-a",
+            "namespaces": {
+              "browser": {
+                "provider": "extension-browser",
+                "authority_mode": "unspecified",
+                "registrations": {
+                  "extension-browser": {
+                    "implements_namespace": true
+                  }
+                }
+              },
+              "overlay": {
+                "provider": "extension-overlay",
+                "authority_mode": "unspecified",
+                "registrations": {
+                  "extension-overlay": {
+                    "implements_namespace": true
+                  }
+                }
+              },
+              "pointer": {
+                "provider": "extension-pointer",
+                "authority_mode": "unspecified",
+                "registrations": {
+                  "extension-pointer": {
+                    "implements_namespace": true
+                  }
+                }
+              },
+              "keyboard": {
+                "provider": "extension-keyboard",
+                "authority_mode": "unspecified",
+                "registrations": {
+                  "extension-keyboard": {
+                    "implements_namespace": true
+                  }
+                }
+              },
+              "transfer": {
+                "provider": "extension-transfer",
+                "authority_mode": "unspecified",
+                "registrations": {
+                  "extension-transfer": {
+                    "implements_namespace": true
+                  }
+                }
+              }
+            }
+          },
+          "embed": {
+            "host": "embed",
+            "revision": "rev-fixture-emb",
+            "principal_id": "principal-a",
+            "namespaces": {
+              "overlay": {
+                "provider": "embed-overlay",
+                "authority_mode": "unspecified",
+                "registrations": {
+                  "embed-overlay": {
+                    "implements_namespace": true
+                  }
+                }
+              },
+              "pointer": {
+                "provider": "embed-pointer",
+                "authority_mode": "unspecified",
+                "registrations": {
+                  "embed-pointer": {
+                    "implements_namespace": true
+                  }
+                }
+              },
+              "keyboard": {
+                "provider": "embed-keyboard",
+                "authority_mode": "unspecified",
+                "registrations": {
+                  "embed-keyboard": {
+                    "implements_namespace": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "differs_across_hosts": true,
+        "probes": [
+          {
+            "primitive": "browser.open_tab",
+            "extension": "supported",
+            "embed": "unsupported",
+            "embed_reason": "namespace_unavailable",
+            "embed_decided_by": "host_state"
+          },
+          {
+            "primitive": "overlay.open",
+            "extension": "supported",
+            "embed": "supported"
+          },
+          {
+            "primitive": "pointer.click",
+            "extension": "supported",
+            "embed": "supported"
+          },
+          {
+            "primitive": "keyboard.press",
+            "extension": "supported",
+            "embed": "supported"
+          }
+        ]
+      },
+      "operation": "catalog"
+    },
+    {
+      "id": "packaged-host-selector-ignored",
+      "expectation": "current-defect",
+      "document_kind": "legacy_flat",
+      "description": "DEFECT AS SHIPPED. Against the packaged dictionary the host selector changes nothing: both hosts receive byte-identical catalogs. Pinned so the fix is provable. Must NOT be read as desired compatibility.",
+      "input": {
+        "document": "packaged_extension"
+      },
+      "observed_today": {
+        "catalog_size": {
+          "extension": 76,
+          "embed": 76
+        },
+        "catalogs_identical": true,
+        "embed_receives_privileged": [
+          "browser.screenshot",
+          "browser.claimed_tabs.list",
+          "browser.claimed_tabs.activate",
+          "browser.navigate",
+          "browser.open_tab",
+          "browser.close_tab",
+          "browser.dismiss_dialog",
+          "file.transfer.create",
+          "file.transfer.chunk",
+          "file.transfer.finalize",
+          "file.transfer.status",
+          "file.transfer.cancel",
+          "file.transfer.upload.consume",
+          "file.transfer.upload.complete",
+          "file.transfer.download.capture",
+          "file.transfer.download.read_chunk",
+          "file.transfer.download.complete",
+          "transfer.insert",
+          "transfer.clear",
+          "transfer.read",
+          "transfer.write"
+        ]
+      },
+      "expect_after_fix": {
+        "outcome": "error",
+        "reason": "host_mismatch",
+        "detail": "A legacy_flat document declaring host 'extension' must fail closed when projected as 'embed', not silently return extension authority."
+      },
+      "operation": "catalog"
+    },
+    {
+      "id": "packaged-declares-host-but-code-ignores-it",
+      "expectation": "current-defect",
+      "document_kind": "legacy_flat",
+      "description": "The information needed to fail closed is already present and unread. Both packaged copies declare host 'extension' at primitive_dictionary.host; the bookmarklet table declares 'embed'. No code reads either. This pins both halves: the declaration exists AND it is ignored.",
+      "input": {
+        "document": "packaged_extension"
+      },
+      "observed_today": {
+        "document_declares_host": "extension",
+        "declaration_is_read_by_resolver": false
+      },
+      "expect_after_fix": {
+        "document_declares_host": "extension",
+        "declaration_is_read_by_resolver": true
+      },
+      "operation": "parse_document"
+    },
+    {
+      "id": "resolved-snapshot-rejects-second-host-selector",
+      "expectation": "target",
+      "document_kind": "resolved_snapshot",
+      "description": "A formatter given an already-resolved catalog plus a disagreeing host argument fails closed. Re-selecting a host over resolved output is the shipped bug expressed as an API affordance.",
+      "input": {
+        "resolved_catalog": {
+          "host": "extension",
+          "installation_revision": "rev-a"
+        },
+        "format_as_host": "embed"
+      },
+      "expect": {
+        "outcome": "error",
+        "reason": "host_mismatch"
+      },
+      "operation": "format_catalog"
+    },
+    {
+      "id": "unknown-host-fails-closed",
+      "expectation": "target",
+      "document_kind": "canonical",
+      "description": "An unrecognised host resolves to unsupported with a stated reason, never to a permissive default.",
+      "input": {
+        "document": "canonical",
+        "primitive": "pointer.click",
+        "host_state": {
+          "host": "no-such-host",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "namespaces": {}
+        }
+      },
+      "expect": {
+        "support": "unsupported",
+        "reason": "host_unknown"
+      },
+      "operation": "resolve"
+    },
+    {
+      "id": "canonical-must-not-carry-flat-support",
+      "expectation": "target",
+      "document_kind": "canonical",
+      "description": "Validation rejects a canonical document carrying effective flat `support` at primitive level -- that shape is what makes the two input contracts confusable.",
+      "input": {
+        "document_inline": {
+          "version": 1,
+          "stage": 1,
+          "primitives": [
+            {
+              "name": "pointer.click",
+              "support": "supported",
+              "capability_class": "portable",
+              "portable": true
+            }
+          ],
+          "kind": "canonical"
+        }
+      },
+      "expect": {
+        "outcome": "error",
+        "reason": "canonical_document_carries_flat_support"
+      },
+      "operation": "parse_document"
+    },
+    {
+      "id": "stripping-adapters-must-not-erase-host-identity",
+      "expectation": "target",
+      "document_kind": "legacy_flat",
+      "description": "A document whose per-host detail has been flattened away must still say whose authority it encodes. Silent full-advertise is the dangerous direction.",
+      "input": {
+        "document_inline": {
+          "version": 1,
+          "stage": 1,
+          "primitives": [
+            {
+              "name": "browser.open_tab",
+              "support": "supported",
+              "capability_class": "privileged",
+              "portable": false
+            }
+          ]
+        }
+      },
+      "expect": {
+        "outcome": "error",
+        "reason": "host_undeclared"
+      },
+      "operation": "parse_document"
+    },
+    {
+      "id": "identical-across-hosts-only-when-decisions-match",
+      "expectation": "target",
+      "document_kind": "canonical",
+      "description": "Two hosts may legitimately produce the same effective support. That is acceptable only when the decision traces genuinely agree -- not because a selector was ignored. Both sides supply explicit provider registration, so support originates where the contract says it does.",
+      "input": {
+        "primitive": "overlay.open",
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "authority_mode": "owner_rights",
+          "namespaces": {
+            "overlay": {
+              "provider": "embed-overlay",
+              "registrations": {
+                "embed-overlay": {
+                  "implements": [
+                    "overlay.open"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "support": "supported",
+        "decided_by": "provider_registration"
+      },
+      "operation": "resolve"
+    },
+    {
+      "id": "rust-allowlist-is-unnamed-policy-layer",
+      "expectation": "current-defect",
+      "document_kind": "legacy_flat",
+      "description": "mcp/actions-json-mcp/src/lib.rs:6812 extension_executor_supports_primitive is a hardcoded matches! over ~20 names, consulted at :6191 before the flat support check. It is extension provider-membership written inside a projection, with the host named only in the function identifier. Pinned as a defect; migrates to explicit provider registration.",
+      "observed_today": {
+        "gate_is_hardcoded": true,
+        "gate_has_host_parameter": false,
+        "host_appears_only_in": "function_name"
+      },
+      "expect_after_fix": {
+        "gate_is_hardcoded": false,
+        "membership_source": "extension_provider_registration"
+      },
+      "operation": "catalog"
+    },
+    {
+      "id": "partial-fails-validation-during-two-valued-migration",
+      "expectation": "target",
+      "document_kind": "canonical",
+      "description": "support is two-valued. A leftover `partial` must fail validation rather than silently degrade to unsupported -- silent degradation is how the stale catalog rule survived unnoticed.",
+      "input": {
+        "document_inline": {
+          "version": 1,
+          "stage": 1,
+          "primitives": [
+            {
+              "name": "keyboard.press",
+              "capability_class": "mixed",
+              "portable": false,
+              "adapters": {
+                "embed": {
+                  "support": "partial",
+                  "reason": "trusted_key_events_unavailable"
+                }
+              }
+            }
+          ],
+          "kind": "canonical"
+        }
+      },
+      "expect": {
+        "outcome": "error",
+        "reason": "invalid_support_value"
+      },
+      "operation": "parse_document"
+    },
+    {
+      "id": "three-reasons-lead-to-three-remediations",
+      "expectation": "target",
+      "ruling": "#335 \u00a79.2",
+      "document_kind": "canonical",
+      "description": "No active provider for the primitive's declared namespace. The user may be able to fix this by installing, configuring or activating a provider -- which is what distinguishes it from capability_unavailable and provider_unavailable, covered by the two vectors that follow.",
+      "input": {
+        "primitive": "pointer.click",
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "authority_mode": "owner_rights",
+          "namespaces": {}
+        }
+      },
+      "expect": {
+        "support": "unsupported",
+        "reason": "namespace_unavailable",
+        "decided_by": "host_state",
+        "remediation": "activate_provider"
+      },
+      "operation": "resolve"
+    },
+    {
+      "id": "capability-unavailable-distinguishes-registration-from-narrowing",
+      "expectation": "target",
+      "ruling": "#335 \u00a79.2",
+      "document_kind": "canonical",
+      "description": "capability_unavailable covers two sources -- a provider that never registered the primitive, and a later compatibility or context layer that narrowed it. The top-level reason is the same; the trace must say which.",
+      "input": {
+        "primitive": "pointer.click",
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "authority_mode": "owner_rights",
+          "namespaces": {
+            "pointer": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "pointer.click"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "call_context": {
+          "site_policy_blocks": [
+            "pointer.click"
+          ]
+        }
+      },
+      "expect": {
+        "support": "unsupported",
+        "reason": "capability_unavailable",
+        "decided_by": "call_context"
+      },
+      "operation": "resolve"
+    },
+    {
+      "id": "canonical-declares-namespace-derived-from-prefix",
+      "expectation": "target",
+      "ruling": "#335 \u00a79.1",
+      "document_kind": "canonical",
+      "description": "The canonical dictionary declares each primitive's namespace as part of its host-independent contract, deterministically derived from the dotted prefix and validated against it. It must not declare provider instances or imply a first-party provider exists.",
+      "input": {
+        "document": "canonical"
+      },
+      "expect": {
+        "outcome": "ok"
+      },
+      "operation": "parse_document"
+    },
+    {
+      "id": "provider-ambiguity-fails-closed",
+      "expectation": "target",
+      "ruling": "#335 \u00a79.1",
+      "document_kind": "canonical",
+      "description": "Two candidate providers with no explicit selection is unsupported/provider_conflict. Determinism is not consent: candidates can represent different tenants, accounts, credentials or policy scopes, so an implicit winner would silently pick an authority.",
+      "input": {
+        "primitive": "pointer.click",
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "authority_mode": "owner_rights",
+          "namespaces": {
+            "pointer": {
+              "candidates": [
+                "provider-a",
+                "provider-b"
+              ],
+              "selected": null
+            }
+          }
+        }
+      },
+      "expect": {
+        "support": "unsupported",
+        "reason": "provider_conflict",
+        "decided_by": "host_state"
+      },
+      "operation": "resolve"
+    },
+    {
+      "id": "authority-binds-to-principal-not-only-installation",
+      "expectation": "target",
+      "ruling": "#337 review blocker 4",
+      "document_kind": "canonical",
+      "description": "A provider or catalog selected for one authenticated principal must not authorize another. Installation alone is too coarse: one Streamlit app serves many viewer sessions, and one installation can serve many tenants.",
+      "input": {
+        "primitive": "pointer.click",
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "authority_mode": "owner_rights",
+          "namespaces": {
+            "pointer": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "pointer.click"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "call_context": {
+          "principal_id": "principal-b"
+        }
+      },
+      "expect": {
+        "support": "unsupported",
+        "reason": "principal_mismatch",
+        "decided_by": "call_context"
+      },
+      "operation": "resolve"
+    },
+    {
+      "id": "stale-catalog-sequence",
+      "expectation": "target",
+      "operation": "call_sequence",
+      "document_kind": "canonical",
+      "ruling": "#337 review 2, blocker 5",
+      "description": "A stale catalog CAN advertise a capability that has since been withdrawn. What makes that safe is that advertisement never confers authority and every execution boundary re-resolves current state -- not, as an earlier draft said, that a catalog can never advertise more than a call would permit. The still-valid call in the same sequence proves a moved revision alone does not wedge.",
+      "input": {
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "authority_mode": "owner_rights",
+          "namespaces": {
+            "pointer": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "pointer.click"
+                  ]
+                }
+              }
+            },
+            "overlay": {
+              "provider": "embed-overlay",
+              "registrations": {
+                "embed-overlay": {
+                  "implements": [
+                    "overlay.open"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "scope": {
+          "tenant_id": "tenant-1",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "runtime_id": "runtime-1",
+          "installation_id": "inst-1",
+          "authority_mode": "owner_rights"
+        },
+        "mutations": [
+          {
+            "after_call": 0,
+            "withdraw_namespace": "pointer",
+            "new_revision": "rev-B"
+          }
+        ],
+        "calls": [
+          {
+            "call_id": "s-1",
+            "primitive": "pointer.click",
+            "arguments": {
+              "x": 10,
+              "y": 20
+            },
+            "observed_installation_revision": "rev-A"
+          },
+          {
+            "call_id": "s-2",
+            "primitive": "pointer.click",
+            "arguments": {
+              "x": 10,
+              "y": 20
+            },
+            "observed_installation_revision": "rev-A"
+          },
+          {
+            "call_id": "s-3",
+            "primitive": "overlay.open",
+            "arguments": {
+              "html": "<p>x</p>"
+            },
+            "observed_installation_revision": "rev-A"
+          }
+        ]
+      },
+      "expect": {
+        "handler_invocations": 2,
+        "results": [
+          {
+            "type": "action_call_output",
+            "executed": true
+          },
+          {
+            "type": "action_error",
+            "error_code": "capability_unavailable",
+            "reason": "namespace_unavailable",
+            "executed": false
+          },
+          {
+            "type": "action_call_output",
+            "executed": true,
+            "note": "a stale observed revision must not block a still-granted call"
+          }
+        ]
+      }
+    },
+    {
+      "id": "decided-by-is-defined-for-supported-resolutions",
+      "expectation": "target",
+      "ruling": "#337 review blocker 6",
+      "document_kind": "canonical",
+      "description": "A supported resolution where nothing narrowed still names a deciding layer: provider_registration, where support originated. decided_by is never null.",
+      "expect": {
+        "support": "supported",
+        "reason": null,
+        "decided_by": "provider_registration",
+        "remediation": "none"
+      },
+      "operation": "resolve",
+      "input": {
+        "primitive": "pointer.click",
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "authority_mode": "owner_rights",
+          "namespaces": {
+            "pointer": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "pointer.click"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "receipt-replay-after-settle",
+      "expectation": "target",
+      "operation": "call_sequence",
+      "document_kind": "resolved_snapshot",
+      "ruling": "#337 review blocker 4",
+      "description": "A settled receipt replays without executing. A rerun-based boundary redelivers the same request; executing each delivery writes twice and nothing shows it happened.",
+      "input": {
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "authority_mode": "owner_rights",
+          "namespaces": {
+            "pointer": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "pointer.click"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "scope": {
+          "tenant_id": "principal-a",
+          "session_id": "session-1",
+          "runtime_id": "runtime-1",
+          "principal_id": "principal-a",
+          "installation_id": "inst-1",
+          "authority_mode": "owner_rights"
+        },
+        "calls": [
+          {
+            "call_id": "c-1",
+            "primitive": "pointer.click",
+            "arguments": {
+              "x": 10,
+              "y": 20
+            }
+          },
+          {
+            "call_id": "c-1",
+            "primitive": "pointer.click",
+            "arguments": {
+              "x": 10,
+              "y": 20
+            }
+          }
+        ]
+      },
+      "expect": {
+        "results": [
+          {
+            "type": "action_call_output",
+            "executed": true,
+            "from_receipt": false
+          },
+          {
+            "type": "action_call_output",
+            "executed": false,
+            "from_receipt": true
+          }
+        ],
+        "handler_invocations": 1
+      }
+    },
+    {
+      "id": "receipt-conflict-on-different-payload",
+      "expectation": "target",
+      "operation": "call_sequence",
+      "document_kind": "resolved_snapshot",
+      "ruling": "#337 review blocker 4",
+      "description": "Same call_id with a different request digest fails closed. Replaying the first receipt would answer a question that was not asked.",
+      "input": {
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "authority_mode": "owner_rights",
+          "namespaces": {
+            "pointer": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "pointer.click"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "scope": {
+          "tenant_id": "principal-a",
+          "session_id": "session-1",
+          "runtime_id": "runtime-1",
+          "principal_id": "principal-a",
+          "installation_id": "inst-1",
+          "authority_mode": "owner_rights"
+        },
+        "calls": [
+          {
+            "call_id": "c-1",
+            "primitive": "pointer.click",
+            "arguments": {
+              "x": 10,
+              "y": 20
+            }
+          },
+          {
+            "call_id": "c-1",
+            "primitive": "pointer.click",
+            "arguments": {
+              "x": 11,
+              "y": 20
+            }
+          }
+        ]
+      },
+      "expect": {
+        "results": [
+          {
+            "type": "action_call_output"
+          },
+          {
+            "type": "action_error",
+            "error_code": "call_id_conflict"
+          }
+        ],
+        "handler_invocations": 1
+      }
+    },
+    {
+      "id": "in-flight-duplicate-coalesces",
+      "expectation": "target",
+      "operation": "concurrent_calls",
+      "document_kind": "resolved_snapshot",
+      "ruling": "#337 review blocker 4",
+      "description": "Two concurrent deliveries of one call_id coalesce onto a single execution rather than racing.",
+      "input": {
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "authority_mode": "owner_rights",
+          "namespaces": {
+            "pointer": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "pointer.click"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "scope": {
+          "tenant_id": "principal-a",
+          "session_id": "session-1",
+          "runtime_id": "runtime-1",
+          "principal_id": "principal-a",
+          "installation_id": "inst-1",
+          "authority_mode": "owner_rights"
+        },
+        "concurrent": [
+          {
+            "call_id": "c-2",
+            "primitive": "pointer.click",
+            "arguments": {
+              "x": 10,
+              "y": 20
+            }
+          },
+          {
+            "call_id": "c-2",
+            "primitive": "pointer.click",
+            "arguments": {
+              "x": 10,
+              "y": 20
+            }
+          }
+        ]
+      },
+      "expect": {
+        "handler_invocations": 1,
+        "both_results_equal": true
+      }
+    },
+    {
+      "id": "same-principal-two-sessions-do-not-share-receipts",
+      "expectation": "target",
+      "operation": "call_sequence",
+      "document_kind": "resolved_snapshot",
+      "ruling": "#337 review 3, finding 4",
+      "description": "Two viewer sessions of one app, same authenticated principal, colliding call_id by coincidence. Session 2 must execute rather than receive session 1's receipt. Changing the principal here would make this a cross-principal replay instead of an isolation case.",
+      "input": {
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "namespaces": {
+            "pointer": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "pointer.click"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "calls": [
+          {
+            "scope": {
+              "tenant_id": "tenant-1",
+              "principal_id": "principal-a",
+              "session_id": "session-1",
+              "runtime_id": "runtime-1",
+              "installation_id": "inst-1",
+              "authority_mode": "owner_rights"
+            },
+            "call_id": "c-1",
+            "primitive": "pointer.click",
+            "arguments": {
+              "x": 10,
+              "y": 20
+            }
+          },
+          {
+            "scope": {
+              "tenant_id": "tenant-1",
+              "principal_id": "principal-a",
+              "session_id": "session-2",
+              "runtime_id": "runtime-1",
+              "installation_id": "inst-1",
+              "authority_mode": "owner_rights"
+            },
+            "call_id": "c-1",
+            "primitive": "pointer.click",
+            "arguments": {
+              "x": 10,
+              "y": 20
+            }
+          }
+        ]
+      },
+      "expect": {
+        "handler_invocations": 2,
+        "results": [
+          {
+            "type": "action_call_output",
+            "from_receipt": false
+          },
+          {
+            "type": "action_call_output",
+            "from_receipt": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "cross-principal-replay-rejects-before-execution",
+      "expectation": "target",
+      "operation": "call_sequence",
+      "document_kind": "resolved_snapshot",
+      "ruling": "#337 review 3, finding 4",
+      "description": "A call arriving under a different authenticated principal against a receipt or catalog resolved for another is not a replay and not an isolation case -- it is a cross-principal attempt, and it must reject before the handler runs. Zero handler invocations for the second call is the assertion that matters.",
+      "input": {
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "namespaces": {
+            "pointer": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "pointer.click"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "calls": [
+          {
+            "scope": {
+              "tenant_id": "tenant-1",
+              "principal_id": "principal-a",
+              "session_id": "session-1",
+              "runtime_id": "runtime-1",
+              "installation_id": "inst-1",
+              "authority_mode": "owner_rights"
+            },
+            "call_id": "c-1",
+            "primitive": "pointer.click",
+            "arguments": {
+              "x": 10,
+              "y": 20
+            }
+          },
+          {
+            "scope": {
+              "tenant_id": "tenant-2",
+              "principal_id": "principal-b",
+              "session_id": "session-9",
+              "runtime_id": "runtime-1",
+              "installation_id": "inst-1",
+              "authority_mode": "owner_rights"
+            },
+            "call_id": "c-1",
+            "primitive": "pointer.click",
+            "arguments": {
+              "x": 10,
+              "y": 20
+            }
+          }
+        ]
+      },
+      "expect": {
+        "handler_invocations": 1,
+        "results": [
+          {
+            "type": "action_call_output"
+          },
+          {
+            "type": "action_error",
+            "error_code": "principal_mismatch",
+            "executed": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "warehouse-cannot-claim-caller-rights",
+      "expectation": "target",
+      "operation": "host_descriptor_validation",
+      "document_kind": "canonical",
+      "ruling": "#335 corrected projection matrix",
+      "description": "Restricted caller rights exist only in the container runtime. A warehouse descriptor claiming caller_rights is rejected, never downgraded -- a silent substitution changes whose privileges execute a query, invisibly.",
+      "input": [
+        {
+          "projection": "streamlit-warehouse-v1",
+          "authority_mode": "caller_rights",
+          "transport_status": "supported"
+        },
+        {
+          "projection": "streamlit-container-v2",
+          "authority_mode": "caller_rights",
+          "transport_status": "supported"
+        },
+        {
+          "projection": "streamlit-warehouse-v1",
+          "authority_mode": "owner_rights",
+          "transport_status": "supported"
+        }
+      ],
+      "expect": [
+        {
+          "outcome": "error",
+          "reason": "authority_mode_unavailable_for_projection"
+        },
+        {
+          "outcome": "ok"
+        },
+        {
+          "outcome": "ok"
+        }
+      ]
+    },
+    {
+      "id": "three-projections-resolve-identically",
+      "expectation": "target",
+      "operation": "cross_projection_parity",
+      "document_kind": "canonical",
+      "ruling": "#335 corrected projection matrix",
+      "description": "Packaging is deployment metadata. Identical provider and authority state yields identical decisions and identical catalog fingerprints across all three projections. The parity assertions are all 'identical' claims, which a resolver that ignored host state entirely would also satisfy; differs_when_authority_differs is the control that separates real parity from a vacuous pass.",
+      "input": {
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "authority_mode": "owner_rights",
+          "namespaces": {
+            "pointer": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "pointer.click"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "projections": [
+          "served-web",
+          "streamlit-container-v2",
+          "streamlit-warehouse-v1"
+        ]
+      },
+      "expect": {
+        "host_identity": "embed",
+        "resolved_decisions_identical": true,
+        "catalog_fingerprints_identical": true,
+        "projection_absent_from": "authority scope",
+        "differs_when_authority_differs": true
+      }
+    },
+    {
+      "id": "diagnostics-redact-recursively",
+      "expectation": "target",
+      "operation": "redaction_check",
+      "document_kind": "resolved_snapshot",
+      "ruling": "#337 review blocker 4; #335 SiS acceptance 4",
+      "description": "Redaction is recursive over the whole payload, not a top-level key filter. A forbidden key nested inside provider metadata reaches the browser just as readily as one at the root.",
+      "input": {
+        "snapshot": {
+          "host": "embed",
+          "installation_revision": "rev-A",
+          "namespaces": {
+            "pointer": {
+              "provider": "example-sql",
+              "config_ref": "keychain://acct",
+              "metadata": {
+                "bounds": {
+                  "max_rows": 100
+                },
+                "nested": {
+                  "connection_identifier": "acct-123.us-east-1"
+                }
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "forbidden_keys_absent_at_any_depth": [
+          "config_ref",
+          "connection_identifier",
+          "credential",
+          "secret_name",
+          "account_locator"
+        ],
+        "permitted_present": [
+          "installation_revision",
+          "provider",
+          "bounds"
+        ],
+        "provider_rendered_as": "opaque instance id"
+      }
+    },
+    {
+      "id": "provider-active-but-primitive-unregistered",
+      "expectation": "target",
+      "operation": "resolve",
+      "document_kind": "canonical",
+      "ruling": "#335 \u00a79.2",
+      "description": "Provider active but does not register this primitive. No remediation is available to the user.",
+      "input": {
+        "primitive": "pointer.click",
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "authority_mode": "owner_rights",
+          "namespaces": {
+            "pointer": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "pointer.move"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "support": "unsupported",
+        "reason": "capability_unavailable",
+        "decided_by": "provider_registration",
+        "remediation": "none"
+      }
+    },
+    {
+      "id": "provider-registered-but-unhealthy",
+      "expectation": "target",
+      "operation": "resolve",
+      "document_kind": "canonical",
+      "ruling": "#335 \u00a79.2",
+      "description": "Provider registered and selected but initialization or health failed. Transient, and it must not collapse into either of the other two -- conflating them makes an outage look permanent.",
+      "input": {
+        "primitive": "pointer.click",
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "authority_mode": "owner_rights",
+          "namespaces": {
+            "pointer": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "pointer.click"
+                  ]
+                }
+              },
+              "health": "unavailable"
+            }
+          }
+        }
+      },
+      "expect": {
+        "support": "unsupported",
+        "reason": "provider_unavailable",
+        "decided_by": "host_state",
+        "remediation": "retry_later"
+      }
+    },
+    {
+      "id": "compatibility-override-narrows-a-registered-primitive",
+      "expectation": "target",
+      "operation": "resolve",
+      "document_kind": "canonical",
+      "ruling": "#335 layer 4; coverage gap found by sabotage",
+      "description": "An explicitly selected dictionary-adapters compatibility profile narrows a registered primitive. The profile makes the migration input deliberate rather than a hidden veto on every live runtime provider.",
+      "input": {
+        "primitive": "browser.open_tab",
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "authority_mode": "owner_rights",
+          "compatibility_profile": "dictionary_adapters",
+          "namespaces": {
+            "browser": {
+              "provider": "embed-browser",
+              "registrations": {
+                "embed-browser": {
+                  "implements_namespace": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "support": "unsupported",
+        "reason": "capability_unavailable",
+        "decided_by": "compatibility_override",
+        "remediation": "none"
+      }
+    },
+    {
+      "id": "runtime-provider-registration-is-not-narrowed-by-legacy-adapters",
+      "expectation": "target",
+      "operation": "resolve",
+      "document_kind": "canonical",
+      "ruling": "#335 actionsjson.com consumer evidence",
+      "description": "A live runtime provider that registers a primitive is authoritative for availability unless HostState explicitly selects a compatibility profile. Legacy embed metadata must not silently veto a real served-host implementation.",
+      "input": {
+        "primitive": "browser.open_tab",
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-runtime",
+          "principal_id": "principal-a",
+          "session_id": "session-1",
+          "authority_mode": "owner_rights",
+          "namespaces": {
+            "browser": {
+              "provider": "served-browser",
+              "registrations": {
+                "served-browser": {
+                  "implements": [
+                    "browser.open_tab"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "support": "supported",
+        "reason": null,
+        "decided_by": "provider_registration",
+        "remediation": "none"
+      }
+    },
+    {
+      "id": "preflight-ready-resolves-mutations",
+      "expectation": "target",
+      "operation": "preflight",
+      "document_kind": "canonical",
+      "ruling": "#335 preflight ruling",
+      "description": "With a verified durable store, mutation primitives resolve normally.",
+      "input": {
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "authority_mode": "owner_rights",
+          "preflight": "durable_mutation_store_ready",
+          "namespaces": {
+            "data": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "data.query",
+                    "data.write"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "primitive": "data.write",
+        "dictionary_inline": {
+          "kind": "canonical",
+          "version": 1,
+          "stage": 1,
+          "primitives": [
+            {
+              "name": "data.query",
+              "capability_class": "portable",
+              "portable": true,
+              "effect": "read_only",
+              "summary": "Read from the configured data source."
+            },
+            {
+              "name": "data.write",
+              "capability_class": "privileged",
+              "portable": false,
+              "effect": "mutation",
+              "summary": "Mutate the configured data source."
+            },
+            {
+              "name": "table.insert",
+              "capability_class": "privileged",
+              "portable": false,
+              "effect": "mutation",
+              "summary": "Insert rows. Named nothing like data.write on purpose."
+            },
+            {
+              "name": "data.execute",
+              "capability_class": "portable",
+              "portable": true,
+              "effect": "read_only",
+              "summary": "Execute a read-only statement. Name suggests mutation; contract says otherwise."
+            }
+          ]
+        }
+      },
+      "expect": {
+        "support": "supported",
+        "reason": null,
+        "remediation": "none"
+      },
+      "note": "Uses an inline data.* fixture: the namespace is proposed by #335 and not yet in the canonical dictionary. Rewriting these to existing primitives would make them stop testing what they are for."
+    },
+    {
+      "id": "preflight-setup-required-is-fixable",
+      "expectation": "target",
+      "operation": "preflight",
+      "document_kind": "canonical",
+      "ruling": "#335 preflight ruling",
+      "description": "The store is absent but provisionable. Names the layer that is actually missing: the provider IS active and implements the primitive, so reporting namespace_unavailable / activate_provider told the reader to activate something already on.",
+      "input": {
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "authority_mode": "owner_rights",
+          "preflight": "setup_required",
+          "namespaces": {
+            "data": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "data.query",
+                    "data.write"
+                  ]
+                }
+              }
+            }
+          },
+          "setup_packet": {
+            "sql": "CREATE HYBRID TABLE actions_receipts (...);",
+            "required_privilege": "CREATE HYBRID TABLE on schema, or schema ownership",
+            "target": "APP_DB.APP_SCHEMA.ACTIONS_RECEIPTS"
+          }
+        },
+        "primitive": "data.write",
+        "dictionary_inline": {
+          "kind": "canonical",
+          "version": 1,
+          "stage": 1,
+          "primitives": [
+            {
+              "name": "data.query",
+              "capability_class": "portable",
+              "portable": true,
+              "effect": "read_only",
+              "summary": "Read from the configured data source."
+            },
+            {
+              "name": "data.write",
+              "capability_class": "privileged",
+              "portable": false,
+              "effect": "mutation",
+              "summary": "Mutate the configured data source."
+            },
+            {
+              "name": "table.insert",
+              "capability_class": "privileged",
+              "portable": false,
+              "effect": "mutation",
+              "summary": "Insert rows. Named nothing like data.write on purpose."
+            },
+            {
+              "name": "data.execute",
+              "capability_class": "portable",
+              "portable": true,
+              "effect": "read_only",
+              "summary": "Execute a read-only statement. Name suggests mutation; contract says otherwise."
+            }
+          ]
+        }
+      },
+      "expect": {
+        "support": "unsupported",
+        "reason": "durable_store_unavailable",
+        "remediation": "provision_receipt_store"
+      },
+      "note": "Uses an inline data.* fixture: the namespace is proposed by #335 and not yet in the canonical dictionary. Rewriting these to existing primitives would make them stop testing what they are for."
+    },
+    {
+      "id": "preflight-read-only-omits-mutations-from-the-catalog",
+      "expectation": "target",
+      "operation": "catalog",
+      "document_kind": "canonical",
+      "ruling": "#335 preflight ruling",
+      "description": "No durable store and none provisionable. Mutation primitives are ABSENT from the resolved catalog, not advertised and refused late -- moving the refusal to execution only delays the discovery past the point where the agent has told the user what it will do. Reads still resolve.",
+      "input": {
+        "host_state": {
+          "embed": {
+            "host": "embed",
+            "revision": "rev-A",
+            "principal_id": "principal-a",
+            "authority_mode": "owner_rights",
+            "preflight": "read_only_ready",
+            "namespaces": {
+              "data": {
+                "provider": "example-sql",
+                "registrations": {
+                  "example-sql": {
+                    "implements": [
+                      "data.query",
+                      "data.write"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "dictionary_inline": {
+          "kind": "canonical",
+          "version": 1,
+          "stage": 1,
+          "primitives": [
+            {
+              "name": "data.query",
+              "capability_class": "portable",
+              "portable": true,
+              "effect": "read_only",
+              "summary": "Read from the configured data source."
+            },
+            {
+              "name": "data.write",
+              "capability_class": "privileged",
+              "portable": false,
+              "effect": "mutation",
+              "summary": "Mutate the configured data source."
+            },
+            {
+              "name": "table.insert",
+              "capability_class": "privileged",
+              "portable": false,
+              "effect": "mutation",
+              "summary": "Insert rows. Named nothing like data.write on purpose."
+            },
+            {
+              "name": "data.execute",
+              "capability_class": "portable",
+              "portable": true,
+              "effect": "read_only",
+              "summary": "Execute a read-only statement. Name suggests mutation; contract says otherwise."
+            }
+          ]
+        }
+      },
+      "expect": {
+        "probes": [
+          {
+            "primitive": "data.write",
+            "embed": "unsupported",
+            "embed_reason": "capability_unavailable"
+          },
+          {
+            "primitive": "data.query",
+            "embed": "supported"
+          }
+        ]
+      },
+      "note": "Uses an inline data.* fixture: the namespace is proposed by #335 and not yet in the canonical dictionary. Rewriting these to existing primitives would make them stop testing what they are for."
+    },
+    {
+      "id": "preflight-states-are-distinguishable",
+      "expectation": "target",
+      "operation": "preflight",
+      "document_kind": "canonical",
+      "ruling": "#335 preflight ruling",
+      "description": "setup_required and read_only_ready must not collapse: the first is fixable by the reader, the second is not. Offering activate_provider for the second sends them looking for a setting that does not exist.",
+      "input": [
+        {
+          "host_state": {
+            "host": "embed",
+            "revision": "rev-A",
+            "principal_id": "principal-a",
+            "authority_mode": "owner_rights",
+            "preflight": "setup_required",
+            "namespaces": {
+              "data": {
+                "provider": "example-sql",
+                "registrations": {
+                  "example-sql": {
+                    "implements": [
+                      "data.query",
+                      "data.write"
+                    ]
+                  }
+                }
+              }
+            },
+            "setup_packet": {
+              "sql": "CREATE HYBRID TABLE actions_receipts (...);",
+              "required_privilege": "CREATE HYBRID TABLE on schema, or schema ownership",
+              "target": "APP_DB.APP_SCHEMA.ACTIONS_RECEIPTS"
+            }
+          },
+          "primitive": "data.write",
+          "dictionary_inline": {
+            "kind": "canonical",
+            "version": 1,
+            "stage": 1,
+            "primitives": [
+              {
+                "name": "data.query",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only",
+                "summary": "Read from the configured data source."
+              },
+              {
+                "name": "data.write",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation",
+                "summary": "Mutate the configured data source."
+              },
+              {
+                "name": "table.insert",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation",
+                "summary": "Insert rows. Named nothing like data.write on purpose."
+              },
+              {
+                "name": "data.execute",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only",
+                "summary": "Execute a read-only statement. Name suggests mutation; contract says otherwise."
+              }
+            ]
+          }
+        },
+        {
+          "host_state": {
+            "host": "embed",
+            "revision": "rev-A",
+            "principal_id": "principal-a",
+            "authority_mode": "owner_rights",
+            "preflight": "read_only_ready",
+            "namespaces": {
+              "data": {
+                "provider": "example-sql",
+                "registrations": {
+                  "example-sql": {
+                    "implements": [
+                      "data.query",
+                      "data.write"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "primitive": "data.write",
+          "dictionary_inline": {
+            "kind": "canonical",
+            "version": 1,
+            "stage": 1,
+            "primitives": [
+              {
+                "name": "data.query",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only",
+                "summary": "Read from the configured data source."
+              },
+              {
+                "name": "data.write",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation",
+                "summary": "Mutate the configured data source."
+              },
+              {
+                "name": "table.insert",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation",
+                "summary": "Insert rows. Named nothing like data.write on purpose."
+              },
+              {
+                "name": "data.execute",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only",
+                "summary": "Execute a read-only statement. Name suggests mutation; contract says otherwise."
+              }
+            ]
+          }
+        }
+      ],
+      "expect": [
+        {
+          "reason": "durable_store_unavailable",
+          "remediation": "provision_receipt_store"
+        },
+        {
+          "reason": "capability_unavailable",
+          "remediation": "none"
+        }
+      ],
+      "note": "Uses an inline data.* fixture: the namespace is proposed by #335 and not yet in the canonical dictionary. Rewriting these to existing primitives would make them stop testing what they are for."
+    },
+    {
+      "id": "preflight-absent-fails-closed",
+      "expectation": "target",
+      "operation": "preflight",
+      "document_kind": "canonical",
+      "ruling": "#337 review 6",
+      "description": "A HostState with no preflight is not a ready one. The gate previously ran only when preflight was truthy, so an omitted value granted mutation authority silently.",
+      "input": {
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "authority_mode": "owner_rights",
+          "namespaces": {
+            "data": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "data.query",
+                    "data.write",
+                    "data.execute"
+                  ]
+                }
+              }
+            },
+            "table": {
+              "provider": "example-sql",
+              "registrations": {
+                "example-sql": {
+                  "implements": [
+                    "table.insert"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "primitive": "data.write",
+        "dictionary_inline": {
+          "kind": "canonical",
+          "version": 1,
+          "stage": 1,
+          "primitives": [
+            {
+              "name": "data.query",
+              "capability_class": "portable",
+              "portable": true,
+              "effect": "read_only",
+              "summary": "Read from the configured data source."
+            },
+            {
+              "name": "data.write",
+              "capability_class": "privileged",
+              "portable": false,
+              "effect": "mutation",
+              "summary": "Mutate the configured data source."
+            },
+            {
+              "name": "table.insert",
+              "capability_class": "privileged",
+              "portable": false,
+              "effect": "mutation",
+              "summary": "Insert rows. Named nothing like data.write on purpose."
+            },
+            {
+              "name": "data.execute",
+              "capability_class": "portable",
+              "portable": true,
+              "effect": "read_only",
+              "summary": "Execute a read-only statement. Name suggests mutation; contract says otherwise."
+            }
+          ]
+        }
+      },
+      "expect": {
+        "support": "unsupported",
+        "reason": "durable_store_unavailable",
+        "remediation": "provision_receipt_store"
+      }
+    },
+    {
+      "id": "preflight-unknown-value-fails-closed",
+      "expectation": "target",
+      "operation": "preflight",
+      "document_kind": "canonical",
+      "ruling": "#337 review 6",
+      "description": "An unrecognised value -- a typo, or a state from a newer host -- is not a state. `read_only` for `read_only_ready` previously resolved supported.",
+      "input": [
+        {
+          "host_state": {
+            "host": "embed",
+            "revision": "rev-A",
+            "principal_id": "principal-a",
+            "authority_mode": "owner_rights",
+            "namespaces": {
+              "data": {
+                "provider": "example-sql",
+                "registrations": {
+                  "example-sql": {
+                    "implements": [
+                      "data.query",
+                      "data.write",
+                      "data.execute"
+                    ]
+                  }
+                }
+              },
+              "table": {
+                "provider": "example-sql",
+                "registrations": {
+                  "example-sql": {
+                    "implements": [
+                      "table.insert"
+                    ]
+                  }
+                }
+              }
+            },
+            "preflight": "read_only"
+          },
+          "primitive": "data.write",
+          "dictionary_inline": {
+            "kind": "canonical",
+            "version": 1,
+            "stage": 1,
+            "primitives": [
+              {
+                "name": "data.query",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only",
+                "summary": "Read from the configured data source."
+              },
+              {
+                "name": "data.write",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation",
+                "summary": "Mutate the configured data source."
+              },
+              {
+                "name": "table.insert",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation",
+                "summary": "Insert rows. Named nothing like data.write on purpose."
+              },
+              {
+                "name": "data.execute",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only",
+                "summary": "Execute a read-only statement. Name suggests mutation; contract says otherwise."
+              }
+            ]
+          }
+        },
+        {
+          "host_state": {
+            "host": "embed",
+            "revision": "rev-A",
+            "principal_id": "principal-a",
+            "authority_mode": "owner_rights",
+            "namespaces": {
+              "data": {
+                "provider": "example-sql",
+                "registrations": {
+                  "example-sql": {
+                    "implements": [
+                      "data.query",
+                      "data.write",
+                      "data.execute"
+                    ]
+                  }
+                }
+              },
+              "table": {
+                "provider": "example-sql",
+                "registrations": {
+                  "example-sql": {
+                    "implements": [
+                      "table.insert"
+                    ]
+                  }
+                }
+              }
+            },
+            "preflight": "probably_fine"
+          },
+          "primitive": "data.write",
+          "dictionary_inline": {
+            "kind": "canonical",
+            "version": 1,
+            "stage": 1,
+            "primitives": [
+              {
+                "name": "data.query",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only",
+                "summary": "Read from the configured data source."
+              },
+              {
+                "name": "data.write",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation",
+                "summary": "Mutate the configured data source."
+              },
+              {
+                "name": "table.insert",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation",
+                "summary": "Insert rows. Named nothing like data.write on purpose."
+              },
+              {
+                "name": "data.execute",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only",
+                "summary": "Execute a read-only statement. Name suggests mutation; contract says otherwise."
+              }
+            ]
+          }
+        }
+      ],
+      "expect": [
+        {
+          "support": "unsupported",
+          "reason": "durable_store_unavailable"
+        },
+        {
+          "support": "unsupported",
+          "reason": "durable_store_unavailable"
+        }
+      ],
+      "carries_invalid_host_state": true,
+      "note": "Intentionally invalid input. The schema rejects these values AND the resolver must fail closed on them independently -- a resolver that relied on validation having run would grant authority to anything that reached it unvalidated."
+    },
+    {
+      "id": "mutation-effect-comes-from-the-contract-not-the-name",
+      "expectation": "target",
+      "operation": "preflight",
+      "document_kind": "canonical",
+      "ruling": "#337 review 6",
+      "description": "Effect is declared by the primitive contract. table.insert is a mutation a name list would miss; data.execute reads like a mutation and its contract says read_only. Both are gated by what they DO.",
+      "input": [
+        {
+          "host_state": {
+            "host": "embed",
+            "revision": "rev-A",
+            "principal_id": "principal-a",
+            "authority_mode": "owner_rights",
+            "namespaces": {
+              "data": {
+                "provider": "example-sql",
+                "registrations": {
+                  "example-sql": {
+                    "implements": [
+                      "data.query",
+                      "data.write",
+                      "data.execute"
+                    ]
+                  }
+                }
+              },
+              "table": {
+                "provider": "example-sql",
+                "registrations": {
+                  "example-sql": {
+                    "implements": [
+                      "table.insert"
+                    ]
+                  }
+                }
+              }
+            },
+            "preflight": "read_only_ready"
+          },
+          "primitive": "table.insert",
+          "dictionary_inline": {
+            "kind": "canonical",
+            "version": 1,
+            "stage": 1,
+            "primitives": [
+              {
+                "name": "data.query",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only",
+                "summary": "Read from the configured data source."
+              },
+              {
+                "name": "data.write",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation",
+                "summary": "Mutate the configured data source."
+              },
+              {
+                "name": "table.insert",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation",
+                "summary": "Insert rows. Named nothing like data.write on purpose."
+              },
+              {
+                "name": "data.execute",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only",
+                "summary": "Execute a read-only statement. Name suggests mutation; contract says otherwise."
+              }
+            ]
+          }
+        },
+        {
+          "host_state": {
+            "host": "embed",
+            "revision": "rev-A",
+            "principal_id": "principal-a",
+            "authority_mode": "owner_rights",
+            "namespaces": {
+              "data": {
+                "provider": "example-sql",
+                "registrations": {
+                  "example-sql": {
+                    "implements": [
+                      "data.query",
+                      "data.write",
+                      "data.execute"
+                    ]
+                  }
+                }
+              },
+              "table": {
+                "provider": "example-sql",
+                "registrations": {
+                  "example-sql": {
+                    "implements": [
+                      "table.insert"
+                    ]
+                  }
+                }
+              }
+            },
+            "preflight": "read_only_ready"
+          },
+          "primitive": "data.execute",
+          "dictionary_inline": {
+            "kind": "canonical",
+            "version": 1,
+            "stage": 1,
+            "primitives": [
+              {
+                "name": "data.query",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only",
+                "summary": "Read from the configured data source."
+              },
+              {
+                "name": "data.write",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation",
+                "summary": "Mutate the configured data source."
+              },
+              {
+                "name": "table.insert",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation",
+                "summary": "Insert rows. Named nothing like data.write on purpose."
+              },
+              {
+                "name": "data.execute",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only",
+                "summary": "Execute a read-only statement. Name suggests mutation; contract says otherwise."
+              }
+            ]
+          }
+        }
+      ],
+      "expect": [
+        {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        },
+        {
+          "support": "supported",
+          "reason": null
+        }
+      ]
+    },
+    {
+      "id": "reconstruction-with-a-rotated-runtime-id",
+      "expectation": "target",
+      "operation": "call_sequence",
+      "document_kind": "resolved_snapshot",
+      "ruling": "#337 continuation binding ruling, Q3",
+      "description": "Instance B reconstructs with a different runtime_id, which a warehouse rerun plausibly rotates. Continuity MUST survive it: a process, component instance, WebSocket, script run or reconstructed host may all rotate while viewer continuity remains valid, and keeping that volatile identity in the durable key turned every reconstruction into a silent miss. runtime_id is now diagnostics, never authority or replay identity.",
+      "input": {
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-A",
+          "principal_id": "principal-a",
+          "authority_mode": "owner_rights",
+          "preflight": "durable_mutation_store_ready",
+          "namespaces": {
+            "pointer": {
+              "provider": "p",
+              "registrations": {
+                "p": {
+                  "implements": [
+                    "pointer.click"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "calls": [
+          {
+            "scope": {
+              "installation_id": "i",
+              "tenant_id": "t",
+              "principal_id": "principal-a",
+              "session_id": "continuation-1",
+              "runtime_id": "runtime-A",
+              "authority_mode": "owner_rights"
+            },
+            "call_id": "c-1",
+            "primitive": "pointer.click",
+            "arguments": {
+              "x": 1,
+              "y": 1
+            }
+          },
+          {
+            "scope": {
+              "installation_id": "i",
+              "tenant_id": "t",
+              "principal_id": "principal-a",
+              "session_id": "continuation-1",
+              "runtime_id": "runtime-B",
+              "authority_mode": "owner_rights"
+            },
+            "call_id": "c-1",
+            "primitive": "pointer.click",
+            "arguments": {
+              "x": 1,
+              "y": 1
+            }
+          }
+        ]
+      },
+      "expect": {
+        "handler_invocations": 1,
+        "results": [
+          {
+            "type": "action_call_output",
+            "executed": true,
+            "from_receipt": false
+          },
+          {
+            "type": "action_call_output",
+            "executed": false,
+            "from_receipt": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "an-unproven-transport-exposes-no-primitives",
+      "expectation": "target",
+      "operation": "preflight",
+      "document_kind": "canonical",
+      "ruling": "#337 evidence ladder ruling",
+      "description": "A projection whose TRANSPORT is unproven exposes zero executable primitives -- reads included. I had reasoned reads were safe, which was wrong in the familiar direction: the unproven thing is the component return channel itself, not mutation durability. Snowflake proves static HTML/iframe for warehouse and does not prove an embedded agent can send a call frontend-to-Python and receive its result. A read over a transport that may not exist is as false as a mutation.",
+      "input": [
+        {
+          "host_state": {
+            "host": "embed",
+            "revision": "rev-A",
+            "principal_id": "principal-a",
+            "authority_mode": "owner_rights",
+            "preflight": "durable_mutation_store_ready",
+            "projection": "streamlit-warehouse-v1",
+            "namespaces": {
+              "data": {
+                "provider": "x",
+                "registrations": {
+                  "x": {
+                    "implements": [
+                      "data.write",
+                      "data.query"
+                    ]
+                  }
+                }
+              }
+            },
+            "transport_status": "proposed"
+          },
+          "primitive": "data.query",
+          "dictionary_inline": {
+            "kind": "canonical",
+            "version": 1,
+            "stage": 1,
+            "primitives": [
+              {
+                "name": "data.write",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation"
+              },
+              {
+                "name": "data.query",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only"
+              }
+            ]
+          }
+        },
+        {
+          "host_state": {
+            "host": "embed",
+            "revision": "rev-A",
+            "principal_id": "principal-a",
+            "authority_mode": "owner_rights",
+            "preflight": "durable_mutation_store_ready",
+            "projection": "streamlit-warehouse-v1",
+            "namespaces": {
+              "data": {
+                "provider": "x",
+                "registrations": {
+                  "x": {
+                    "implements": [
+                      "data.write",
+                      "data.query"
+                    ]
+                  }
+                }
+              }
+            },
+            "transport_status": "proposed"
+          },
+          "primitive": "data.write",
+          "dictionary_inline": {
+            "kind": "canonical",
+            "version": 1,
+            "stage": 1,
+            "primitives": [
+              {
+                "name": "data.write",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation"
+              },
+              {
+                "name": "data.query",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only"
+              }
+            ]
+          }
+        },
+        {
+          "host_state": {
+            "host": "embed",
+            "revision": "rev-A",
+            "principal_id": "principal-a",
+            "authority_mode": "owner_rights",
+            "preflight": "durable_mutation_store_ready",
+            "projection": "streamlit-warehouse-v1",
+            "namespaces": {
+              "data": {
+                "provider": "x",
+                "registrations": {
+                  "x": {
+                    "implements": [
+                      "data.write",
+                      "data.query"
+                    ]
+                  }
+                }
+              }
+            },
+            "transport_status": "supported"
+          },
+          "primitive": "data.query",
+          "dictionary_inline": {
+            "kind": "canonical",
+            "version": 1,
+            "stage": 1,
+            "primitives": [
+              {
+                "name": "data.write",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation"
+              },
+              {
+                "name": "data.query",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only"
+              }
+            ]
+          }
+        },
+        {
+          "host_state": {
+            "host": "embed",
+            "revision": "rev-A",
+            "principal_id": "principal-a",
+            "authority_mode": "owner_rights",
+            "preflight": "durable_mutation_store_ready",
+            "projection": "streamlit-warehouse-v1",
+            "namespaces": {
+              "data": {
+                "provider": "x",
+                "registrations": {
+                  "x": {
+                    "implements": [
+                      "data.write",
+                      "data.query"
+                    ]
+                  }
+                }
+              }
+            },
+            "transport_status": "supported"
+          },
+          "primitive": "data.write",
+          "dictionary_inline": {
+            "kind": "canonical",
+            "version": 1,
+            "stage": 1,
+            "primitives": [
+              {
+                "name": "data.write",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation"
+              },
+              {
+                "name": "data.query",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only"
+              }
+            ]
+          }
+        }
+      ],
+      "expect": [
+        {
+          "support": "unsupported",
+          "reason": "capability_unavailable",
+          "remediation": "none"
+        },
+        {
+          "support": "unsupported",
+          "reason": "capability_unavailable",
+          "remediation": "none"
+        },
+        {
+          "support": "supported",
+          "reason": null,
+          "remediation": "none"
+        },
+        {
+          "support": "supported",
+          "reason": null,
+          "remediation": "none"
+        }
+      ]
+    },
+    {
+      "id": "omitted-transport-evidence-fails-closed",
+      "expectation": "target",
+      "operation": "preflight",
+      "document_kind": "canonical",
+      "ruling": "#337 evidence ladder ruling",
+      "carries_invalid_host_state": true,
+      "description": "A descriptor naming a projection but omitting transport_status must not resolve supported. The previous version blocked only an explicit \"proposed\", so the safety property depended on every producer remembering a newly optional field -- the exact failure class this contract removes. The schema now requires the field AND the resolver fails closed on its absence, because a value reaches a resolver before any schema does.",
+      "input": [
+        {
+          "host_state": {
+            "host": "embed",
+            "revision": "rev-A",
+            "principal_id": "principal-a",
+            "authority_mode": "owner_rights",
+            "preflight": "durable_mutation_store_ready",
+            "projection": "streamlit-warehouse-v1",
+            "namespaces": {
+              "data": {
+                "provider": "x",
+                "registrations": {
+                  "x": {
+                    "implements": [
+                      "data.write",
+                      "data.query"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "primitive": "data.query",
+          "dictionary_inline": {
+            "kind": "canonical",
+            "version": 1,
+            "stage": 1,
+            "primitives": [
+              {
+                "name": "data.write",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation"
+              },
+              {
+                "name": "data.query",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only"
+              }
+            ]
+          }
+        },
+        {
+          "host_state": {
+            "host": "embed",
+            "revision": "rev-A",
+            "principal_id": "principal-a",
+            "authority_mode": "owner_rights",
+            "preflight": "durable_mutation_store_ready",
+            "projection": "streamlit-warehouse-v1",
+            "namespaces": {
+              "data": {
+                "provider": "x",
+                "registrations": {
+                  "x": {
+                    "implements": [
+                      "data.write",
+                      "data.query"
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "primitive": "data.write",
+          "dictionary_inline": {
+            "kind": "canonical",
+            "version": 1,
+            "stage": 1,
+            "primitives": [
+              {
+                "name": "data.write",
+                "capability_class": "privileged",
+                "portable": false,
+                "effect": "mutation"
+              },
+              {
+                "name": "data.query",
+                "capability_class": "portable",
+                "portable": true,
+                "effect": "read_only"
+              }
+            ]
+          }
+        }
+      ],
+      "expect": [
+        {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        },
+        {
+          "support": "unsupported",
+          "reason": "capability_unavailable"
+        }
+      ]
+    },
+    {
+      "id": "selected-provider-projects-its-effective-descriptor",
+      "expectation": "target",
+      "operation": "resolve",
+      "document_kind": "canonical",
+      "ruling": "#353 provider-resolved schema projection",
+      "description": "Availability and executable schema travel together. A selected provider may add an explicitly declared parameter, and the resolved descriptor identifies that provider registration as its source.",
+      "input": {
+        "primitive": "data.query",
+        "dictionary_inline": {
+          "kind": "canonical",
+          "version": 1,
+          "stage": 1,
+          "primitives": [
+            {
+              "name": "data.query",
+              "namespace": "data",
+              "version": 1,
+              "capability_class": "privileged",
+              "portable": false,
+              "effect": "read_only",
+              "summary": "Run a registered query.",
+              "input_schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": { "name": { "type": "string" } },
+                "additionalProperties": false
+              }
+            }
+          ]
+        },
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-provider-descriptor",
+          "installation_id": "installation-a",
+          "principal_id": "principal-a",
+          "authority_mode": "caller_rights",
+          "namespaces": {
+            "data": {
+              "provider": "snowflake-provider",
+              "registrations": {
+                "snowflake-provider": {
+                  "implements": ["data.query"],
+                  "descriptors": {
+                    "data.query": {
+                      "summary": "Run a registered Snowflake query.",
+                      "input_schema": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                          "name": { "type": "string", "minLength": 1 },
+                          "warehouse": { "type": "string" }
+                        },
+                        "additionalProperties": false
+                      },
+                      "extensions": {
+                        "input": {
+                          "warehouse": {
+                            "authority": "additional_policy",
+                            "effect": "same_as_primitive"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "support": "supported",
+        "reason": null,
+        "decided_by": "provider_registration",
+        "remediation": "none",
+        "descriptor": {
+          "summary": "Run a registered Snowflake query.",
+          "input_schema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "warehouse": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "source": "provider_registration",
+          "provider_extensions": {
+            "warehouse": {
+              "authority": "additional_policy",
+              "effect": "same_as_primitive"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "narrowed-provider-retains-its-effective-descriptor",
+      "expectation": "target",
+      "operation": "resolve",
+      "document_kind": "canonical",
+      "ruling": "#353 provider-resolved schema projection",
+      "description": "A later transport narrowing changes support, not the selected executable contract. Diagnostics and stale-catalog reconciliation still identify the exact effective provider descriptor.",
+      "input": {
+        "primitive": "data.query",
+        "dictionary_inline": {
+          "kind": "canonical",
+          "version": 1,
+          "stage": 1,
+          "primitives": [
+            {
+              "name": "data.query",
+              "namespace": "data",
+              "version": 1,
+              "capability_class": "privileged",
+              "portable": false,
+              "effect": "read_only",
+              "summary": "Run a registered query.",
+              "input_schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": { "name": { "type": "string" } },
+                "additionalProperties": false
+              }
+            }
+          ]
+        },
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-provider-descriptor",
+          "installation_id": "installation-a",
+          "principal_id": "principal-a",
+          "authority_mode": "caller_rights",
+          "projection": "streamlit-warehouse-v1",
+          "transport_status": "proposed",
+          "namespaces": {
+            "data": {
+              "provider": "snowflake-provider",
+              "registrations": {
+                "snowflake-provider": {
+                  "implements": ["data.query"],
+                  "descriptors": {
+                    "data.query": {
+                      "summary": "Run a registered Snowflake query.",
+                      "input_schema": {
+                        "type": "object",
+                        "required": ["name"],
+                        "properties": {
+                          "name": { "type": "string", "minLength": 1 },
+                          "warehouse": { "type": "string" }
+                        },
+                        "additionalProperties": false
+                      },
+                      "extensions": {
+                        "input": {
+                          "warehouse": {
+                            "authority": "additional_policy",
+                            "effect": "same_as_primitive"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "expect": {
+        "support": "unsupported",
+        "reason": "capability_unavailable",
+        "decided_by": "host_state",
+        "remediation": "none",
+        "descriptor": {
+          "summary": "Run a registered Snowflake query.",
+          "input_schema": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1 },
+              "warehouse": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
+          "source": "provider_registration",
+          "provider_extensions": {
+            "warehouse": {
+              "authority": "additional_policy",
+              "effect": "same_as_primitive"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "provider-descriptor-retype-fails-cross-language",
+      "expectation": "target",
+      "operation": "resolve",
+      "document_kind": "canonical",
+      "description": "A provider cannot retype a canonical parameter; every resolver returns the same contract error.",
+      "input": {
+        "primitive": "data.query",
+        "dictionary_inline": {
+          "kind": "canonical",
+          "version": 1,
+          "stage": 1,
+          "primitives": [{
+            "name": "data.query",
+            "namespace": "data",
+            "capability_class": "privileged",
+            "portable": false,
+            "effect": "read_only",
+            "summary": "Run a named query.",
+            "input_schema": {
+              "type": "object",
+              "properties": { "name": { "type": "string" } },
+              "required": ["name"],
+              "additionalProperties": false
+            }
+          }]
+        },
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-negative-descriptor",
+          "namespaces": {
+            "data": {
+              "provider": "p",
+              "registrations": {
+                "p": {
+                  "implements": ["data.query"],
+                  "descriptors": {
+                    "data.query": {
+                      "input_schema": {
+                        "type": "object",
+                        "properties": { "name": { "type": "number" } },
+                        "required": ["name"],
+                        "additionalProperties": false
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "expect": { "contract_error": "incompatible_provider_descriptor" }
+    },
+    {
+      "id": "provider-descriptor-boolean-is-not-a-json-number",
+      "expectation": "target",
+      "operation": "resolve",
+      "document_kind": "canonical",
+      "description": "Python bool/int equivalence cannot make a boolean numeric bound conform where JavaScript rejects it.",
+      "input": {
+        "primitive": "data.query",
+        "dictionary_inline": {
+          "kind": "canonical",
+          "version": 1,
+          "stage": 1,
+          "primitives": [{
+            "name": "data.query",
+            "namespace": "data",
+            "capability_class": "privileged",
+            "portable": false,
+            "effect": "read_only",
+            "summary": "Run a numbered query.",
+            "input_schema": {
+              "type": "object",
+              "properties": { "limit": { "type": "number", "minimum": 1 } },
+              "required": ["limit"],
+              "additionalProperties": false
+            }
+          }]
+        },
+        "host_state": {
+          "host": "embed",
+          "revision": "rev-negative-descriptor",
+          "namespaces": {
+            "data": {
+              "provider": "p",
+              "registrations": {
+                "p": {
+                  "implements": ["data.query"],
+                  "descriptors": {
+                    "data.query": {
+                      "input_schema": {
+                        "type": "object",
+                        "properties": { "limit": { "type": "number", "minimum": true } },
+                        "required": ["limit"],
+                        "additionalProperties": false
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "expect": { "contract_error": "incompatible_provider_descriptor" }
+    }
+  ],
+  "schemas": {
+    "corpus": "./schemas/vector-corpus.schema.json",
+    "vector_case": "./schemas/vector-case.schema.json",
+    "canonical_document": "./schemas/canonical-document.schema.json",
+    "resolved_catalog": "./schemas/resolved-catalog.schema.json",
+    "host_state": "./schemas/host-state.schema.json",
+    "request_receipt": "./schemas/request-receipt.schema.json",
+    "resolution": "./schemas/resolution.schema.json",
+    "fingerprint": "./schemas/fingerprint.spec.md",
+    "golden_fingerprints": "./schemas/golden-fingerprints.json"
+  },
+  "path_base": "repository_root",
+  "operations": {
+    "note": "Every vector declares an operation so a harness executes it rather than interpreting prose. This list is exactly the operations vectors USE: a kind declared here and dispatched by nobody is indistinguishable from a passing suite.",
+    "kinds": [
+      "call_sequence",
+      "catalog",
+      "concurrent_calls",
+      "cross_projection_parity",
+      "format_catalog",
+      "host_descriptor_validation",
+      "parse_document",
+      "preflight",
+      "redaction_check",
+      "resolve"
+    ]
+  }
+}

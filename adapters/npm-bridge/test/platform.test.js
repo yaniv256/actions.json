@@ -23,25 +23,25 @@ test('unsupported platforms return null (so the CLI can fall back)', () => {
 });
 
 test('windows binary carries .exe; others do not', () => {
-  assert.strictEqual(binaryName('win-x64'), 'actions-json-mcp.exe');
-  assert.strictEqual(binaryName('linux-x64'), 'actions-json-mcp');
-  assert.strictEqual(binaryName('macos-arm64'), 'actions-json-mcp');
+  assert.strictEqual(binaryName('win-x64'), 'actions-json.exe');
+  assert.strictEqual(binaryName('linux-x64'), 'actions-json');
+  assert.strictEqual(binaryName('macos-arm64'), 'actions-json');
 });
 
 test('asset file name matches package-mcp-bridge.sh pattern (.tar.gz everywhere)', () => {
   assert.strictEqual(
     assetFileName('0.1.118', 'linux-x64'),
-    'actions-json-mcp-0.1.118-linux-x64.tar.gz'
+    'actions-json-0.1.118-linux-x64.tar.gz'
   );
   assert.strictEqual(
     assetFileName('0.1.118', 'win-x64'),
-    'actions-json-mcp-0.1.118-win-x64.tar.gz'
+    'actions-json-0.1.118-win-x64.tar.gz'
   );
 });
 
 test('download URL targets the extension-v<version> release tag', () => {
   assert.strictEqual(
     downloadUrl('0.1.118', 'macos-arm64'),
-    'https://github.com/yaniv256/actions.json/releases/download/extension-v0.1.118/actions-json-mcp-0.1.118-macos-arm64.tar.gz'
+    'https://github.com/yaniv256/actions.json/releases/download/extension-v0.1.118/actions-json-0.1.118-macos-arm64.tar.gz'
   );
 });

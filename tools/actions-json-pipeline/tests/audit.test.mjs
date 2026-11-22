@@ -10,6 +10,7 @@ import {
   auditBroadSelectors,
   auditFallbacksShareDeadScope,
   auditLossyProjections,
+  auditRouteScopeClosure,
   auditUnadvertisedProjections,
   runAudit,
 } from "../src/audit.mjs";
@@ -17,6 +18,57 @@ import { loadPipelineTarget } from "../src/storage-loader.mjs";
 
 const execFileAsync = promisify(execFile);
 const fixturesRoot = path.resolve("tools/actions-json-pipeline/fixtures");
+
+test("audit rejects maps that navigate outside their own catalog scope", () => {
+  const broken = {
+    scope: { url_matches: "https://trello.com/b/*" },
+    tools: [],
+    state_projections: [
+      {
+        name: "trello.board",
+        scope: { url_matches: "https://trello.com/b/*" },
+        postconditions: {
+          "trello.card.open": { projection: "trello.card" },
+        },
+      },
+      {
+        name: "trello.card",
+        scope: { url_matches: "https://trello.com/c/*" },
+      },
+    ],
+  };
+
+  const [finding] = auditRouteScopeClosure(broken);
+  assert.equal(finding.code, "route_scope_not_closed");
+  assert.equal(finding.action, "trello.card.open");
+  assert.deepEqual(finding.evidence, {
+    map_scope: "https://trello.com/b/*",
+    destination_projection: "trello.card",
+    destination_scope: "https://trello.com/c/*",
+  });
+});
+
+test("audit accepts broad catalogs with narrowly scoped route projections", () => {
+  const closed = {
+    scope: { url_matches: "https://trello.com/*" },
+    tools: [],
+    state_projections: [
+      {
+        name: "trello.board",
+        scope: { url_matches: "https://trello.com/b/*" },
+        postconditions: {
+          "trello.card.open": { projection: "trello.card" },
+        },
+      },
+      {
+        name: "trello.card",
+        scope: { url_matches: "https://trello.com/c/*" },
+      },
+    ],
+  };
+
+  assert.deepEqual(auditRouteScopeClosure(closed), []);
+});
 
 test("audit flags broad generic and unscoped modal selectors", async () => {
   const context = await loadPipelineTarget(path.join(fixturesRoot, "bad-map"));

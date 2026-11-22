@@ -7893,6 +7893,98 @@ test("pointer.click resolves locator identity after a control moves and selects 
   await expect(page.evaluate(() => document.body.dataset.deleted)).resolves.toBe("second");
 });
 
+test("pointer.click rejects a locator with unsupported keys instead of clicking the first interactive element", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [{ name: "pointer.click", input_schema: { type: "object" } }],
+  });
+  await connectRuntime(page);
+
+  // The logo link comes first in DOM order — exactly what an identity-less
+  // locator used to resolve to.
+  await page.setContent(`
+    <a href="#home" style="position:absolute;left:10px;top:10px;width:48px;height:48px"
+       onclick="document.body.dataset.logoClicked = 'yes'; return false;">logo</a>
+    <button style="position:absolute;left:300px;top:100px;width:140px;height:36px"
+       onclick="document.body.dataset.createClicked = 'yes'">Create Token</button>
+  `);
+
+  await callRuntimeAction(page, "role-name-click", "pointer.click", {
+    locator: { role: "button", name: "Create Token" },
+  });
+  const roleName = await readExtensionActionOutput(page, "role-name-click");
+  expect(roleName).toMatchObject({
+    ok: false,
+    primitive: "pointer.click",
+    error: {
+      code: "invalid_locator",
+      evidence: { unknown_keys: ["role", "name"] },
+    },
+  });
+
+  await callRuntimeAction(page, "css-click", "pointer.click", {
+    locator: { css: "input", match_index: 0 },
+  });
+  const css = await readExtensionActionOutput(page, "css-click");
+  expect(css).toMatchObject({
+    ok: false,
+    error: { code: "invalid_locator", evidence: { unknown_keys: ["css"] } },
+  });
+
+  await expect(page.evaluate(() => document.body.dataset.logoClicked)).resolves.toBeUndefined();
+
+  // The supported vocabulary still resolves, and the legacy top-level form
+  // keeps working alongside click options.
+  await callRuntimeAction(page, "selector-click", "pointer.click", {
+    selector: "button",
+    text_equals: "Create Token",
+    modifiers: [],
+  });
+  const selector = await readExtensionActionOutput(page, "selector-click");
+  expect(selector).toMatchObject({ ok: true, value: { clicked: true, target: { text: "Create Token" } } });
+  await expect(page.evaluate(() => document.body.dataset.createClicked)).resolves.toBe("yes");
+  await expect(page.evaluate(() => document.body.dataset.logoClicked)).resolves.toBeUndefined();
+});
+
+test("extension pointer.click matches exact text despite a duplicate aria-label and scrolls offscreen targets into view", async ({ page }) => {
+  await installRuntime(page, {
+    tools: [
+      { name: "pointer.click", input_schema: { type: "object" } },
+      { name: "locator.element_info", input_schema: { type: "object" } },
+    ],
+  });
+  await connectRuntime(page);
+  await page.setViewportSize({ width: 800, height: 600 });
+  // dash.cloudflare.com shape: aria-label repeats the visible text; and a
+  // control rendered below the fold.
+  await page.setContent(`
+    <div style="height:3000px">
+      <button aria-label="Create Token" style="position:absolute;left:20px;top:20px;width:140px;height:36px"
+        onclick="document.body.dataset.aria = 'clicked'">Create Token</button>
+      <button style="position:absolute;left:20px;top:2000px;width:140px;height:36px"
+        onclick="document.body.dataset.below = 'clicked'">Add new policy</button>
+    </div>
+  `);
+
+  await callRuntimeAction(page, "m1-aria-exact", "pointer.click", {
+    locator: { selector: "button", text_equals: "Create Token" },
+  });
+  expect(await readExtensionActionOutput(page, "m1-aria-exact")).toMatchObject({ ok: true, primitive: "pointer.click" });
+  await expect(page.evaluate(() => document.body.dataset.aria)).resolves.toBe("clicked");
+
+  await callRuntimeAction(page, "m1-partial", "locator.element_info", {
+    locator: { selector: "button", text_equals: "Create" },
+  });
+  expect(await readExtensionActionOutput(page, "m1-partial")).toMatchObject({ ok: false, error: { code: "target_not_found" } });
+
+  await callRuntimeAction(page, "m2-below", "pointer.click", {
+    locator: { selector: "button", text_contains: "Add new policy" },
+  });
+  const below = await readExtensionActionOutput(page, "m2-below");
+  expect(below).toMatchObject({ ok: true, primitive: "pointer.click" });
+  await expect(page.evaluate(() => document.body.dataset.below)).resolves.toBe("clicked");
+  await expect(page.evaluate(() => window.scrollY)).resolves.toBeGreaterThan(0);
+});
+
 test("locator.element_info filters selector candidates by text through the extension action path", async ({ page }) => {
   await installRuntime(page, {
     tools: [{ name: "locator.element_info", input_schema: { type: "object" } }],

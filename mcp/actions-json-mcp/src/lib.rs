@@ -15,10 +15,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
-    http::{
-        header::{self, HeaderValue},
-        Method, Request, StatusCode,
-    },
+    http::{header, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -40,17 +37,45 @@ use uuid::Uuid;
 
 /// Native chrome-launcher tools (browser launch / self-install / claim) merged into this MCP.
 mod chrome_launcher_tools;
+pub mod cli;
+pub mod mcp_adapter;
+pub mod operation;
+pub mod resident;
+pub mod runtime;
+pub mod state;
 
 #[derive(Parser)]
 #[command(name = "actions-json-mcp")]
 #[command(about = "actions.json MCP bridge for browser runtimes")]
-struct Cli {
+struct LegacyCli {
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Internal unitary resident mode. U6 supplies the ordinary client surface.
+    Resident {
+        #[arg(long, default_value = "127.0.0.1:17345")]
+        bind: SocketAddr,
+        #[arg(
+            long,
+            default_value = "extensions/chrome-overlay-runtime/actions/overlay.actions.json"
+        )]
+        actions: PathBuf,
+        #[arg(long = "map")]
+        maps: Vec<PathBuf>,
+        #[arg(long)]
+        storage_root: Option<PathBuf>,
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        executable_version: String,
+        #[arg(long)]
+        configuration_id: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        idle_seconds: u64,
+    },
     Serve {
         #[arg(long, default_value = "127.0.0.1:17345")]
         bind: SocketAddr,
@@ -107,6 +132,15 @@ enum Command {
 struct AppState {
     catalog: Arc<Mutex<ActionCatalog>>,
     storage_root: Option<PathBuf>,
+    operation_journal: Option<Arc<state::DurableOperationJournal>>,
+    /// Resident-only authority for cooperative profiles, stable browser
+    /// generations, and catalog snapshots. Legacy serve/MCP adapters leave it
+    /// absent and retain their historical active-tab behavior.
+    runtime_authority: Option<Arc<runtime::RuntimeAuthority>>,
+    /// Present only in compatibility adapter processes. Browser and mutable
+    /// coordination state remain in the resident; this process keeps schemas
+    /// and JSON-RPC framing only.
+    mcp_resident: Option<mcp_adapter::ResidentMcpClient>,
     // U12: who may open /extension, and with what proof. Resolved once at
     // startup so every upgrade attempt is checked against the same policy.
     extension_auth: Arc<ExtensionAuthConfig>,
@@ -677,6 +711,18 @@ struct ToolCallRequest {
     timeout_ms: u64,
 }
 
+impl From<operation::OperationRequest> for ToolCallRequest {
+    fn from(request: operation::OperationRequest) -> Self {
+        Self {
+            name: request.name,
+            arguments: request.arguments,
+            target_runtime_id: request.target_runtime_id,
+            target_url_contains: request.target_url_contains,
+            timeout_ms: request.timeout_ms,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct ToolCallResponse {
     ok: bool,
@@ -756,9 +802,11 @@ fn action_call_message(
     name: String,
     arguments: Value,
 ) -> Value {
+    let operation_id = call_id.clone();
     json!({
         "type": "action_call",
         "call_id": call_id,
+        "operation_id": operation_id,
         "runtime_id": runtime_id,
         "name": name,
         "arguments": arguments
@@ -832,9 +880,11 @@ fn site_action_call_message(
     runtime_id: String,
     dispatch: &SiteActionDispatch,
 ) -> Value {
+    let operation_id = call_id.clone();
     json!({
         "type": "site_action_call",
         "call_id": call_id,
+        "operation_id": operation_id,
         "runtime_id": runtime_id,
         "action": dispatch.action,
         "arguments": dispatch.arguments,
@@ -1000,8 +1050,13 @@ fn local_protoface_credentials_from_config_file(path: &Path) -> Option<LocalProt
 }
 
 fn find_local_config_file_with_home(start: &Path, home: Option<&Path>) -> Option<PathBuf> {
-    let home_candidate = home.map(|home| home.join(".actions-json.local.json"));
+    let home_candidate = home.map(|home| home.join(".actions-json/config.json"));
     if let Some(path) = home_candidate.filter(|path| path.exists()) {
+        return Some(path);
+    }
+
+    let legacy_home_candidate = home.map(|home| home.join(".actions-json.local.json"));
+    if let Some(path) = legacy_home_candidate.filter(|path| path.exists()) {
         return Some(path);
     }
 
@@ -1063,9 +1118,7 @@ impl ExtensionAuthRejection {
 
     fn message(self) -> &'static str {
         match self {
-            Self::OriginRejected => {
-                "The browser Origin is not an allowed actions.json extension."
-            }
+            Self::OriginRejected => "The browser Origin is not an allowed actions.json extension.",
             Self::HandshakeSecretMissing => {
                 "No bridge handshake secret was provided by the extension."
             }
@@ -1134,8 +1187,8 @@ pub struct ExtensionAuthConfig {
 }
 
 impl ExtensionAuthConfig {
-    /// Read the allowed extension ids and the handshake secret from the same
-    /// `.actions-json.local.json` the bridge already reads credentials from.
+    /// Read the allowed extension ids and handshake secret from the canonical
+    /// per-user `.actions-json/config.json` configuration.
     /// `config_start` is the directory to start the upward search in; `None`
     /// means the process cwd, matching `load_local_openai_credential`.
     ///
@@ -1149,8 +1202,18 @@ impl ExtensionAuthConfig {
         // the installation the caller named.
         let config_path = match config_start {
             Some(root) => {
-                let candidate = root.join(".actions-json.local.json");
-                candidate.exists().then_some(candidate)
+                let explicit = root.join("config.json");
+                let legacy = root.join(".actions-json.local.json");
+                explicit
+                    .exists()
+                    .then_some(explicit)
+                    .or_else(|| legacy.exists().then_some(legacy))
+                    .or_else(|| {
+                        std::env::var_os("HOME")
+                            .map(PathBuf::from)
+                            .map(|home| home.join(".actions-json/config.json"))
+                            .filter(|path| path.exists())
+                    })
             }
             None => std::env::current_dir()
                 .ok()
@@ -1200,9 +1263,18 @@ impl ExtensionAuthConfig {
             .map(str::trim)
             .filter(|secret| !secret.is_empty())
             .map(str::to_string);
+        let pairing_revoked = value
+            .as_ref()
+            .and_then(|value| value.get("bridge_pairing_revoked"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
 
         let handshake_secret = match existing_secret {
             Some(secret) => secret,
+            // Revocation deliberately leaves no reusable secret on disk. The
+            // bridge still needs an unguessable comparison value, so use an
+            // ephemeral one without silently re-pairing this installation.
+            None if pairing_revoked => generate_handshake_secret(),
             None => {
                 // First run for this installation. Generate once, write it back
                 // beside the credentials, and reuse it forever after. Writing
@@ -1212,7 +1284,12 @@ impl ExtensionAuthConfig {
                 let secret = generate_handshake_secret();
                 let target = config_path
                     .clone()
-                    .or_else(|| start.map(|start| start.join(".actions-json.local.json")));
+                    .or_else(|| {
+                        std::env::var_os("HOME")
+                            .map(PathBuf::from)
+                            .map(|home| home.join(".actions-json/config.json"))
+                    })
+                    .or_else(|| start.map(|start| start.join("config.json")));
                 if let Some(target) = target {
                     persist_handshake_secret(&target, &secret);
                 }
@@ -1327,11 +1404,7 @@ impl ExtensionAuthConfig {
 /// 256 bits of v4 UUID randomness, hex, no dashes — long enough that guessing is
 /// not a strategy and printable enough to paste into extension storage.
 fn generate_handshake_secret() -> String {
-    format!(
-        "{}{}",
-        Uuid::new_v4().simple(),
-        Uuid::new_v4().simple()
-    )
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
 /// Merge the secret into the existing local config rather than rewriting it.
@@ -2283,8 +2356,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(path.starts_with(&scoped));
-        assert_eq!(std_fs::read_to_string(path).unwrap(), "payload");
+        assert!(path.path.starts_with(&scoped));
+        assert_eq!(std_fs::read_to_string(path.path).unwrap(), "payload");
         assert!(legacy.is_file());
     }
 
@@ -2366,7 +2439,7 @@ mod tests {
         assert!(envelope["payload_hash"]
             .as_str()
             .unwrap()
-            .starts_with("djb2:"));
+            .starts_with("sha256:"));
         assert!(envelope["preview"].as_str().unwrap().chars().count() <= 800);
         let path = envelope["payload_path"].as_str().unwrap();
         assert!(path.starts_with(spill_dir.path().to_str().unwrap()));
@@ -2396,7 +2469,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spill_write_failure_degrades_to_inline_result() {
+    async fn spill_write_failure_returns_bounded_error_without_inline_payload() {
         let state = payload_spill_test_state(5000);
         {
             let mut config = state.payload.lock().await;
@@ -2408,8 +2481,93 @@ mod tests {
         assert_eq!(response["result"]["isError"], json!(false));
         let result: Value = serde_json::from_str(&mcp_result_text(&response)).unwrap();
         assert!(result.get("payload_spilled").is_none());
-        assert!(result["payload_spill_error"].is_string());
-        assert!(result["output"]["blob"].as_str().unwrap().len() >= 5000);
+        assert_eq!(result["error"]["code"], "payload_spill_failed");
+        assert_eq!(result["bounded"], true);
+        assert!(result.get("output").is_none());
+    }
+
+    #[test]
+    fn successful_socket_enqueue_marks_durable_operation_nonreplayable_before_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Arc::new(
+            state::DurableOperationJournal::open(dir.path().join("state.sqlite3")).unwrap(),
+        );
+        let mut app_state = empty_state();
+        app_state.operation_journal = Some(journal.clone());
+        let call_id = "dispatch-boundary-1";
+        let operation = match journal
+            .accept(&state::OperationAcceptance {
+                request_id: call_id.into(),
+                scope: "test".into(),
+                normalized_request: json!({"name":"test.mutation","arguments":{}}),
+                profile_token: None,
+                target_generation: Some("browser/session/tab".into()),
+                catalog_revision: Some("catalog-1".into()),
+                lease_authority: None,
+                output_policy: json!({}),
+                is_mutation: true,
+            })
+            .unwrap()
+        {
+            state::AcceptOutcome::Accepted(operation) => operation,
+            _ => panic!("expected acceptance"),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(Message::Text("sent".into())).unwrap();
+        mark_durable_dispatch_enqueued(&app_state, &operation.operation_id).unwrap();
+        assert_eq!(
+            journal.get(&operation.operation_id).unwrap().unwrap().state,
+            state::LifecycleState::Dispatched
+        );
+        assert!(journal.replayable().unwrap().is_empty());
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn reconnect_queries_outstanding_receipts_and_absence_fails_conservatively() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal =
+            state::DurableOperationJournal::open(dir.path().join("state.sqlite3")).unwrap();
+        let call_id = "reconnect-query-1";
+        let operation = match journal
+            .accept(&state::OperationAcceptance {
+                request_id: call_id.into(),
+                scope: "test".into(),
+                normalized_request: json!({"name":"test.mutation","arguments":{}}),
+                profile_token: None,
+                target_generation: Some("old/browser/tab".into()),
+                catalog_revision: Some("catalog-1".into()),
+                lease_authority: None,
+                output_policy: json!({}),
+                is_mutation: true,
+            })
+            .unwrap()
+        {
+            state::AcceptOutcome::Accepted(operation) => operation,
+            _ => panic!("expected acceptance"),
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert_eq!(
+            send_outstanding_operation_receipt_queries(&journal, &tx).unwrap(),
+            1
+        );
+        let Message::Text(query) = rx.try_recv().unwrap() else {
+            panic!("expected text query")
+        };
+        let query: Value = serde_json::from_str(&query).unwrap();
+        assert_eq!(query["type"], "operation_receipt_query");
+        assert_eq!(query["operation_id"], operation.operation_id);
+        assert_eq!(
+            reconcile_extension_operation_receipt(
+                &journal,
+                &json!({
+                    "type":"operation_receipt","operation_id":operation.operation_id,"receipt":null
+                })
+            )
+            .unwrap(),
+            state::LifecycleState::Indeterminate
+        );
+        assert!(journal.replayable().unwrap().is_empty());
     }
 
     #[test]
@@ -4329,7 +4487,11 @@ mod tests {
             Ok(client) => panic!("expected a refusal, got {}", client.runtime_id),
             Err(error) => error,
         };
-        assert_eq!(error.0, StatusCode::NOT_FOUND, "a dead id must still REFUSE");
+        assert_eq!(
+            error.0,
+            StatusCode::NOT_FOUND,
+            "a dead id must still REFUSE"
+        );
         let body = error.1 .0;
         assert_eq!(
             body["successor_runtime_id"].as_str(),
@@ -4402,7 +4564,8 @@ mod tests {
 
         let out = read.0.output.clone().unwrap();
         assert_eq!(
-            out["active_runtime_id"], Value::Null,
+            out["active_runtime_id"],
+            Value::Null,
             "a stale active must READ as null, not as some arbitrary survivor",
         );
         assert_eq!(
@@ -4474,7 +4637,10 @@ mod tests {
             props["operation"]["enum"],
             json!(["roots", "node", "neighbors", "traverse"])
         );
-        assert_eq!(props["direction"]["enum"], json!(["outgoing", "incoming", "both"]));
+        assert_eq!(
+            props["direction"]["enum"],
+            json!(["outgoing", "incoming", "both"])
+        );
         assert_eq!(props["edge_types"]["type"], "array");
         assert_eq!(props["max_depth"]["type"], "integer");
         assert_eq!(props["measure_filter"]["type"], "object");
@@ -4510,14 +4676,9 @@ mod tests {
         assert_eq!(first["page"]["page_size"], 2);
         assert_eq!(first["page"]["has_more"], true);
         let continuation = first["page"]["continuation"].as_str().unwrap();
-        let second = bounded_site_action_listing(
-            actions.clone(),
-            "card",
-            2,
-            Some(continuation),
-            4_096,
-        )
-        .expect("second page");
+        let second =
+            bounded_site_action_listing(actions.clone(), "card", 2, Some(continuation), 4_096)
+                .expect("second page");
         assert_ne!(first["actions"], second["actions"]);
 
         let mut changed = actions;
@@ -4557,6 +4718,94 @@ mod tests {
     #[test]
     fn default_timeout_ms_is_thirty_seconds() {
         assert_eq!(default_timeout_ms(), 30_000);
+    }
+
+    #[tokio::test]
+    async fn screenshot_data_url_becomes_image_block_and_png_file_not_json_spill() {
+        // 1x1 transparent PNG.
+        const PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+        let data_url = format!("data:image/png;base64,{PNG_B64}");
+        let state = state_from_catalog(
+            ActionCatalog {
+                base_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                map_paths: Vec::new(),
+                manifest: json!({
+                    "protocol": "actions.json",
+                    "tools": [{
+                        "name": "test.static_screenshot",
+                        "description": "Static screenshot for image extraction tests.",
+                        "input_schema": { "type": "object" },
+                        "x_actions": { "static_output": { "data_url": data_url, "width": 1 } }
+                    }]
+                }),
+                site_manifest: json!({ "protocol": "actions.json", "tools": [] }),
+                site_action_names: HashSet::new(),
+            },
+            Vec::new(),
+            None,
+        );
+        let scoped = tempfile::tempdir().unwrap();
+        {
+            let mut config = state.payload.lock().await;
+            config.inline_limit_bytes = 50_000;
+            config.payload_dir = scoped.path().join("payloads");
+        }
+        let response = mcp_call_tool(state, "test.static_screenshot", json!({})).await;
+        let content = response["result"]["content"].as_array().unwrap();
+        let text = content[0]["text"].as_str().unwrap();
+        assert!(
+            !text.contains(PNG_B64),
+            "base64 must not stay in the JSON text: {text}"
+        );
+        assert!(text.contains("<image written to "), "{text}");
+        let image = content
+            .iter()
+            .find(|block| block["type"] == json!("image"))
+            .expect("an MCP image content block");
+        assert_eq!(image["mimeType"], json!("image/png"));
+        assert_eq!(image["data"], json!(PNG_B64));
+        let body: Value = serde_json::from_str(text).unwrap();
+        let path = body["image_paths"][0]
+            .as_str()
+            .expect("image path recorded");
+        assert!(path.ends_with(".png"), "{path}");
+        let written = std_fs::read(path).unwrap();
+        assert_eq!(written, BASE64_STANDARD.decode(PNG_B64).unwrap());
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_call_reports_resident_failure_as_visible_tool_error() {
+        let mut state = payload_spill_test_state(10);
+        state.mcp_resident = Some(mcp_adapter::ResidentMcpClient::new(
+            resident::Client::new(
+                std::env::temp_dir().join("actions-json-no-such-resident.sock"),
+                Duration::from_millis(500),
+            ),
+            "test",
+        ));
+        let response = mcp_call_tool(state, "page.info", json!({})).await;
+        assert!(
+            response.get("error").is_none(),
+            "a resident failure must not be a JSON-RPC protocol error (clients hide error.data): {response}"
+        );
+        assert_eq!(response["result"]["isError"], json!(true));
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .expect("text content");
+        let body: Value = serde_json::from_str(text).expect("json body");
+        assert_eq!(body["error"]["code"], json!("resident_operation_failed"));
+        let detail = body["error"]["detail"].as_str().unwrap_or_default();
+        assert!(
+            !detail.is_empty(),
+            "the underlying reason must be visible: {text}"
+        );
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(detail),
+            "message must carry the reason, not only the generic prefix: {text}"
+        );
     }
 
     #[tokio::test]
@@ -4982,12 +5231,88 @@ mod tests {
             "no replay internals in the agent view"
         );
     }
+
+    #[test]
+    fn resident_catalog_snapshot_is_target_specific() {
+        let manifest = json!({
+            "protocol":"actions.json",
+            "tools":[
+                {"name":"browser.read","input_schema":{"type":"object"}},
+                {"name":"trello.card.read","x_actions":{"binding":{"target_url_contains":"trello.com","url_matches":"https://trello.com/b/*"}}},
+                {"name":"linkedin.post.read","x_actions":{"binding":{"target_url_contains":"linkedin.com"}}}
+            ]
+        });
+        let trello = catalog_snapshot_for_target(&manifest, Some("https://trello.com/b/board"));
+        let names = trello["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["browser.read", "trello.card.read"]);
+        let options_page = catalog_snapshot_for_target(&manifest, None);
+        let names = options_page["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["browser.read"]);
+    }
 }
 
 pub async fn run_cli() -> Result<()> {
-    let cli = Cli::parse();
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let is_legacy = arguments
+        .first()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| {
+            matches!(
+                value,
+                "resident" | "serve" | "mcp" | "open-overlay" | "list-tools"
+            )
+        });
+    if !is_legacy {
+        let exit = cli::run_process(arguments).await;
+        if exit != 0 {
+            std::process::exit(exit);
+        }
+        return Ok(());
+    }
+    let cli = LegacyCli::parse();
 
     match cli.command {
+        Command::Resident {
+            bind,
+            actions,
+            maps,
+            storage_root,
+            state_dir,
+            executable_version,
+            configuration_id,
+            idle_seconds,
+        } => {
+            let failure_state_dir = state_dir.clone();
+            let result = run_resident(
+                bind,
+                actions,
+                maps,
+                storage_root,
+                state_dir,
+                executable_version,
+                configuration_id,
+                idle_seconds,
+            )
+            .await;
+            if let Err(error) = &result {
+                let _ = resident::lifecycle::record_startup_failure(
+                    &failure_state_dir,
+                    "resident_startup_failed",
+                    &error.to_string(),
+                );
+            }
+            result
+        }
         Command::Serve {
             bind,
             actions,
@@ -5036,12 +5361,553 @@ pub async fn run_cli() -> Result<()> {
     }
 }
 
+#[derive(Clone)]
+struct CanonicalResidentHandler {
+    state: AppState,
+}
+
+fn coordination_error_result(error: &runtime::CoordinationError) -> Value {
+    json!({
+        "ok": false,
+        "error": {
+            "code": error.code(),
+            "message": error.to_string(),
+            "details": error.details(),
+        }
+    })
+}
+
+impl CanonicalResidentHandler {
+    async fn execute(
+        &self,
+        mut envelope: Value,
+        adapter: resident::IngressAdapter,
+    ) -> Result<Value> {
+        // Attribution belongs to the transport boundary. These legacy fields
+        // are stripped even when a caller forges them; they can never select
+        // audit scope or canonical admission semantics.
+        if let Some(object) = envelope.as_object_mut() {
+            object.remove("_adapter");
+            object.remove("_client_version");
+        }
+        let adapter = adapter.as_str();
+        let operation_name = envelope
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let mut resolved_target = None;
+        let mut explicit_selector = None;
+        if operation_name == "resident.system.status" {
+            let runtimes = self.state.runtimes.lock().await;
+            let active = self.state.active_runtime_id.lock().await.clone();
+            let connected=runtimes.values().map(|runtime|json!({"runtime_id":runtime.runtime_id,"extension_version":runtime.extension_version,"url":runtime.url,"connected_at_ms":runtime.connected_at_ms,"last_seen_ms":runtime.last_seen_ms})).collect::<Vec<_>>();
+            return Ok(
+                json!({"ok":true,"extension":{"connected":!connected.is_empty(),"runtimes":connected,"active_runtime_id":active},"bounded":true,"redacted":true}),
+            );
+        }
+        if let Some(authority) = &self.state.runtime_authority {
+            match authority.handle_control_operation(&envelope) {
+                Ok(Some(result)) => return Ok(result),
+                Err(error) => return Ok(coordination_error_result(&error)),
+                Ok(None) => {}
+            }
+            let has_canonical_routing = [
+                "profile",
+                "profile_token",
+                "target_id",
+                "target_runtime_id",
+                "target_url_contains",
+                "target_generation",
+                "catalog_revision",
+            ]
+            .into_iter()
+            .any(|key| envelope.get(key).is_some());
+            if has_canonical_routing {
+                let profile_name = envelope.get("profile").and_then(Value::as_str);
+                let profile_token = envelope.get("profile_token").and_then(Value::as_str);
+                let profile = match (profile_name, profile_token) {
+                    (Some(name), Some(token)) => Some((name, token)),
+                    (None, None) => None,
+                    _ => {
+                        return Ok(
+                            json!({"ok":false,"error":{"code":"invalid_input","message":"profile and profile_token must be supplied together"}}),
+                        )
+                    }
+                };
+                let explicit = envelope
+                    .get("target_id")
+                    .and_then(Value::as_str)
+                    .map(|value| runtime::TargetSelector::TargetId(value.to_string()))
+                    .or_else(|| {
+                        envelope
+                            .get("target_runtime_id")
+                            .and_then(Value::as_str)
+                            .map(|value| runtime::TargetSelector::RuntimeId(value.to_string()))
+                    })
+                    .or_else(|| {
+                        envelope
+                            .get("target_url_contains")
+                            .and_then(Value::as_str)
+                            .map(|value| runtime::TargetSelector::Intent(value.to_string()))
+                    });
+                explicit_selector = explicit.clone();
+                let target = match authority.resolve_target(
+                    profile,
+                    explicit,
+                    envelope.get("target_generation").and_then(Value::as_str),
+                    envelope.get("catalog_revision").and_then(Value::as_str),
+                ) {
+                    Ok(target) => target,
+                    Err(error) => return Ok(coordination_error_result(&error)),
+                };
+                envelope["target_runtime_id"] = json!(target.runtime_id.clone());
+                resolved_target = Some(target);
+            } else if matches!(adapter, "mcp" | "http") && !operation_is_read_only(&operation_name)
+            {
+                // Preserve the established compatibility contract for MCP and
+                // authenticated HTTP callers: a targetless mutation follows
+                // the bridge's active runtime. Convert that ambient choice to
+                // a stable target before durable admission; CLI callers remain
+                // explicit/profile-scoped because they may run concurrently.
+                if let Some(runtime_id) = self.state.active_runtime_id.lock().await.clone() {
+                    let selector = runtime::TargetSelector::RuntimeId(runtime_id);
+                    let target =
+                        match authority.resolve_target(None, Some(selector.clone()), None, None) {
+                            Ok(target) => target,
+                            Err(error) => return Ok(coordination_error_result(&error)),
+                        };
+                    envelope["target_runtime_id"] = json!(target.runtime_id.clone());
+                    explicit_selector = Some(selector);
+                    resolved_target = Some(target);
+                }
+            }
+        }
+        if matches!(adapter, "cli" | "mcp" | "http") && !operation_is_read_only(&operation_name) {
+            let Some(authority) = self.state.runtime_authority.as_ref() else {
+                return Ok(
+                    json!({"ok":false,"error":{"code":"resident_authority_unavailable","message":"canonical mutation authority is unavailable"}}),
+                );
+            };
+            let Some(target) = resolved_target.as_ref() else {
+                return Ok(explicit_target_required_result(authority));
+            };
+            let request_id = envelope
+                .get("request_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("CLI mutation omitted request_id"))?
+                .to_string();
+            let caller = match (
+                envelope.get("profile").and_then(Value::as_str),
+                envelope.get("profile_token").and_then(Value::as_str),
+            ) {
+                (Some(name), Some(token)) => Some(runtime::MutationCaller::profile(name, token)),
+                (None, None) => None,
+                _ => {
+                    return Ok(
+                        json!({"ok":false,"error":{"code":"invalid_input","message":"profile and profile_token must be supplied together"}}),
+                    )
+                }
+            };
+            let acceptance = state::OperationAcceptance {
+                request_id: request_id.clone(),
+                scope: "canonical".into(),
+                normalized_request: json!({"name":operation_name,"arguments":envelope.get("arguments").cloned().unwrap_or_else(||json!({}))}),
+                profile_token: None,
+                target_generation: Some(target.target_generation.clone()),
+                catalog_revision: Some(target.catalog_revision.clone()),
+                lease_authority: None,
+                output_policy: envelope.get("output_policy").cloned().unwrap_or_else(
+                    || json!({"max_inline_bytes":DEFAULT_PAYLOAD_INLINE_LIMIT_BYTES}),
+                ),
+                is_mutation: true,
+            };
+            let admission = match authority.admit_mutation(
+                &acceptance,
+                caller,
+                explicit_selector,
+                envelope.get("lease_token").and_then(Value::as_str),
+            ) {
+                Ok(value) => value,
+                Err(error) => return Ok(coordination_error_result(&error)),
+            };
+            if let Some(previous) = authority
+                .known_operation_result(&admission.operation_id)
+                .map_err(|error| anyhow!(error.to_string()))?
+            {
+                return Ok(
+                    json!({"ok":true,"operation_id":admission.operation_id,"request_id":request_id,"status":"terminal","result":previous,"target_generation":admission.target_generation,"catalog_revision":admission.catalog_revision}),
+                );
+            }
+            let queue_timeout = Duration::from_millis(
+                envelope
+                    .get("timeout_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(default_timeout_ms()),
+            );
+            if authority
+                .wait_to_claim_mutation(
+                    &admission.target_id,
+                    &admission.operation_id,
+                    queue_timeout,
+                )
+                .await
+                .map_err(|error| anyhow!(error.to_string()))?
+                .is_none()
+            {
+                return Ok(
+                    json!({"ok":false,"status":"accepted","operation_id":admission.operation_id,"request_id":request_id,"error":{"code":"mutation_queue_wait_timeout","message":"mutation remains durably accepted behind earlier work"}}),
+                );
+            }
+            let request: operation::OperationRequest =
+                serde_json::from_value(envelope).context("decode canonical operation envelope")?;
+            let mut dispatch_state = self.state.clone();
+            dispatch_state.operation_journal = None;
+            let raw =
+                match tools_call_inner(State(dispatch_state), Json(ToolCallRequest::from(request)))
+                    .await
+                {
+                    Ok(Json(response)) => serde_json::to_value(response)?,
+                    Err((status, Json(error))) => {
+                        json!({"ok":false,"status":status.as_u16(),"error":error})
+                    }
+                };
+            if raw.get("status").and_then(Value::as_u64) == Some(504)
+                || raw.pointer("/error/failure_class").and_then(Value::as_str)
+                    == Some("mutation_outcome_indeterminate")
+            {
+                authority
+                    .mark_mutation_indeterminate(&admission.operation_id)
+                    .map_err(|error| anyhow!(error.to_string()))?;
+                return Ok(
+                    json!({"ok":false,"status":"indeterminate","operation_id":admission.operation_id,"request_id":request_id,"error":raw.get("error").cloned().unwrap_or(raw)}),
+                );
+            }
+            let completion = authority
+                .complete_mutation(&admission.operation_id, &raw)
+                .map_err(|error| anyhow!(error.to_string()))?;
+            return Ok(
+                json!({"ok":raw.get("ok").and_then(Value::as_bool).unwrap_or(false),"status":"terminal","operation_id":admission.operation_id,"request_id":request_id,"result":raw,"target_generation":admission.target_generation,"catalog_revision":admission.catalog_revision,"mutation_revision":completion.mutation_revision,"interference":completion.interference}),
+            );
+        }
+        let request: operation::OperationRequest =
+            serde_json::from_value(envelope).context("decode canonical operation envelope")?;
+        match tools_call_inner(
+            State(self.state.clone()),
+            Json(ToolCallRequest::from(request)),
+        )
+        .await
+        {
+            Ok(Json(response)) => Ok(serde_json::to_value(response)?),
+            Err((status, Json(error))) => {
+                Ok(json!({ "ok": false, "status": status.as_u16(), "error": error }))
+            }
+        }
+    }
+}
+
+fn operation_is_read_only(name: &str) -> bool {
+    name.starts_with("resident.")
+        || [
+            ".read",
+            ".list",
+            ".get",
+            ".status",
+            ".inspect",
+            ".search",
+            ".describe",
+            ".project",
+            ".map",
+        ]
+        .iter()
+        .any(|marker| name.ends_with(marker))
+}
+
+#[cfg(test)]
+mod canonical_cli_mutation_tests {
+    use super::*;
+    use crate::resident::ResidentHandler;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn every_adapter_mutation_traverses_the_same_canonical_lifecycle() {
+        let root = tempdir().unwrap();
+        let manifest = json!({"protocol":"actions.json","tools":[{
+            "name":"trello.card.create","description":"fixture mutation","input_schema":{"type":"object"},
+            "x_actions":{"static_output":{"created":true}}
+        }]});
+        let catalog = ActionCatalog {
+            base_manifest: manifest.clone(),
+            map_paths: vec![],
+            manifest: manifest.clone(),
+            site_manifest: json!({"protocol":"actions.json","tools":[]}),
+            site_action_names: HashSet::new(),
+        };
+        let mut state = state_from_catalog(catalog, vec![], None);
+        let authority =
+            Arc::new(runtime::RuntimeAuthority::open(root.path().join("state.sqlite3")).unwrap());
+        let target = authority
+            .observe_target(&runtime::LiveTargetObservation {
+                client_instance_id: "client-one".into(),
+                session_generation: "session-one".into(),
+                tab_key: "tab-one".into(),
+                runtime_id: "runtime-one".into(),
+                url: Some("https://trello.com/b/example".into()),
+                title: Some("Board".into()),
+                catalog: json!({"operations":[{"name":"trello.card.create"}]}),
+            })
+            .unwrap();
+        authority
+            .observe_target(&runtime::LiveTargetObservation {
+                client_instance_id: "client-two".into(),
+                session_generation: "session-two".into(),
+                tab_key: "tab-two".into(),
+                runtime_id: "runtime-two".into(),
+                url: Some("https://www.linkedin.com/feed/".into()),
+                title: Some("Feed".into()),
+                catalog: json!({"operations":[{"name":"trello.card.create"}]}),
+            })
+            .unwrap();
+        state.runtime_authority = Some(authority.clone());
+        let handler = CanonicalResidentHandler { state };
+        for (index, adapter) in [
+            resident::IngressAdapter::Cli,
+            resident::IngressAdapter::Mcp,
+            resident::IngressAdapter::Http,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let request_id = format!("adapter-proof-{index}");
+            let value=handler.handle_ingress(json!({
+                "_adapter":"forged-other","_client_version":"forged","name":"trello.card.create","arguments":{"title":"owned fixture"},
+                "request_id":request_id,"target_url_contains":"trello.com","target_generation":target.target_generation,"catalog_revision":target.catalog_revision
+            }), resident::IngressContext { adapter, client_version: Some(env!("CARGO_PKG_VERSION").into()) }).await.unwrap();
+            assert_eq!(value["ok"], true, "{}", value);
+            assert_eq!(value["status"], "terminal");
+            assert_eq!(value["mutation_revision"], (index + 1) as u64);
+            assert_eq!(value["target_generation"], target.target_generation);
+            assert!(value["operation_id"].as_str().unwrap().starts_with("ajo_"));
+            assert_eq!(
+                value["interference"]["current_revision"],
+                (index + 1) as u64
+            );
+            let status = authority
+                .operation_status(value["operation_id"].as_str().unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(status.state, state::LifecycleState::Terminal);
+        }
+        let audit = authority.audit_entries(10).unwrap();
+        assert!(audit
+            .iter()
+            .any(|entry| entry["adapter"] == "cli" && entry["operation"] == "trello.card.create"));
+        assert!(audit
+            .iter()
+            .any(|entry| entry["adapter"] == "mcp" && entry["operation"] == "trello.card.create"));
+        assert!(audit
+            .iter()
+            .any(|entry| entry["adapter"] == "http" && entry["operation"] == "trello.card.create"));
+        assert!(!audit.iter().any(|entry| entry["adapter"] == "forged-other"));
+    }
+
+    #[test]
+    fn read_classification_keeps_common_queries_out_of_mutation_queue() {
+        assert!(operation_is_read_only("trello.card.checklist.read"));
+        assert!(operation_is_read_only("browser.claimed_tabs.list"));
+        assert!(operation_is_read_only("corpus.search"));
+        assert!(!operation_is_read_only("trello.card.create"));
+        assert!(!operation_is_read_only("clipboard.paste"));
+        assert!(!operation_is_read_only("trello.read.then_mutate"));
+    }
+
+    #[test]
+    fn authenticated_bridge_accepts_wsl_reachable_bind() {
+        assert!(ensure_loopback_bind("127.0.0.1:17345".parse().unwrap()).is_ok());
+        assert!(ensure_loopback_bind("[::1]:17345".parse().unwrap()).is_ok());
+        assert!(ensure_loopback_bind("0.0.0.0:17345".parse().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn pairing_hint_never_emits_the_handshake_secret() {
+        let temp = tempfile::tempdir().unwrap();
+        let auth = ExtensionAuthConfig::load(Some(temp.path()));
+        let secret = auth.handshake_secret().to_string();
+        let mut lines = Vec::new();
+        print_extension_pairing_hint(&auth, |line| lines.push(line.to_string()));
+        let output = lines.join("\n");
+
+        assert!(!output.contains(&secret), "pairing secret leaked to output");
+        assert!(output.contains("pairing settings"));
+        assert!(output.contains(&auth.primary_origin()));
+    }
+
+    #[test]
+    fn audit_projection_is_bounded_and_omits_operation_arguments() {
+        let metadata = audit_metadata(&json!({
+            "name": "x".repeat(2_000),
+            "request_id": "request",
+            "arguments": {"payload": "y".repeat(1_000_000)}
+        }));
+        assert!(serde_json::to_vec(&metadata).unwrap().len() < 2_000);
+        assert_eq!(metadata["name"].as_str().unwrap().chars().count(), 512);
+        assert!(metadata.get("arguments").is_none());
+    }
+}
+
+impl resident::ResidentHandler for CanonicalResidentHandler {
+    fn handle<'a>(&'a self, envelope: Value) -> resident::BoxResponseFuture<'a> {
+        self.handle_ingress(envelope, resident::IngressContext::unknown())
+    }
+
+    fn handle_ingress<'a>(
+        &'a self,
+        mut envelope: Value,
+        ingress: resident::IngressContext,
+    ) -> resident::BoxResponseFuture<'a> {
+        Box::pin(async move {
+            if let Some(object) = envelope.as_object_mut() {
+                object.remove("_adapter");
+                object.remove("_client_version");
+            }
+            let mut audit_envelope = audit_metadata(&envelope);
+            let adapter = ingress.adapter.as_str();
+            let result = self.execute(envelope, ingress.adapter).await;
+            if let Some(operation_id) = result
+                .as_ref()
+                .ok()
+                .and_then(|value| {
+                    value
+                        .pointer("/operation_id")
+                        .or_else(|| value.pointer("/admission/operation_id"))
+                })
+                .and_then(Value::as_str)
+            {
+                audit_envelope["operation_id"] = Value::String(operation_id.to_owned());
+            }
+            if let Some(authority) = &self.state.runtime_authority {
+                let outcome = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|value| value.get("ok"))
+                    .and_then(Value::as_bool)
+                    .map(|ok| if ok { "success" } else { "failure" })
+                    .unwrap_or("transport_failure");
+                let _ = authority.record_audit(
+                    adapter,
+                    ingress.client_version.as_deref(),
+                    env!("CARGO_PKG_VERSION"),
+                    &audit_envelope,
+                    outcome,
+                );
+            }
+            result
+        })
+    }
+}
+
+fn audit_metadata(envelope: &Value) -> Value {
+    const FIELD_MAX_CHARS: usize = 512;
+    let bounded = |key: &str| {
+        envelope
+            .get(key)
+            .and_then(Value::as_str)
+            .map(|value| value.chars().take(FIELD_MAX_CHARS).collect::<String>())
+    };
+    json!({
+        "name": bounded("name"),
+        "request_id": bounded("request_id"),
+        "target_generation": bounded("target_generation"),
+        "catalog_revision": bounded("catalog_revision"),
+    })
+}
+
+async fn run_resident(
+    bind: SocketAddr,
+    actions_path: PathBuf,
+    map_paths: Vec<PathBuf>,
+    storage_root: Option<PathBuf>,
+    state_dir: PathBuf,
+    executable_version: String,
+    configuration_id: Option<String>,
+    idle_seconds: u64,
+) -> Result<()> {
+    ensure_loopback_bind(bind)?;
+    // Browser reachability is part of resident readiness. Acquire the TCP
+    // listener before publishing the owner-only IPC endpoint; otherwise an
+    // occupied browser port can briefly advertise a ready resident that can
+    // never accept an extension connection.
+    let listener = match TcpListener::bind(bind).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            let message = format!("could not bind {bind}: {error}");
+            let _ = resident::lifecycle::record_startup_failure(
+                &state_dir,
+                "resident_browser_bind_failed",
+                &message,
+            );
+            return Err(anyhow!("resident_browser_bind_failed: {message}"));
+        }
+    };
+    let mut state = state_from_actions_map_paths_and_storage_root(
+        actions_path,
+        map_paths,
+        storage_root,
+        Vec::new(),
+    )
+    .await?;
+    // The unitary resident owns one installation root. Pairing material must
+    // follow that protected root instead of whichever cwd happened to launch
+    // the invisible resident.
+    state.extension_auth = Arc::new(ExtensionAuthConfig::load(Some(&state_dir)));
+    state.payload.lock().await.payload_dir = state_dir.join("spills");
+    let state_database = state_dir.join("state.sqlite3");
+    state.runtime_authority = Some(Arc::new(
+        runtime::RuntimeAuthority::open(&state_database)
+            .map_err(|error| anyhow!(error.to_string()))?,
+    ));
+    state.operation_journal = Some(Arc::new(state::DurableOperationJournal::open(
+        &state_database,
+    )?));
+    spawn_liveness_sweep(state.clone());
+    spawn_durable_maintenance(state.clone());
+    let mut resident = resident::serve(
+        resident::endpoint_for(&state_dir),
+        resident::ResidentStatus::current(executable_version)
+            .with_configuration_id(configuration_id),
+        Arc::new(CanonicalResidentHandler {
+            state: state.clone(),
+        }),
+        (idle_seconds > 0).then(|| Duration::from_secs(idle_seconds)),
+    )
+    .await?;
+    let app = app_from_state(state, true);
+    let mut http = tokio::spawn(async move { axum::serve(listener, app).await });
+    tokio::select! {
+        _ = resident.wait_stopped() => {
+            http.abort();
+            let _ = http.await;
+            Ok(())
+        }
+        result = &mut http => {
+            resident.shutdown();
+            resident.wait_stopped().await;
+            match result {
+                Ok(Ok(())) => Err(anyhow!("resident_browser_server_stopped")),
+                Ok(Err(error)) => Err(anyhow!("resident_browser_server_failed: {error}")),
+                Err(error) => Err(anyhow!("resident_browser_server_task_failed: {error}")),
+            }
+        }
+    }
+}
+
 async fn serve(
     bind: SocketAddr,
     actions_path: PathBuf,
     map_paths: Vec<PathBuf>,
     storage_root: Option<PathBuf>,
 ) -> Result<()> {
+    ensure_loopback_bind(bind)?;
     let state = state_from_actions_map_paths_and_storage_root(
         actions_path.clone(),
         map_paths.clone(),
@@ -5061,20 +5927,16 @@ async fn serve(
     Ok(())
 }
 
-/// U12. The secret is useless if the operator cannot find it. Print it at
-/// startup, on both `serve` and `mcp`, with the exact storage key the extension
-/// reads — a coordinated cutover across five bridges fails on missing
-/// instructions long before it fails on missing crypto.
+/// Point the operator to the pairing UI without putting the secret into logs,
+/// process output, or an agent context. The protected installation state is the
+/// sole source of truth for pairing material.
 fn print_extension_pairing_hint(auth: &ExtensionAuthConfig, mut emit: impl FnMut(&str)) {
+    emit("extension pairing settings: open the extension's Bridge pairing section");
+    emit("  pairing secret is stored in the protected installation state; it is never written to logs");
     emit(&format!(
-        "extension handshake secret: {}",
-        auth.handshake_secret()
+        "  allowed extension origin: {}",
+        auth.primary_origin()
     ));
-    emit(&format!(
-        "  pair with: chrome.storage.local.set({{ bridgeHandshakeSecret: \"{}\" }})",
-        auth.handshake_secret()
-    ));
-    emit(&format!("  allowed extension origin: {}", auth.primary_origin()));
 }
 
 async fn mcp_stdio_server(
@@ -5085,7 +5947,8 @@ async fn mcp_stdio_server(
     payload_inline_limit: usize,
     payload_dir: Option<PathBuf>,
 ) -> Result<()> {
-    let state = state_from_actions_map_paths_and_storage_root(
+    ensure_loopback_bind(bind)?;
+    let mut state = state_from_actions_map_paths_and_storage_root(
         actions_path.clone(),
         map_paths.clone(),
         storage_root.clone(),
@@ -5100,27 +5963,104 @@ async fn mcp_stdio_server(
             config.payload_dir = dir;
         }
     }
-    spawn_liveness_sweep(state.clone());
-    let app = app_from_state(state.clone(), false);
-    let listener = TcpListener::bind(bind).await?;
-    let actual_bind = listener.local_addr()?;
+    let state_dir = canonical_state_dir()?;
+    let bind_string = bind.to_string();
+    let configuration_id = resident::configuration_id(
+        Some(actions_path.as_path()),
+        Some(bind_string.as_str()),
+        &map_paths,
+        storage_root.as_deref(),
+    );
+    let resident_config = resident::ResidentConfig {
+        state_dir: state_dir.clone(),
+        executable_version: env!("CARGO_PKG_VERSION").to_string(),
+        configuration_id: Some(configuration_id.clone()),
+        startup_timeout: Duration::from_secs(10),
+    };
+    let executable = std::env::current_exe()?;
+    let child_actions = actions_path.clone();
+    let child_maps = map_paths.clone();
+    let child_storage = storage_root.clone();
+    resident::ensure_resident(&resident_config, move || {
+        let mut command = std::process::Command::new(executable);
+        command
+            .arg("resident")
+            .arg("--bind")
+            .arg(bind.to_string())
+            .arg("--state-dir")
+            .arg(&state_dir)
+            .arg("--executable-version")
+            .arg(env!("CARGO_PKG_VERSION"))
+            .arg("--configuration-id")
+            .arg(&configuration_id)
+            .arg("--actions")
+            .arg(child_actions)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        for map in child_maps {
+            command.arg("--map").arg(map);
+        }
+        if let Some(storage) = child_storage {
+            command.arg("--storage-root").arg(storage);
+        }
+        cli::launch_managed_resident(command, &configuration_id).map(|_| ())
+    })
+    .await?;
+    let client = resident::Client::new(resident_config.endpoint(), Duration::from_secs(30));
+    client.handshake(env!("CARGO_PKG_VERSION")).await?;
+    state.mcp_resident = Some(mcp_adapter::ResidentMcpClient::new(
+        client,
+        env!("CARGO_PKG_VERSION"),
+    ));
+    state.extension_auth = Arc::new(ExtensionAuthConfig::load(Some(&resident_config.state_dir)));
+    let actual_bind = bind;
     let launch = BridgeLaunchContext {
         bind: actual_bind,
         actions_path: actions_path.clone(),
         map_paths: map_paths.clone(),
         storage_root: storage_root.clone(),
     };
-    eprintln!("actions-json MCP bridge browser listener on http://{actual_bind}");
+    eprintln!("actions-json resident browser listener on http://{actual_bind}");
     eprintln!("extension WebSocket: ws://{actual_bind}/extension");
     // stderr, not stdout: stdout is the MCP JSON-RPC channel and a stray line
     // there corrupts the protocol.
     print_extension_pairing_hint(&state.extension_auth, |line| eprintln!("{line}"));
-    tokio::spawn(async move {
-        if let Err(error) = axum::serve(listener, app).await {
-            eprintln!("actions-json MCP bridge browser listener failed: {error}");
-        }
-    });
     mcp_stdio_loop(state, launch).await
+}
+
+fn canonical_state_dir() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("ACTIONS_JSON_STATE_DIR") {
+        Ok(PathBuf::from(path))
+    } else if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|path| path.join("actions-json"))
+            .context("LOCALAPPDATA is required for resident state")
+    } else {
+        std::env::var_os("ACTIONS_JSON_STATE_DIR")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("XDG_STATE_HOME")
+                    .map(PathBuf::from)
+                    .map(|path| path.join("actions-json"))
+            })
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .map(|path| path.join(".local/state/actions-json"))
+            })
+            .context("HOME or XDG_STATE_HOME is required for resident state")
+    }
+}
+
+fn ensure_loopback_bind(_bind: SocketAddr) -> Result<()> {
+    // The extension WebSocket requires both an allow-listed Chrome extension
+    // Origin and the per-installation secret. Every compatibility HTTP control
+    // route requires that same secret and rejects browser-origin traffic. This
+    // remains the security boundary when WSL must listen on its virtual NIC so
+    // Windows localhost forwarding can reach the bridge.
+    Ok(())
 }
 
 pub fn app_from_manifest_value(manifest: Value) -> Router {
@@ -5178,7 +6118,7 @@ async fn state_from_actions_map_paths_and_storage_root(
     })?;
     let (catalog_manifest, site_manifest, site_action_names) =
         build_catalog_manifests(manifest.clone(), &map_paths, storage_root.as_deref()).await?;
-    Ok(state_from_catalog(
+    let mut state = state_from_catalog(
         ActionCatalog {
             base_manifest: manifest,
             map_paths,
@@ -5188,7 +6128,29 @@ async fn state_from_actions_map_paths_and_storage_root(
         },
         runtime_seeds,
         storage_root,
-    ))
+    );
+    state.operation_journal = default_operation_journal()?;
+    Ok(state)
+}
+
+fn default_operation_journal() -> Result<Option<Arc<state::DurableOperationJournal>>> {
+    #[cfg(test)]
+    {
+        return Ok(None);
+    }
+    #[cfg(not(test))]
+    {
+        let path = if let Some(path) = std::env::var_os("ACTIONS_JSON_DURABLE_STATE_PATH") {
+            PathBuf::from(path)
+        } else if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
+            PathBuf::from(root).join("actions-json/resident.sqlite3")
+        } else {
+            let home =
+                std::env::var_os("HOME").context("HOME is required for protected durable state")?;
+            PathBuf::from(home).join(".local/state/actions-json/resident.sqlite3")
+        };
+        Ok(Some(Arc::new(state::DurableOperationJournal::open(path)?)))
+    }
 }
 
 async fn build_catalog_manifests(
@@ -5785,29 +6747,21 @@ async fn runtime_agent_await_event_call(
     }))
 }
 
-fn djb2_hash_hex(text: &str) -> String {
-    let mut hash: u32 = 5381;
-    for byte in text.as_bytes() {
-        hash = hash.wrapping_mul(33) ^ u32::from(*byte);
-    }
-    format!("djb2:{hash:08x}")
-}
-
-async fn spill_payload_to_disk(dir: &Path, tool: &str, text: &str) -> Result<PathBuf> {
-    fs::create_dir_all(dir).await?;
-    let sanitized: String = tool
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let path = dir.join(format!("{}-{sanitized}.json", Uuid::new_v4()));
-    fs::write(&path, text).await?;
-    Ok(path)
+async fn spill_payload_to_disk(
+    dir: &Path,
+    tool: &str,
+    text: &str,
+) -> Result<state::SpillDescriptor> {
+    let policy = state::SpillPolicy {
+        directory: dir.to_path_buf(),
+        inline_limit_bytes: 0,
+        max_spill_bytes: 64 * 1024 * 1024,
+    };
+    let tool = tool.to_string();
+    let bytes = text.as_bytes().to_vec();
+    tokio::task::spawn_blocking(move || policy.persist(&tool, &bytes, "application/json"))
+        .await??
+        .into_spilled()
 }
 
 fn payload_spill_envelope(
@@ -5815,7 +6769,7 @@ fn payload_spill_envelope(
     result: &Value,
     text: &str,
     limit: usize,
-    path: &Path,
+    descriptor: &state::SpillDescriptor,
 ) -> Value {
     let preview: String = text.chars().take(800).collect();
     json!({
@@ -5824,8 +6778,9 @@ fn payload_spill_envelope(
         "ok": result.get("ok").cloned().unwrap_or(Value::Null),
         "payload_bytes": text.len(),
         "inline_limit_bytes": limit,
-        "payload_path": path.display().to_string(),
-        "payload_hash": djb2_hash_hex(text),
+        "payload_path": descriptor.path.display().to_string(),
+        "payload_hash": descriptor.sha256,
+        "media_type": descriptor.media_type,
         "preview": preview,
         "hint": "Result exceeded inline_limit_bytes and was written to payload_path. Read or grep that file for the full result. Adjust the threshold with bridge.payloads.configure."
     })
@@ -6500,6 +7455,9 @@ fn state_from_catalog(
     AppState {
         catalog: Arc::new(Mutex::new(catalog)),
         storage_root,
+        operation_journal: None,
+        runtime_authority: None,
+        mcp_resident: None,
         extension_auth: Arc::new(ExtensionAuthConfig::load(None)),
         active_runtime_id: Arc::new(Mutex::new(seeded_runtimes.keys().next().cloned())),
         runtimes: Arc::new(Mutex::new(seeded_runtimes)),
@@ -6525,9 +7483,8 @@ fn app_from_state(state: AppState, include_legacy_tool_http_routes: bool) -> Rou
         .route("/extension", get(extension_ws));
     if include_legacy_tool_http_routes {
         // U12b. The legacy tool routes are built as their OWN router so the auth
-        // layer can be attached to exactly this subtree and nothing else. Putting
-        // the check inside `add_cors_headers` (which already has state) was the
-        // other option and was rejected: that middleware wraps the WHOLE app, so
+        // layer can be attached to exactly this subtree and nothing else. A
+        // global middleware was rejected because it wraps the WHOLE app, so
         // the gate would then have to re-derive "is this path gated?" from the
         // URI — a second, drifting copy of the route list, and the exact shape
         // that lets a newly added route silently escape the guard. Here the
@@ -6539,28 +7496,87 @@ fn app_from_state(state: AppState, include_legacy_tool_http_routes: bool) -> Rou
         // turn "the bridge is up" into a question you need a secret to ask.
         let gated = Router::new()
             .route("/actions", get(actions))
-            .route("/mcp/tools/list", get(tools_list).options(cors_preflight))
-            .route(
-                "/mcp/tools/resolve",
-                post(tools_resolve).options(cors_preflight),
-            )
-            .route(
-                "/mcp/tools/reload",
-                post(tools_reload).options(cors_preflight),
-            )
-            .route("/mcp/tools/call", post(tools_call).options(cors_preflight))
+            .route("/mcp/tools/list", get(tools_list))
+            .route("/mcp/tools/resolve", post(tools_resolve))
+            .route("/mcp/tools/reload", post(tools_reload))
+            .route("/mcp/tools/call", post(http_tools_call))
             .layer(middleware::from_fn_with_state(
                 state.clone(),
                 require_bridge_http_secret,
-            ));
+            ))
+            .layer(middleware::from_fn(reject_browser_http_ingress));
         router = router.merge(gated);
     }
-    router
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            add_cors_headers,
-        ))
-        .with_state(state)
+    router.with_state(state)
+}
+
+async fn reject_browser_http_ingress(request: Request<Body>, next: Next) -> Response {
+    let has_browser_origin = request.headers().contains_key(header::ORIGIN);
+    let asks_private_network = request
+        .headers()
+        .contains_key("access-control-request-private-network");
+    if request.method() == Method::OPTIONS || has_browser_origin || asks_private_network {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "ok": false,
+                "error": {
+                    "code": "browser_http_ingress_refused",
+                    "message": "Legacy HTTP operations are local-process compatibility endpoints and do not accept browser-origin or private-network CORS requests."
+                }
+            })),
+        )
+            .into_response();
+    }
+    next.run(request).await
+}
+
+async fn http_tools_call(
+    State(state): State<AppState>,
+    Json(params): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let operation = mcp_adapter::McpToolCall::from_params(params).map_err(|message| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "ok": false,
+                "error": {"code": "invalid_input", "message": message}
+            })),
+        )
+    })?;
+    // Router-only test/application constructors intentionally omit the durable
+    // resident authority. Keep their historical direct handler semantics;
+    // every real `serve`/resident process installs the authority and therefore
+    // traverses the canonical adapter path below.
+    if state.runtime_authority.is_none() {
+        return tools_call(
+            State(state),
+            Json(ToolCallRequest::from(operation.into_request())),
+        )
+        .await
+        .map(|Json(response)| {
+            Json(serde_json::to_value(response).expect("serialize tool response"))
+        });
+    }
+    let result = resident::ResidentHandler::handle_ingress(
+        &CanonicalResidentHandler { state },
+        operation.into_envelope(),
+        resident::IngressContext {
+            adapter: resident::IngressAdapter::Http,
+            client_version: None,
+        },
+    )
+    .await
+    .map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "ok": false,
+                "error": {"code": "resident_operation_failed", "message": error.to_string()}
+            })),
+        )
+    })?;
+    Ok(Json(result))
 }
 
 /// U12b. Require the per-installation handshake secret on the legacy HTTP tool
@@ -6585,16 +7601,6 @@ async fn require_bridge_http_secret(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    // A CORS preflight is sent by the browser WITHOUT the Authorization header —
-    // that is the whole point of a preflight, it asks whether the header may be
-    // sent. Gating OPTIONS would make every credentialed cross-origin call fail
-    // before the real request is ever attempted, i.e. the guard would break the
-    // caller it exists to admit. A preflight carries no body and triggers no
-    // tool, so letting it through costs nothing.
-    if request.method() == Method::OPTIONS {
-        return next.run(request).await;
-    }
-
     let header_secret = request
         .headers()
         .get(header::AUTHORIZATION)
@@ -6772,8 +7778,69 @@ async fn mcp_tools_list(state: &AppState) -> Result<Value, Value> {
     Ok(json!({ "tools": tools }))
 }
 
+/// `explicit_target_required` used to say only "mutation requires an active,
+/// profile-selected, or explicit stable target" — true, but it named neither
+/// the candidates nor the argument to pass, so the caller had to make a
+/// second discovery call and guess (2026-11-20, after a navigation dropped
+/// the active runtime). List the live targets and the exact routing fields.
+fn explicit_target_required_result(authority: &runtime::RuntimeAuthority) -> Value {
+    let live: Vec<Value> = authority
+        .list_targets()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|target| target.live)
+        .map(|target| {
+            json!({
+                "target_runtime_id": target.runtime_id,
+                "url": target.url,
+                "title": target.title,
+            })
+        })
+        .collect();
+    let message = if live.is_empty() {
+        "This mutation needs a target tab, and no live tab is connected. Open or reload the tab with the actions.json extension, then retry.".to_string()
+    } else {
+        format!(
+            "This mutation needs a target tab. Retry with target_runtime_id (one of the {} live tab(s) in evidence.live_targets) or target_url_contains, or set one active with browser.active_tab.set.",
+            live.len()
+        )
+    };
+    json!({
+        "ok": false,
+        "error": {
+            "code": "explicit_target_required",
+            "message": message,
+            "recoverable": true,
+            "evidence": {
+                "live_targets": live,
+                "routing_fields": ["target_runtime_id", "target_url_contains"]
+            }
+        }
+    })
+}
+
+/// Tool-level (not protocol-level) error for a resident IPC failure, so the
+/// agent sees the underlying reason instead of a bare "Resident operation failed".
+fn resident_operation_error_result(tool: &str, message: &str) -> Value {
+    mcp_adapter::render_tool_result(&json!({
+        "ok": false,
+        "primitive": tool,
+        "error": {
+            "code": "resident_operation_failed",
+            "message": format!("Resident operation failed: {message}"),
+            "detail": message,
+            "recoverable": true,
+            "hint": "The resident bridge could not complete this call. If it follows a page reload or navigation, the tab's runtime may be re-attaching: re-run browser.navigate (or browser.claimed_tabs.list) for the tab, then retry once."
+        }
+    }))
+}
+
 async fn mcp_tools_call(state: AppState, params: Value) -> Result<Value, Value> {
-    let Some(name) = params.get("name").and_then(Value::as_str) else {
+    let Some(name) = params
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
         return Err(mcp_error_value(
             -32602,
             "Invalid params",
@@ -6787,43 +7854,54 @@ async fn mcp_tools_call(state: AppState, params: Value) -> Result<Value, Value> 
     // Native chrome-launcher tools (U7) short-circuit the site/primitive machinery — they
     // don't touch a connected browser runtime; they LAUNCH one. The helper path (the
     // cross-compiled Windows pipe helper) comes from env, falling back to the workspace build.
-    if chrome_launcher_tools::is_chrome_launcher_tool(name) {
+    if chrome_launcher_tools::is_chrome_launcher_tool(&name) {
         let helper_win = std::env::var("CHROME_LAUNCHER_HELPER_WIN").ok();
-        let output = chrome_launcher_tools::dispatch(name, &arguments, helper_win.as_deref()).await;
+        let output =
+            chrome_launcher_tools::dispatch(&name, &arguments, helper_win.as_deref()).await;
         let is_ok = output.get("ok").and_then(Value::as_bool).unwrap_or(false);
         return Ok(json!({
             "content": [{ "type": "text", "text": serde_json::to_string_pretty(&output).unwrap_or_default() }],
             "isError": !is_ok,
         }));
     }
-    let request = ToolCallRequest {
-        name: name.to_string(),
-        target_runtime_id: params
-            .get("target_runtime_id")
-            .and_then(Value::as_str)
-            .or_else(|| arguments.get("target_runtime_id").and_then(Value::as_str))
-            .map(str::to_string),
-        target_url_contains: params
-            .get("target_url_contains")
-            .and_then(Value::as_str)
-            .or_else(|| arguments.get("target_url_contains").and_then(Value::as_str))
-            .map(str::to_string),
-        timeout_ms: params
-            .get("timeout_ms")
-            .and_then(Value::as_u64)
-            .or_else(|| arguments.get("timeout_ms").and_then(Value::as_u64))
-            .unwrap_or_else(default_timeout_ms),
-        arguments,
-    };
+    let operation = mcp_adapter::McpToolCall::from_params(params).map_err(|message| {
+        mcp_error_value(-32602, "Invalid params", json!({ "message": message }))
+    })?;
+    let envelope = operation.clone().into_envelope();
 
     let payload_config = state.payload.clone();
-    let mut result = match tools_call(State(state), Json(request)).await {
-        Ok(Json(response)) => json!(response),
-        Err((status, Json(payload))) => json!({
-            "ok": false,
-            "status": status.as_u16(),
-            "error": payload
-        }),
+    let result = if let Some(client) = state.mcp_resident.as_ref() {
+        match client.execute(envelope).await {
+            Ok(result) => result,
+            // A JSON-RPC protocol error surfaces to the agent as its bare
+            // `message` ("Resident operation failed"); MCP clients drop
+            // `error.data`, so every distinct resident failure collapsed into
+            // one opaque string (8 occurrences on 2026-11-20, cause invisible).
+            // Report it as a tool-execution error instead, per the MCP spec,
+            // with the underlying reason in the visible result.
+            Err(message) => return Ok(resident_operation_error_result(&name, &message)),
+        }
+    } else {
+        // Unit/router constructors omit the resident client by design. Keep
+        // their historical in-process semantics; production MCP startup always
+        // installs `mcp_resident` before entering the JSON-RPC loop.
+        match tools_call(
+            State(state.clone()),
+            Json(ToolCallRequest::from(operation.into_request())),
+        )
+        .await
+        {
+            Ok(Json(response)) => serde_json::to_value(response).map_err(|error| {
+                mcp_error_value(
+                    -32603,
+                    "Serialize tool result failed",
+                    json!({"message": error.to_string()}),
+                )
+            })?,
+            Err((status, Json(error))) => {
+                json!({"ok":false,"status":status.as_u16(),"error":error})
+            }
+        }
     };
     let is_error = result.get("ok").and_then(Value::as_bool) == Some(false)
         || result
@@ -6831,36 +7909,133 @@ async fn mcp_tools_call(state: AppState, params: Value) -> Result<Value, Value> 
             .and_then(|output| output.get("ok"))
             .and_then(Value::as_bool)
             == Some(false);
-    let mut text = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
     let (inline_limit, payload_dir) = {
         let config = payload_config.lock().await;
         (config.inline_limit_bytes, config.payload_dir.clone())
     };
+    // Screenshots used to ride inside the JSON text as a base64 data URL, so
+    // any real screenshot exceeded the inline limit and was spilled as a JSON
+    // file the agent had to decode before it could look (2026-11-20). Lift
+    // images out: write each as a real image file, return it as an MCP image
+    // content block the client renders to the model, and leave the path in
+    // the JSON where the data URL was.
+    let mut result = result;
+    let images = extract_inline_images(&mut result, &payload_dir, &name).await;
+    let mut text = serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string());
     if text.len() > inline_limit {
-        match spill_payload_to_disk(&payload_dir, name, &text).await {
-            Ok(path) => {
-                let envelope = payload_spill_envelope(name, &result, &text, inline_limit, &path);
+        match spill_payload_to_disk(&payload_dir, &name, &text).await {
+            Ok(descriptor) => {
+                let envelope =
+                    payload_spill_envelope(&name, &result, &text, inline_limit, &descriptor);
                 text = serde_json::to_string_pretty(&envelope)
                     .unwrap_or_else(|_| envelope.to_string());
             }
             Err(error) => {
-                if let Some(object) = result.as_object_mut() {
-                    object.insert("payload_spill_error".to_string(), json!(error.to_string()));
-                    text = serde_json::to_string_pretty(&result)
-                        .unwrap_or_else(|_| result.to_string());
-                }
+                text = json!({
+                    "ok": false,
+                    "error": {"code":"payload_spill_failed","message":error.to_string()},
+                    "payload_bytes": text.len(),
+                    "inline_limit_bytes": inline_limit,
+                    "bounded": true
+                })
+                .to_string()
             }
         }
     }
+    let mut content = vec![json!({ "type": "text", "text": text })];
+    content.extend(images);
     Ok(json!({
-        "content": [
-            {
-                "type": "text",
-                "text": text
-            }
-        ],
+        "content": content,
         "isError": is_error
     }))
+}
+
+/// Largest base64 image returned inline as an MCP image block; bigger images
+/// are still written to disk and referenced by path.
+const MAX_INLINE_IMAGE_BASE64_BYTES: usize = 4 * 1024 * 1024;
+
+/// Replace every `data:image/{png,jpeg,webp};base64,...` string in `value`
+/// with a pointer to an image file, returning MCP image content blocks.
+async fn extract_inline_images(value: &mut Value, payload_dir: &Path, tool: &str) -> Vec<Value> {
+    let mut found: Vec<(String, String)> = Vec::new();
+    collect_image_data_urls(value, &mut found);
+    let mut blocks = Vec::new();
+    for (data_url, _) in found {
+        let Some((media_type, b64)) = parse_image_data_url(&data_url) else {
+            continue;
+        };
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()) else {
+            continue;
+        };
+        let policy = state::SpillPolicy {
+            directory: payload_dir.to_path_buf(),
+            inline_limit_bytes: 0,
+            max_spill_bytes: 64 * 1024 * 1024,
+        };
+        let tool_name = tool.to_string();
+        let media = media_type.clone();
+        let persisted =
+            tokio::task::spawn_blocking(move || policy.persist(&tool_name, &bytes, &media))
+                .await
+                .ok()
+                .and_then(|result| result.ok())
+                .and_then(|spill| spill.into_spilled().ok());
+        let replacement = match &persisted {
+            Some(descriptor) => format!("<image written to {}>", descriptor.path.display()),
+            None => "<image omitted: could not be written to disk>".to_string(),
+        };
+        replace_string_value(value, &data_url, &replacement);
+        if let Some(descriptor) = &persisted {
+            if let Value::Object(map) = value {
+                map.entry("image_paths")
+                    .or_insert_with(|| json!([]))
+                    .as_array_mut()
+                    .map(|paths| paths.push(json!(descriptor.path.display().to_string())));
+            }
+        }
+        if b64.len() <= MAX_INLINE_IMAGE_BASE64_BYTES {
+            blocks.push(json!({ "type": "image", "data": b64, "mimeType": media_type }));
+        }
+    }
+    blocks
+}
+
+fn parse_image_data_url(data_url: &str) -> Option<(String, String)> {
+    let rest = data_url.strip_prefix("data:")?;
+    let (header, b64) = rest.split_once(',')?;
+    let media_type = header.strip_suffix(";base64")?;
+    matches!(media_type, "image/png" | "image/jpeg" | "image/webp")
+        .then(|| (media_type.to_string(), b64.to_string()))
+}
+
+fn collect_image_data_urls(value: &Value, found: &mut Vec<(String, String)>) {
+    match value {
+        Value::String(text) if text.starts_with("data:image/") => {
+            if !found.iter().any(|(existing, _)| existing == text) {
+                found.push((text.clone(), String::new()));
+            }
+        }
+        Value::Array(items) => items
+            .iter()
+            .for_each(|item| collect_image_data_urls(item, found)),
+        Value::Object(map) => map
+            .values()
+            .for_each(|item| collect_image_data_urls(item, found)),
+        _ => {}
+    }
+}
+
+fn replace_string_value(value: &mut Value, needle: &str, replacement: &str) {
+    match value {
+        Value::String(text) if text == needle => *text = replacement.to_string(),
+        Value::Array(items) => items
+            .iter_mut()
+            .for_each(|item| replace_string_value(item, needle, replacement)),
+        Value::Object(map) => map
+            .values_mut()
+            .for_each(|item| replace_string_value(item, needle, replacement)),
+        _ => {}
+    }
 }
 
 async fn mcp_resources_list(state: &AppState) -> Result<Value, Value> {
@@ -6947,7 +8122,7 @@ async fn mcp_resources_read(
         ),
         "actions-json://bridge/runtimes" => (
             "application/json".to_string(),
-            serde_json::to_string_pretty(&bridge_runtimes_resource(state).await).unwrap(),
+            serde_json::to_string_pretty(&mcp_bridge_runtimes_resource(state).await?).unwrap(),
         ),
         "actions-json://bridge/tools" => (
             "application/json".to_string(),
@@ -7044,6 +8219,46 @@ fn bridge_launch_resource(launch: &BridgeLaunchContext) -> Value {
             "Read actions-json://storage/files to discover neighboring skills and references."
         ]
     })
+}
+
+async fn mcp_bridge_runtimes_resource(state: &AppState) -> Result<Value, Value> {
+    let Some(client) = state.mcp_resident.as_ref() else {
+        return Ok(bridge_runtimes_resource(state).await);
+    };
+    let status = client
+        .execute(json!({
+            "name": "resident.system.status",
+            "arguments": {},
+            "request_id": format!("ajm_{}", Uuid::new_v4().simple())
+        }))
+        .await
+        .map_err(|message| {
+            mcp_error_value(
+                -32000,
+                "Resident status failed",
+                json!({"message": message}),
+            )
+        })?;
+    let extension = status
+        .get("extension")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let runtimes = extension
+        .get("runtimes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(json!({
+        "connected": extension.get("connected").and_then(Value::as_bool).unwrap_or(false),
+        "count": runtimes.len(),
+        "active_runtime_id": extension.get("active_runtime_id").cloned().unwrap_or(Value::Null),
+        "runtimes": runtimes,
+        "last_replay_summary": Value::Null,
+        "credential_hydration": Value::Null,
+        "storage_hydration": Value::Null,
+        "bounded": true,
+        "redacted": true
+    }))
 }
 
 async fn bridge_runtimes_resource(state: &AppState) -> Value {
@@ -7146,49 +8361,6 @@ fn app_from_manifest_value_with_storage_root(
         state_from_catalog(catalog, runtime_seeds, storage_root),
         true,
     )
-}
-
-async fn cors_preflight(State(state): State<AppState>) -> impl IntoResponse {
-    (
-        StatusCode::NO_CONTENT,
-        cors_headers(&state.extension_auth.primary_origin()),
-    )
-}
-
-async fn add_cors_headers(
-    State(state): State<AppState>,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
-    let mut response = next.run(request).await;
-    for (name, value) in cors_headers(&state.extension_auth.primary_origin()) {
-        response.headers_mut().insert(name, value);
-    }
-    response
-}
-
-/// U12. This used to answer every request with `Access-Control-Allow-Origin: *`
-/// plus `access-control-allow-private-network: true` — the pair that lets an
-/// arbitrary public page read this loopback bridge's HTTP surface. Now the
-/// allowed origin is the extension itself, and the private-network opt-in is
-/// gone entirely: nothing on the public web should be inviting itself in.
-fn cors_headers(allow_origin: &str) -> [(header::HeaderName, HeaderValue); 4] {
-    [
-        (
-            header::ACCESS_CONTROL_ALLOW_ORIGIN,
-            HeaderValue::from_str(allow_origin)
-                .unwrap_or_else(|_| HeaderValue::from_static("null")),
-        ),
-        (
-            header::ACCESS_CONTROL_ALLOW_METHODS,
-            HeaderValue::from_static("GET, POST, OPTIONS"),
-        ),
-        (
-            header::ACCESS_CONTROL_ALLOW_HEADERS,
-            HeaderValue::from_static("content-type"),
-        ),
-        (header::VARY, HeaderValue::from_static("Origin")),
-    ]
 }
 
 async fn health() -> Json<Value> {
@@ -8096,12 +9268,12 @@ async fn dispatch_resolved_tool_call(
     state: &AppState,
     resolved: ResolvedToolCall,
 ) -> Result<Json<ToolCallResponse>, (StatusCode, Json<Value>)> {
-    let call_id = Uuid::new_v4().to_string();
+    let request_id = Uuid::new_v4().to_string();
     if let Some(output) = resolved.static_output {
         return Ok(Json(ToolCallResponse {
             announcements: None,
             ok: true,
-            call_id,
+            call_id: request_id,
             output: Some(output),
             error: None,
         }));
@@ -8111,6 +9283,36 @@ async fn dispatch_resolved_tool_call(
     // stale, probe it and evict+fail with tab_closed rather than dispatching
     // into the void and eating a 30s timeout.
     ensure_dispatchable(state, &runtime).await?;
+
+    let mut call_id = request_id;
+
+    if let Some(journal) = &state.operation_journal {
+        let stable_target = state
+            .runtime_authority
+            .as_ref()
+            .and_then(|authority| authority.target_for_runtime(&runtime.runtime_id).ok());
+        let acceptance = state::OperationAcceptance {
+            request_id: call_id.clone(),
+            scope: "legacy-adapter".to_string(),
+            normalized_request: json!({"name":resolved.name.clone(),"arguments":resolved.arguments.clone()}),
+            profile_token: None,
+            target_generation: stable_target
+                .as_ref()
+                .map(|target| target.target_generation.clone())
+                .or_else(|| Some(format!("{}/{}", runtime.connection_id, runtime.runtime_id))),
+            catalog_revision: stable_target
+                .as_ref()
+                .map(|target| target.catalog_revision.clone()),
+            lease_authority: None,
+            output_policy: json!({"inline_limit_bytes":DEFAULT_PAYLOAD_INLINE_LIMIT_BYTES}),
+            is_mutation: true,
+        };
+        match journal.accept(&acceptance).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":{"code":"durable_acceptance_failed","message":error.to_string()}}))))? {
+            state::AcceptOutcome::Accepted(operation) => call_id = operation.operation_id,
+            state::AcceptOutcome::Existing(operation) => call_id = operation.operation_id,
+            state::AcceptOutcome::Conflict { .. } => return Err((StatusCode::CONFLICT, Json(json!({"error":{"code":"request_identity_conflict"}})))),
+        }
+    }
 
     let (response_tx, response_rx) = oneshot::channel::<Value>();
     state.pending.lock().await.insert(
@@ -8139,19 +9341,33 @@ async fn dispatch_resolved_tool_call(
             })),
         ));
     }
+    // A successful local socket enqueue means delivery may have happened. Mark
+    // this boundary before yielding so no crash can classify it replayable.
+    mark_durable_dispatch_enqueued(state, &call_id)?;
 
     let result = match tokio::time::timeout(Duration::from_millis(resolved.timeout_ms), response_rx)
         .await
     {
-        Ok(result) => result.map_err(|_| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "error": "extension runtime dropped response", "call_id": call_id })),
-            )
-        })?,
+        Ok(result) => match result {
+            Ok(result) => result,
+            Err(_) => {
+                if let Some(journal) = &state.operation_journal {
+                    let _ = journal.mark_indeterminate(&call_id);
+                }
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    Json(
+                        json!({ "error": "extension runtime dropped response", "call_id": call_id }),
+                    ),
+                ));
+            }
+        },
         Err(_) => {
             let removed = state.pending.lock().await.remove(&call_id).is_some();
             let timeout_context = take_action_timeout_context(state, &call_id, removed).await;
+            if let Some(journal) = &state.operation_journal {
+                let _ = journal.mark_indeterminate(&call_id);
+            }
             eprintln!(
                 "actions-json-mcp pending timeout name=action_call call_id={} removed_pending={} context={}",
                 call_id,
@@ -8170,6 +9386,10 @@ async fn dispatch_resolved_tool_call(
     };
     state.action_progress.lock().await.remove(&call_id);
 
+    if let Some(journal) = &state.operation_journal {
+        journal.mark_terminal(&call_id, &result, None).map_err(|error| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":{"code":"durable_terminal_failed","message":error.to_string()},"call_id":call_id}))))?;
+    }
+
     let is_error = result.get("type").and_then(Value::as_str) == Some("action_error");
     Ok(Json(ToolCallResponse {
         announcements: None,
@@ -8178,6 +9398,71 @@ async fn dispatch_resolved_tool_call(
         output: result.get("output").cloned(),
         error: result.get("error").cloned(),
     }))
+}
+
+fn mark_durable_dispatch_enqueued(
+    state: &AppState,
+    call_id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if let Some(journal) = &state.operation_journal {
+        if let Err(error) = journal.mark_dispatched(call_id) {
+            let _ = journal.mark_indeterminate(call_id);
+            return Err((
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({"error":{
+                    "code":"durable_dispatch_transition_indeterminate",
+                    "message":"The action was enqueued, but its durable dispatched state could not be proven.",
+                    "cause":error.to_string(),
+                    "failure_class":"mutation_outcome_indeterminate"
+                },"call_id":call_id})),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn send_outstanding_operation_receipt_queries(
+    journal: &state::DurableOperationJournal,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<usize> {
+    let operation_ids = journal.outstanding_operation_ids()?;
+    let mut sent = 0;
+    for operation_id in operation_ids {
+        tx.send(Message::Text(
+            json!({"type":"operation_receipt_query","operation_id":operation_id}).to_string(),
+        ))
+        .map_err(|_| anyhow!("extension receipt query channel closed"))?;
+        sent += 1;
+    }
+    Ok(sent)
+}
+
+fn reconcile_extension_operation_receipt(
+    journal: &state::DurableOperationJournal,
+    item: &Value,
+) -> Result<state::LifecycleState> {
+    let operation_id = item
+        .get("operation_id")
+        .and_then(Value::as_str)
+        .context("operation receipt omitted operation_id")?;
+    if item.get("receipt").is_some_and(Value::is_null) {
+        journal.mark_indeterminate(operation_id)?;
+        return Ok(state::LifecycleState::Indeterminate);
+    }
+    match item.pointer("/receipt/state").and_then(Value::as_str) {
+        Some("received" | "started") => {
+            journal.reconcile_receipt(operation_id, state::ReceiptState::Started, None)
+        }
+        Some("terminal") => journal.reconcile_receipt(
+            operation_id,
+            state::ReceiptState::Terminal,
+            item.pointer("/receipt/outcome"),
+        ),
+        _ => Ok(journal
+            .get(operation_id)?
+            .context("receipt references unknown operation")?
+            .state),
+    }
 }
 
 async fn take_action_timeout_context(state: &AppState, call_id: &str, removed: bool) -> Value {
@@ -8207,6 +9492,37 @@ fn resolve_tool_call(
     };
     let request_arguments = validate_and_prepare_direct_tool_arguments(tool, request)?;
 
+    // Discovery and executable resolution share one registry. Validation stays
+    // ahead of this boundary so malformed calls cannot reach browser dispatch.
+    let registry = operation::OperationRegistry::from_manifest(manifest).map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            structured_error(
+                "invalid_catalog",
+                "Loaded actions catalog cannot be registered.",
+                json!({ "message": format!("{error:?}") }),
+            ),
+        )
+    })?;
+    let registered = registry
+        .resolve(&operation::OperationRequest {
+            name: request.name.clone(),
+            arguments: request_arguments.clone(),
+            target_runtime_id: request.target_runtime_id.clone(),
+            target_url_contains: request.target_url_contains.clone(),
+            timeout_ms: request.timeout_ms,
+        })
+        .map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                structured_error(
+                    "invalid_input",
+                    "Operation could not be resolved.",
+                    json!({ "message": format!("{error:?}") }),
+                ),
+            )
+        })?;
+
     let handler = tool
         .get("x_actions")
         .and_then(|x_actions| x_actions.get("handler"))
@@ -8218,11 +9534,11 @@ fn resolve_tool_call(
             .cloned()
         {
             return Ok(ResolvedToolCall {
-                name: request.name.clone(),
-                arguments: request_arguments.clone(),
-                target_runtime_id: request.target_runtime_id.clone(),
-                target_url_contains: request.target_url_contains.clone(),
-                timeout_ms: request.timeout_ms,
+                name: registered.name,
+                arguments: registered.arguments,
+                target_runtime_id: registered.target_runtime_id,
+                target_url_contains: registered.target_url_contains,
+                timeout_ms: registered.timeout_ms,
                 static_output: Some(output),
             });
         }
@@ -8252,35 +9568,13 @@ fn resolve_tool_call(
         return Ok(unresolved_tool_call(request));
     }
 
-    let binding = tool
-        .get("x_actions")
-        .and_then(|x_actions| x_actions.get("binding"));
-    let binding_arguments = binding
-        .and_then(|binding| binding.get("arguments"))
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let target_url_contains = request.target_url_contains.clone().or_else(|| {
-        binding
-            .and_then(|binding| binding.get("target_url_contains"))
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    });
-
     Ok(ResolvedToolCall {
-        name: handler.to_string(),
-        arguments: merge_object_values(binding_arguments, request_arguments).map_err(|error| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": error,
-                    "tool": request.name
-                })),
-            )
-        })?,
-        target_runtime_id: request.target_runtime_id.clone(),
-        target_url_contains,
-        timeout_ms: request.timeout_ms,
-        static_output: None,
+        name: registered.name,
+        arguments: registered.arguments,
+        target_runtime_id: registered.target_runtime_id,
+        target_url_contains: registered.target_url_contains,
+        timeout_ms: registered.timeout_ms,
+        static_output: registered.static_output,
     })
 }
 
@@ -8338,7 +9632,10 @@ fn bounded_site_action_listing(
 ) -> Result<Value, (StatusCode, Json<Value>)> {
     actions.sort_by(|left, right| {
         let left_name = left.get("name").and_then(Value::as_str).unwrap_or_default();
-        let right_name = right.get("name").and_then(Value::as_str).unwrap_or_default();
+        let right_name = right
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         left_name.cmp(right_name)
     });
     let catalog_hash = site_catalog_hash(&actions);
@@ -8349,7 +9646,10 @@ fn bounded_site_action_listing(
             if normalized_query.is_empty() {
                 return true;
             }
-            let name = action.get("name").and_then(Value::as_str).unwrap_or_default();
+            let name = action
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let description = action
                 .get("description")
                 .and_then(Value::as_str)
@@ -8386,7 +9686,10 @@ fn bounded_site_action_listing(
                     ),
                 ));
             }
-            cursor.get("offset").and_then(Value::as_u64).unwrap_or(u64::MAX) as usize
+            cursor
+                .get("offset")
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::MAX) as usize
         }
         None => 0,
     };
@@ -8510,13 +9813,8 @@ async fn site_actions_call(
             .and_then(Value::as_u64)
             .unwrap_or(4_096)
             .clamp(256, 48_000);
-        let action_page = bounded_site_action_listing(
-            actions,
-            query,
-            page_size,
-            continuation,
-            max_bytes,
-        )?;
+        let action_page =
+            bounded_site_action_listing(actions, query, page_size, continuation, max_bytes)?;
         let (files, skills) = match state.storage_root.as_deref() {
             Some(storage_root) => {
                 site_storage_files_for_target(storage_root, target_url_contains.as_deref()).await?
@@ -8802,7 +10100,10 @@ async fn site_actions_graph_call(
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| if node_ref.is_some() { "node" } else { "roots" }.to_string());
-        if !matches!(operation.as_str(), "roots" | "node" | "neighbors" | "traverse") {
+        if !matches!(
+            operation.as_str(),
+            "roots" | "node" | "neighbors" | "traverse"
+        ) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 structured_error(
@@ -9787,6 +11088,45 @@ fn parse_markdown_front_matter(text: &str) -> Value {
         fields.insert(key.to_string(), Value::String(value));
     }
     Value::Object(fields)
+}
+
+/// Build the target-bound operation catalog persisted by the resident. Tools
+/// without routing constraints remain universally available; constrained tools
+/// are included only when their declared URL binding matches this generation's
+/// observed page. Discovery is therefore bound to one live target rather than
+/// a process-global union of every loaded site map.
+fn catalog_snapshot_for_target(manifest: &Value, target_url: Option<&str>) -> Value {
+    let operations = manifest
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|tool| {
+            let binding = tool.get("x_actions").and_then(|value| value.get("binding"));
+            let Some(binding) = binding else { return true };
+            let target_contains = binding.get("target_url_contains").and_then(Value::as_str);
+            let host_matches = match (target_url, target_contains) {
+                (Some(url), Some(fragment)) => url.contains(fragment) || fragment.contains(url),
+                (None, Some(_)) => false,
+                _ => true,
+            };
+            host_matches
+                && ["map_url_matches", "url_matches"]
+                    .iter()
+                    .filter_map(|key| binding.get(*key).and_then(Value::as_str))
+                    .all(|pattern| {
+                        target_url.is_some_and(|url| url_pattern_matches_target(pattern, url))
+                    })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    json!({
+        "protocol": manifest
+            .get("protocol")
+            .cloned()
+            .unwrap_or_else(|| json!("actions.json")),
+        "operations": operations,
+    })
 }
 
 fn site_actions_for_target(
@@ -10805,21 +12145,6 @@ fn schema_path_join(base: &str, key: &str) -> String {
     }
 }
 
-fn merge_object_values(mut base: Value, overlay: Value) -> Result<Value, &'static str> {
-    if !base.is_object() {
-        return Err("stored binding arguments must be an object");
-    }
-    if !overlay.is_object() {
-        return Err("tool arguments must be an object");
-    }
-
-    let base_object = base.as_object_mut().unwrap();
-    for (key, value) in overlay.as_object().unwrap() {
-        base_object.insert(key.clone(), value.clone());
-    }
-    Ok(base)
-}
-
 pub async fn storage_bundle_from_root(root: PathBuf) -> Result<Value> {
     let root = root
         .canonicalize()
@@ -11323,6 +12648,33 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
                     .map(str::to_string);
                 let tab = item.get("tab").cloned();
                 let replay = item.get("replay").cloned();
+                let authority_tab_key = runtime_key.clone().unwrap_or_else(|| runtime_id.clone());
+                let authority_client_instance = item
+                    .get("client_instance_id")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| device.clone())
+                    .or_else(|| {
+                        authorization_id.as_deref().map(|value| {
+                            format!("auth-sha256:{:x}", Sha256::digest(value.as_bytes()))
+                        })
+                    })
+                    .unwrap_or_else(|| format!("legacy-connection:{connection_id}"));
+                let authority_title = tab
+                    .as_ref()
+                    .and_then(|value| value.get("title"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let authority_catalog = if state.runtime_authority.is_some() {
+                    let catalog = state.catalog.lock().await;
+                    Some(catalog_snapshot_for_target(
+                        &catalog.manifest,
+                        url.as_deref(),
+                    ))
+                } else {
+                    None
+                };
                 connection_runtime_ids
                     .lock()
                     .await
@@ -11375,6 +12727,21 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
                     }
                     tab_url
                 };
+                if let (Some(authority), Some(catalog)) =
+                    (&state.runtime_authority, authority_catalog)
+                {
+                    if let Err(error) = authority.observe_target(&runtime::LiveTargetObservation {
+                        client_instance_id: authority_client_instance,
+                        session_generation: connection_id.clone(),
+                        tab_key: authority_tab_key,
+                        runtime_id: runtime_id.clone(),
+                        url: connect_tab_url.clone(),
+                        title: authority_title,
+                        catalog,
+                    }) {
+                        eprintln!("actions-json resident target observation failed: {error}");
+                    }
+                }
                 // Logged after the runtimes lock is released so the file write
                 // never blocks other connections while holding the map lock.
                 append_lifecycle_log(
@@ -11396,6 +12763,11 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
                     state.clone(),
                     tx.clone(),
                 ));
+                if let Some(journal) = &state.operation_journal {
+                    if let Err(error) = send_outstanding_operation_receipt_queries(journal, &tx) {
+                        eprintln!("actions-json durable recovery query failed: {error}");
+                    }
+                }
             }
             Some("bridge_runtime_replay_summary") => {
                 let mut last_replay_summary = state.last_replay_summary.lock().await;
@@ -11428,6 +12800,17 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
             }
             Some("action_progress") => {
                 ingest_action_progress(&state, &item).await;
+            }
+            Some("operation_receipt") => {
+                if let (Some(journal), Some(operation_id)) = (
+                    state.operation_journal.as_ref(),
+                    item.get("operation_id").and_then(Value::as_str),
+                ) {
+                    let reconciliation = reconcile_extension_operation_receipt(journal, &item);
+                    if let Err(error) = reconciliation {
+                        eprintln!("actions-json durable receipt reconciliation failed operation_id={operation_id}: {error}");
+                    }
+                }
             }
             Some("action_call_output") | Some("action_error") => {
                 if let Some(call_id) = item.get("call_id").and_then(Value::as_str) {
@@ -11508,6 +12891,11 @@ async fn handle_extension_socket(socket: WebSocket, state: AppState) {
                     if let Some(runtime) = state.runtimes.lock().await.get_mut(runtime_id) {
                         runtime.last_seen_ms = now_ms();
                     }
+                    if let Some(authority) = &state.runtime_authority {
+                        if let Err(error) = authority.touch_runtime(runtime_id) {
+                            eprintln!("actions-json resident target heartbeat persistence failed: {error}");
+                        }
+                    }
                 }
             }
             Some("runtime_removed") => {
@@ -11585,6 +12973,11 @@ async fn remove_runtimes_for_connection(
     drop(runtimes);
     if removed_active {
         *state.active_runtime_id.lock().await = next_active;
+    }
+    if let Some(authority) = &state.runtime_authority {
+        if let Err(error) = authority.mark_session_offline(connection_id) {
+            eprintln!("actions-json resident target disconnect persistence failed: {error}");
+        }
     }
     if !removed.is_empty() {
         append_lifecycle_log(
@@ -11692,6 +13085,44 @@ fn spawn_liveness_sweep(state: AppState) {
     });
 }
 
+/// Bounded resident-owned retention maintenance. Coordination history is
+/// pruned before journal metadata so active queue rows and the history floor
+/// remain authoritative. Spill files are deleted before their metadata rows.
+fn spawn_durable_maintenance(state: AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
+        loop {
+            interval.tick().await;
+            let Some(authority) = state.runtime_authority.clone() else {
+                return;
+            };
+            let Some(journal) = state.operation_journal.clone() else {
+                return;
+            };
+            let payload_dir = state.payload.lock().await.payload_dir.clone();
+            let policy = state::SpillPolicy {
+                directory: payload_dir,
+                inline_limit_bytes: 0,
+                max_spill_bytes: 64 * 1024 * 1024,
+            };
+            let maintenance = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let maintenance_now = i64::try_from(now_ms()).unwrap_or(i64::MAX);
+                authority
+                    .maintain_durable_state(maintenance_now, 256)
+                    .map_err(|error| anyhow!(error.to_string()))?;
+                journal.purge_expired_with_spills_bounded(maintenance_now, &policy, 256)?;
+                Ok(())
+            })
+            .await;
+            match maintenance {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => eprintln!("actions-json durable maintenance failed: {error}"),
+                Err(error) => eprintln!("actions-json durable maintenance task failed: {error}"),
+            }
+        }
+    });
+}
+
 /// Reap exactly one runtime from the registry by id — the tab-close path. Unlike
 /// `remove_runtimes_for_connection` (which drops every runtime on a closed WS
 /// connection), this removes a single tab's runtime while the browser and its
@@ -11728,6 +13159,11 @@ async fn remove_single_runtime(state: &AppState, runtime_id: &str, reason: &str)
     drop(runtimes);
     if removed_active {
         *state.active_runtime_id.lock().await = next_active;
+    }
+    if let Some(authority) = &state.runtime_authority {
+        if let Err(error) = authority.mark_runtime_offline(runtime_id) {
+            eprintln!("actions-json resident target eviction persistence failed: {error}");
+        }
     }
     // Remember which TAB this id lived on so a later call carrying it can be
     // told its successor instead of just being refused. Ids rotate on every
@@ -11809,7 +13245,9 @@ async fn sweep_stale_runtimes(state: &AppState) -> usize {
 /// differ and the request is refused with `bridge_secret_mismatch` — which is
 /// the correct and informative answer, not a failure of this design.
 fn local_bridge_secret() -> String {
-    ExtensionAuthConfig::load(None).handshake_secret().to_string()
+    ExtensionAuthConfig::load(None)
+        .handshake_secret()
+        .to_string()
 }
 
 async fn list_tools(bridge: String) -> Result<()> {
@@ -11862,4 +13300,85 @@ async fn open_overlay(
     }
     println!("{body}");
     Ok(())
+}
+
+#[cfg(test)]
+mod resident_operation_error_result_tests {
+    use super::*;
+
+    #[test]
+    fn resident_failure_is_a_visible_tool_error_carrying_the_underlying_reason() {
+        let result = resident_operation_error_result(
+            "browser.run_javascript",
+            "debugger detached: target closed",
+        );
+        assert_eq!(result["isError"], json!(true));
+        let text = result["content"][0]["text"].as_str().expect("text content");
+        assert!(
+            text.contains("debugger detached: target closed"),
+            "the agent-visible text must include the underlying reason: {text}"
+        );
+        let parsed: Value = serde_json::from_str(text).expect("json body");
+        assert_eq!(parsed["error"]["code"], json!("resident_operation_failed"));
+        assert_eq!(parsed["ok"], json!(false));
+    }
+}
+
+#[cfg(test)]
+mod explicit_target_required_result_tests {
+    use super::*;
+
+    fn observe(authority: &runtime::RuntimeAuthority, tab: &str, runtime_id: &str, url: &str) {
+        authority
+            .observe_target(&runtime::LiveTargetObservation {
+                client_instance_id: "browser-install-a".into(),
+                session_generation: "session-1".into(),
+                tab_key: tab.into(),
+                runtime_id: runtime_id.into(),
+                url: Some(url.into()),
+                title: Some("Transfers".into()),
+                catalog: json!({"operations":[{"name":"page.info"}]}),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn names_live_targets_and_the_fields_to_route_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = runtime::RuntimeAuthority::open(dir.path().join("state.sqlite3")).unwrap();
+        observe(
+            &authority,
+            "tab-1",
+            "runtime-godaddy",
+            "https://dcc.godaddy.com/control/transfers",
+        );
+        let result = explicit_target_required_result(&authority);
+        assert_eq!(result["error"]["code"], json!("explicit_target_required"));
+        let live = result["error"]["evidence"]["live_targets"]
+            .as_array()
+            .unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0]["target_runtime_id"], json!("runtime-godaddy"));
+        assert_eq!(
+            live[0]["url"],
+            json!("https://dcc.godaddy.com/control/transfers")
+        );
+        let message = result["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("target_runtime_id") && message.contains("target_url_contains"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn says_no_tab_is_connected_when_none_is_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let authority = runtime::RuntimeAuthority::open(dir.path().join("state.sqlite3")).unwrap();
+        let result = explicit_target_required_result(&authority);
+        assert_eq!(result["error"]["evidence"]["live_targets"], json!([]));
+        assert!(result["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("no live tab is connected"));
+    }
 }

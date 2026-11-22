@@ -3,6 +3,80 @@
   "stage": 1,
   "primitives": [
     {
+      "name": "database.page.read",
+      "version": 1,
+      "stage": 1,
+      "summary": "Read the complete stored text of one page without navigating to it.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["database.page.read"],
+      "input_schema": {
+        "type": "object",
+        "required": ["url"],
+        "properties": { "url": { "type": "string" } },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["url", "text", "backend"],
+        "properties": {
+          "url": {"type": "string"},
+          "text": {"type": "string"},
+          "backend": {"type": "string"},
+          "rows_observed": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": false
+      },
+      "adapters": {
+        "extension": { "support": "unsupported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["handler_failed"],
+      "conformance": { "fixture": "page-corpus", "assertions": ["full_text_returned"] }
+    },
+    {
+      "name": "database.page.search",
+      "version": 1,
+      "stage": 1,
+      "summary": "Search stored full page text without navigating the browser.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["database.page.search"],
+      "input_schema": {
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+          "query": { "type": "string" },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 10 }
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["query", "pages", "backend"],
+        "properties": {
+          "query": {"type": "string"},
+          "pages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["url", "text"],
+              "properties": {"url": {"type": "string"}, "text": {"type": "string"}},
+              "additionalProperties": false
+            }
+          },
+          "backend": {"type": "string"}
+        },
+        "additionalProperties": false
+      },
+      "adapters": {
+        "extension": { "support": "unsupported" },
+        "embed": { "support": "supported" }
+      },
+      "errors": ["handler_failed"],
+      "conformance": { "fixture": "page-corpus", "assertions": ["url_ordered_matches_returned"] }
+    },
+    {
       "name": "browser.screenshot",
       "version": 1,
       "stage": 1,
@@ -578,8 +652,43 @@
             "type": "number"
           },
           "locator": {
-            "type": "object",
-            "description": "Locator resolved inside pointer.click immediately before pointer-event dispatch. Optional match_index selects one zero-based match after identity filtering and retargeting."
+           "type": "object",
+           "description": "Locator resolved inside pointer.click immediately before pointer-event dispatch. Optional match_index selects one zero-based match after identity filtering and retargeting. Supported keys only: selector, text, text_contains, text_equals, frame, retarget, match_index. There is no role/name/css key: use a11y.query for role+name, `selector` for CSS. Unknown keys fail with invalid_locator.",
+           "properties": {
+            "selector": {
+             "type": "string",
+             "description": "CSS selector for candidate elements. Omit to consider all interactive elements."
+            },
+            "text": {
+             "type": "string",
+             "description": "Alias of text_contains."
+            },
+            "text_contains": {
+             "type": "string",
+             "description": "Keep candidates whose text, aria-label, title, or value contains this."
+            },
+            "text_equals": {
+             "type": "string",
+             "description": "Keep candidates whose text, aria-label, title, or value equals this."
+            },
+            "frame": {
+             "type": [
+              "string",
+              "array"
+             ],
+             "description": "Optional same-origin iframe selector(s), outer->inner."
+            },
+            "retarget": {
+             "type": "object",
+             "description": "{selector, closest?, text_*?}: move from each identity match to a related element."
+            },
+            "match_index": {
+             "type": "integer",
+             "minimum": 0,
+             "description": "Zero-based pick after identity filtering and retargeting."
+            }
+           },
+           "additionalProperties": false
           },
           "button": {
             "type": "string",
@@ -1247,8 +1356,7 @@
           "support": "supported"
         },
         "embed": {
-          "support": "partial",
-          "reason": "trusted_key_events_unavailable"
+          "support": "supported"
         }
       },
       "errors": [
@@ -2528,6 +2636,84 @@
           "overlay_closed"
         ]
       }
+    },
+    {
+      "name": "transcript.session.list",
+      "version": 1,
+      "stage": 1,
+      "summary": "List transcript sessions visible to the authenticated embedded agent.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["transcript.session.list"],
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "after": {"type": "string"},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 500}
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["sessions", "next_after"],
+        "properties": {
+          "sessions": {"type": "array", "items": {"type": "string"}},
+          "next_after": {"type": ["string", "null"]}
+        },
+        "additionalProperties": false
+      },
+      "adapters": {
+        "extension": {"support": "unsupported"},
+        "embed": {"support": "supported"}
+      },
+      "errors": ["handler_failed"],
+      "conformance": {"fixture": "transcript-corpus", "assertions": ["owned_sessions_only"]}
+    },
+    {
+      "name": "transcript.session.read",
+      "version": 1,
+      "stage": 1,
+      "summary": "Read bounded agent memory from one authenticated user's transcript session.",
+      "capability_class": "privileged",
+      "portable": false,
+      "capabilities": ["transcript.session.read"],
+      "input_schema": {
+        "type": "object",
+        "required": ["session_id"],
+        "properties": {
+          "session_id": {"type": "string"},
+          "max_bytes": {"type": "integer", "minimum": 1, "maximum": 65536}
+        },
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "required": ["session_id", "events"],
+        "properties": {
+          "session_id": {"type": "string"},
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["sequence", "kind", "payload", "trust"],
+              "properties": {
+                "sequence": {"type": "integer", "minimum": 1},
+                "kind": {"type": "string"},
+                "payload": {},
+                "trust": {"const": "untrusted_transcript_data"}
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "adapters": {
+        "extension": {"support": "unsupported"},
+        "embed": {"support": "supported"}
+      },
+      "errors": ["handler_failed"],
+      "conformance": {"fixture": "transcript-corpus", "assertions": ["post_boundary_memory_only"]}
     }
   ]
 }

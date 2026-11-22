@@ -1,0 +1,4 @@
+streamlit>=1.52,<2
+psycopg[binary]>=3.2,<4
+cryptography>=45,<46
+snowflake-connector-python>=4.5,<5

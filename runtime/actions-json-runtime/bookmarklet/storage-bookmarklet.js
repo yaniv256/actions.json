@@ -1386,6 +1386,8 @@
 
   async function locatorElementInfo(args = {}) {
     const locator = args.locator;
+    const shapeError = invalidLocatorError("locator.element_info", locator);
+    if (shapeError) return shapeError;
     const renderedCandidates = resolveLocatorCandidates(locator).filter(isElementRendered);
     const element = renderedCandidates[0] || null;
     if (!element) {
@@ -1435,6 +1437,61 @@
     });
   }
 
+  // Locator vocabulary. Unknown keys used to be dropped silently, which turned
+  // an identity-less locator into "match every interactive element" and made
+  // mutating primitives act on the first one in DOM order (same defect fixed in
+  // the extension content.js). The bookmarklet has no frame resolution, so a
+  // `frame` key is rejected rather than silently searching the top document.
+  const BOOKMARKLET_LOCATOR_KEYS = new Set(["selector", "text", "text_contains", "text_equals", "retarget", "match_index"]);
+  const BOOKMARKLET_LOCATOR_KEY_HINTS = {
+    css: "use `selector`",
+    role: "use a11y.query for role/name, or `selector` + `text_equals`",
+    name: "use a11y.query for role/name, or `selector` + `text_equals`",
+    testid: "use `selector: \"[data-testid='...']\"`",
+    frame: "frame-scoped locators need the extension runtime; the bookmarklet only searches the top document",
+  };
+
+  function locatorShapeError(locator) {
+    if (!locator || typeof locator !== "object") return null;
+    const unknownKeys = Object.keys(locator).filter((key) => !BOOKMARKLET_LOCATOR_KEYS.has(key));
+    if (!unknownKeys.length) return null;
+    const hints = unknownKeys
+      .filter((key) => BOOKMARKLET_LOCATOR_KEY_HINTS[key])
+      .map((key) => `${key}: ${BOOKMARKLET_LOCATOR_KEY_HINTS[key]}`);
+    const supported = Array.from(BOOKMARKLET_LOCATOR_KEYS);
+    return {
+      unknown_keys: unknownKeys,
+      supported_keys: supported,
+      message: `Unsupported locator key(s): ${unknownKeys.join(", ")}. Supported: ${supported.join(", ")}.`
+        + (hints.length ? ` ${hints.join("; ")}.` : ""),
+    };
+  }
+
+  function invalidLocatorError(primitive, locator, evidenceKey = "locator") {
+    const shape = locatorShapeError(locator);
+    if (!shape) return null;
+    return primitiveError(primitive, "invalid_locator", shape.message, {
+      [evidenceKey]: locator,
+      unknown_keys: shape.unknown_keys,
+      supported_keys: shape.supported_keys,
+    });
+  }
+
+  function rectDiagnostic(element) {
+    if (!(element instanceof Element)) return null;
+    const rect = element.getBoundingClientRect();
+    return {
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height,
+      left: rect.left,
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.bottom,
+    };
+  }
+
   function resolveSingleVisibleLocator(locator) {
     return resolveLocatorCandidates(locator).find(isElementVisible) || null;
   }
@@ -1443,8 +1500,30 @@
     return resolveLocatorCandidates(locator)[0] || null;
   }
 
+  // Text identity sources. text_equals must equal ONE source (visible text,
+  // aria-label, title, value) — not the space-joined concatenation, which made
+  // any control whose aria-label repeats its visible text unmatchable by
+  // exact text (dash.cloudflare.com "Create Token", 2026-11-20).
+  // text / text_contains keep matching the joined haystack.
+  function elementTextSources(element) {
+    return [
+      element.textContent,
+      element.getAttribute("aria-label"),
+      element.getAttribute("title"),
+      element.getAttribute("value"),
+    ].filter(Boolean).map(normalizeText).filter(Boolean);
+  }
+
+  function elementTextMatches(element, text, exact) {
+    const sources = elementTextSources(element);
+    return exact ? sources.includes(text) : sources.join(" ").includes(text);
+  }
+
   function resolveLocatorCandidates(locator) {
     if (!locator || typeof locator !== "object") {
+      return [];
+    }
+    if (locatorShapeError(locator)) {
       return [];
     }
     let candidates = [];
@@ -1455,15 +1534,7 @@
     }
     const text = normalizeText(locator.text || locator.text_contains || locator.text_equals);
     const identityCandidates = !text ? candidates : candidates.filter((element) => {
-        const haystack = normalizeText(
-          [
-            element.textContent,
-            element.getAttribute("aria-label"),
-            element.getAttribute("title"),
-            element.getAttribute("value"),
-          ].filter(Boolean).join(" "),
-        );
-        return locator.text_equals ? haystack === text : haystack.includes(text);
+        return elementTextMatches(element, text, Boolean(locator.text_equals));
       });
     const retarget = locator.retarget;
     let resolvedCandidates = identityCandidates;
@@ -1483,15 +1554,7 @@
       const retargetText = normalizeText(retarget.text || retarget.text_contains || retarget.text_equals);
       if (retargetText) {
         resolvedCandidates = resolvedCandidates.filter((element) => {
-          const haystack = normalizeText(
-            [
-              element.textContent,
-              element.getAttribute("aria-label"),
-              element.getAttribute("title"),
-              element.getAttribute("value"),
-            ].filter(Boolean).join(" "),
-          );
-          return retarget.text_equals ? haystack === retargetText : haystack.includes(retargetText);
+          return elementTextMatches(element, retargetText, Boolean(retarget.text_equals));
         });
       }
     }
@@ -1570,6 +1633,22 @@
     return primitiveSuccess("pointer.double_click", { double_clicked: true, x, y });
   }
 
+  // A mutating locator primitive used to require the target to be inside the
+  // viewport already and reported an offscreen-but-rendered control as
+  // "target_not_found", while locator.element_info auto-scrolled the same
+  // locator into view (dash.cloudflare.com "Add new policy", 2026-11-20).
+  // Scroll the first rendered candidate into view instead, and say so.
+  function resolveVisibleLocatorScrollingIfNeeded(locator) {
+    const visible = resolveSingleVisibleLocator(locator);
+    if (visible) return { element: visible, scrolled_into_view: false };
+    const rendered = resolveLocatorCandidates(locator).find(isElementRendered) || null;
+    if (!rendered || typeof rendered.scrollIntoView !== "function") return { element: null, scrolled_into_view: false };
+    rendered.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+    return isElementVisible(rendered)
+      ? { element: rendered, scrolled_into_view: true }
+      : { element: null, scrolled_into_view: false };
+  }
+
   function pointFromViewportPointOrLocator(primitive, value, role) {
     if (!value || typeof value !== "object") {
       return { error: primitiveError(primitive, "target_not_found", `No ${role} point or locator was provided.`, { [role]: value || null }) };
@@ -1584,8 +1663,14 @@
       if (viewportError) return { error: viewportError };
       return { point: { x, y }, element: document.elementFromPoint(x, y), geometry: { source: "coordinates", input: value, point: { x, y } } };
     }
-    const locator = value.locator && typeof value.locator === "object" ? value.locator : value;
-    const element = resolveSingleVisibleLocator(locator);
+    // Legacy top-level form shares the args object with pointer options
+    // (button, modifiers, ...), so only locator keys are taken from it.
+    const locator = value.locator && typeof value.locator === "object"
+      ? value.locator
+      : Object.fromEntries(Object.entries(value).filter(([key]) => BOOKMARKLET_LOCATOR_KEYS.has(key)));
+    const shapeError = invalidLocatorError(primitive, locator, role);
+    if (shapeError) return { error: shapeError };
+    const { element, scrolled_into_view: scrolledIntoView } = resolveVisibleLocatorScrollingIfNeeded(locator);
     if (!element) return { error: primitiveError(primitive, "target_not_found", `No visible element matched the ${role} locator.`, { [role]: locator }) };
     const geometry = visibilityGeometryFor(element);
     if (!geometry.clickable || !geometry.receives_events || !geometry.action_point) {
@@ -1594,7 +1679,7 @@
     return {
       point: geometry.action_point,
       element,
-      geometry: { source: "locator", locator, tag_name: element.tagName.toLowerCase(), text: normalizeText(element.textContent), bounding_box: rectDiagnostic(element), point: geometry.action_point, actionability: { clickable: geometry.clickable, receives_events: geometry.receives_events, fully_visible: geometry.fully_visible, occluded_by: geometry.occluded_by } },
+      geometry: { source: "locator", locator, scrolled_into_view: scrolledIntoView, tag_name: element.tagName.toLowerCase(), text: normalizeText(element.textContent), bounding_box: rectDiagnostic(element), point: geometry.action_point, actionability: { clickable: geometry.clickable, receives_events: geometry.receives_events, fully_visible: geometry.fully_visible, occluded_by: geometry.occluded_by } },
     };
   }
 
@@ -2154,6 +2239,8 @@
 
   function locatorTextContent(args = {}) {
     const locator = args.locator;
+    const shapeError = invalidLocatorError("locator.text_content", locator);
+    if (shapeError) return shapeError;
     const element = resolveSingleVisibleLocator(locator);
     if (!element) {
       return primitiveError("locator.text_content", "target_not_found", "No visible element matched the locator.", { locator });
@@ -2166,6 +2253,8 @@
 
   async function locatorWaitFor(args = {}) {
     const locator = args.locator;
+    const shapeError = invalidLocatorError("locator.wait_for", locator);
+    if (shapeError) return shapeError;
     const state = args.state || "visible";
     const timeoutMs = Math.max(0, Math.min(Number(args.timeout_ms ?? args.timeoutMs ?? 1000), 30000));
     const started = Date.now();

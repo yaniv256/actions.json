@@ -51,8 +51,8 @@ test("keyboard.press reports mixed host capability", async () => {
     {
       primitive: "keyboard.press",
       host: "embed",
-      support: "partial",
-      reason: "trusted_key_events_unavailable",
+      support: "supported",
+      reason: null,
       capability_class: "mixed",
       portable: false,
     },

@@ -57,7 +57,12 @@ for (const [runtime, source] of [
   });
 
   test(`${runtime}: locators can select a deterministic zero-based match`, () => {
-    const start = source.indexOf("resolveLocatorCandidates");
+    // Anchor on the definition, not the first call site: helpers placed between
+    // a caller and the resolver must not push the body out of the window.
+    const start = Math.max(
+      source.indexOf("function resolveLocatorCandidates("),
+      source.indexOf("const resolveLocatorCandidates ="),
+    );
     assert.ok(start >= 0, "locator resolver must be discoverable");
     const resolverBody = source.slice(start, start + 5000);
     assert.match(

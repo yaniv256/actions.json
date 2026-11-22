@@ -1,0 +1,69 @@
+{
+  "title": "Resolved capability snapshot",
+  "description": "The output of resolution and the only input a formatter accepts. It names the host it was resolved FOR; a formatter given a disagreeing host selector fails closed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "host",
+    "installation_revision",
+    "catalog_fingerprint",
+    "primitives"
+  ],
+  "properties": {
+    "kind": {
+      "const": "resolved_snapshot"
+    },
+    "host": {
+      "type": "string",
+      "minLength": 1
+    },
+    "installation_revision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "catalog_fingerprint": {
+      "type": "string",
+      "pattern": "^cat-[0-9a-f]{32}$"
+    },
+    "resolved_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "projection": {
+      "enum": [
+        "served-web",
+        "streamlit-container-v2",
+        "streamlit-warehouse-v1"
+      ]
+    },
+    "primitives": {
+      "type": "array",
+      "items": {
+        "$ref": "https://actions.json/contracts/capability-resolution/resolution.schema.json"
+      }
+    },
+    "advertised": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "granted_but_unimplemented": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "implemented_but_ungranted": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://actions.json/contracts/capability-resolution/resolved-catalog.schema.json"
+}

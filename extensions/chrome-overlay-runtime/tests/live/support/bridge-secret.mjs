@@ -35,6 +35,20 @@ const readSecretFrom = (file) => {
 /** Every path checked, in the bridge's own order. Exported so an error can name them. */
 export function bridgeSecretCandidates(startDir = process.cwd()) {
   const candidates = [];
+  // The unitary CLI stores non-secret installation settings separately from
+  // pairing material. Resolve the configured state root first so tests use the
+  // same installation secret without scraping it from process output.
+  const installConfig = process.platform === 'win32'
+    ? path.join(process.env.LOCALAPPDATA || '', 'ActionsJson', 'config.json')
+    : path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'actions-json', 'config.json');
+  try {
+    const configuredStateDir = JSON.parse(fs.readFileSync(installConfig, 'utf8'))?.state_dir;
+    if (typeof configuredStateDir === 'string' && configuredStateDir.trim()) {
+      candidates.push(path.join(configuredStateDir, CONFIG_BASENAME));
+    }
+  } catch {
+    // An absent/malformed install config falls through to legacy discovery.
+  }
   const home = os.homedir();
   if (home) candidates.push(path.join(home, CONFIG_BASENAME));
   let cursor = path.resolve(startDir);
@@ -52,7 +66,11 @@ export function bridgeSecretCandidates(startDir = process.cwd()) {
 export function findBridgeSecret(startDir = process.cwd()) {
   const override = (process.env[BRIDGE_SECRET_ENV] || '').trim();
   if (override) return override;
-  for (const candidate of bridgeSecretCandidates(startDir)) {
+  return findSecretInCandidates(bridgeSecretCandidates(startDir));
+}
+
+function findSecretInCandidates(candidates) {
+  for (const candidate of candidates) {
     const secret = readSecretFrom(candidate);
     if (secret) return secret;
   }
@@ -66,13 +84,15 @@ export function findBridgeSecret(startDir = process.cwd()) {
  * keeps the actionable cause at the top of the output.
  */
 export function requireBridgeSecret(startDir = process.cwd()) {
-  const secret = findBridgeSecret(startDir);
+  const override = (process.env[BRIDGE_SECRET_ENV] || '').trim();
+  if (override) return override;
+  const candidates = bridgeSecretCandidates(startDir);
+  const secret = findSecretInCandidates(candidates);
   if (secret) return secret;
   throw new Error(
     `bridge handshake secret not found — the bridge's HTTP tool routes will answer 401 bridge_secret_missing.\n`
-    + `  Read "${SECRET_KEY}" from ${CONFIG_BASENAME} (the bridge also prints it at startup as `
-    + `"extension handshake secret: <secret>"), or set ${BRIDGE_SECRET_ENV}=<secret>.\n`
-    + `  Looked in:\n${bridgeSecretCandidates(startDir).map((p) => `    ${p}`).join('\n')}`,
+    + `  Read "${SECRET_KEY}" from the protected installation state or set ${BRIDGE_SECRET_ENV}=<secret>.\n`
+    + `  Looked in:\n${candidates.map((p) => `    ${p}`).join('\n')}`,
   );
 }
 
@@ -81,33 +101,14 @@ export function bridgeAuthHeaders(secret, base = {}) {
   return secret ? { ...base, authorization: `Bearer ${secret}` } : { ...base };
 }
 
-// Matches `print_extension_pairing_hint`'s first line in lib.rs:
-//   "extension handshake secret: <secret>"
-const PAIRING_HINT = /^\s*extension handshake secret:\s*(\S+)\s*$/m;
-
 /**
- * The secret a bridge WE SPAWNED printed into its own startup log.
- *
- * Preferred over the config-file search whenever the caller owns the bridge
- * process: it reports the secret that exact bridge is enforcing, so it stays
- * correct even if the bridge ran with a different cwd/HOME (and therefore a
- * different installation config) than this test process.
+ * Compatibility wrapper for spawned-bridge callers. Logs are deliberately
+ * ignored: secrets must come from protected configuration, never output.
  */
-export function readBridgeSecretFromLog(logPath) {
-  try {
-    return fs.readFileSync(logPath, 'utf8').match(PAIRING_HINT)?.[1] || null;
-  } catch {
-    return null;
-  }
-}
-
-/** Log-first, then the config-file search; throws the same actionable error. */
 export function requireSpawnedBridgeSecret(logPath, startDir = process.cwd()) {
-  const fromLog = logPath ? readBridgeSecretFromLog(logPath) : null;
-  if (fromLog) return fromLog;
   try {
     return requireBridgeSecret(startDir);
   } catch (error) {
-    throw new Error(`${error.message}\n  The spawned bridge's log had no pairing hint either: ${logPath}`);
+    throw new Error(`${error.message}\n  Spawned bridge log intentionally contains no pairing secret: ${logPath}`);
   }
 }

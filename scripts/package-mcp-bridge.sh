@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Packages the actions-json-mcp bridge binary for one platform into a
-# tarball named actions-json-mcp-<version>-<slug>.tar.gz and appends its
-# checksum to SHA256SUMS.txt.
+# Packages the native actions-json CLI.
 #
 # Args:
 #   --version <v>   release version (default: from GITHUB_REF_NAME)
@@ -40,9 +38,11 @@ bridge_dir="$repo_root/mcp/actions-json-mcp"
 workspace_target_dir="$repo_root/mcp/target"
 
 # Windows binaries carry a .exe suffix.
-bin_name="actions-json-mcp"
+source_bin_name="actions-json-mcp"
+cli_bin_name="actions-json"
 if [[ "$slug" == win-* ]]; then
-  bin_name="actions-json-mcp.exe"
+  source_bin_name="actions-json-mcp.exe"
+  cli_bin_name="actions-json.exe"
 fi
 
 # Build. With a target triple the binary lands under target/<triple>/release.
@@ -55,9 +55,9 @@ else
   target_dir="$workspace_target_dir/release"
 fi
 
-cargo "${build_args[@]}"
+CFLAGS="${CFLAGS:--O2}" cargo "${build_args[@]}"
 
-artifact_name="actions-json-mcp-${version}-${slug}.tar.gz"
+artifact_name="actions-json-${version}-${slug}.tar.gz"
 
 if [[ "$out_dir" != /* ]]; then
   out_dir="$repo_root/$out_dir"
@@ -68,13 +68,13 @@ rm -f "$out_dir/$artifact_name"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-install -m 755 "$target_dir/$bin_name" "$tmp_dir/$bin_name"
+install -m 755 "$target_dir/$source_bin_name" "$tmp_dir/$cli_bin_name"
 install -m 644 "$bridge_dir/README.md" "$tmp_dir/README.md"
 printf '%s\n' "$version" > "$tmp_dir/VERSION"
 
 (
   cd "$tmp_dir"
-  tar -czf "$out_dir/$artifact_name" "$bin_name" README.md VERSION
+  tar -czf "$out_dir/$artifact_name" "$cli_bin_name" README.md VERSION
 )
 
 (

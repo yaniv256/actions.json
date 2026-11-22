@@ -1,0 +1,81 @@
+{
+  "schema": "actions-json/capability-resolution/golden-fingerprints/v1",
+  "spec": "./fingerprint.spec.md",
+  "note": "Computed, not invented. An implementation producing a different digest for a listed preimage is non-conforming even if its own tests pass.",
+  "cases": [
+    {
+      "kind": "installation_revision",
+      "description": "no active namespaces",
+      "records": [],
+      "preimage": "actions-json/installation-revision/v1\n",
+      "expected": "rev-c246694ac47652e947ae931472ff11bb"
+    },
+    {
+      "kind": "installation_revision",
+      "description": "one provider registering the whole namespace",
+      "records": [
+        "overlay\toverlay-provider\tunspecified\t*"
+      ],
+      "preimage": "actions-json/installation-revision/v1\noverlay\toverlay-provider\tunspecified\t*\n",
+      "expected": "rev-383698c9761e61b79fe47807772d6da2"
+    },
+    {
+      "kind": "installation_revision",
+      "description": "two namespaces, subset registration, byte-wise sorted",
+      "records": [
+        "data\texample-sql\towner_rights\tdata.describe,data.query",
+        "overlay\toverlay-provider\tunspecified\t*"
+      ],
+      "preimage": "actions-json/installation-revision/v1\ndata\texample-sql\towner_rights\tdata.describe,data.query\noverlay\toverlay-provider\tunspecified\t*\n",
+      "expected": "rev-7a549aa29fb589634ff10232874c9379"
+    },
+    {
+      "kind": "installation_revision",
+      "description": "same providers, caller_rights instead of owner_rights -- must differ",
+      "records": [
+        "data\texample-sql\tcaller_rights\tdata.describe,data.query",
+        "overlay\toverlay-provider\tunspecified\t*"
+      ],
+      "preimage": "actions-json/installation-revision/v1\ndata\texample-sql\tcaller_rights\tdata.describe,data.query\noverlay\toverlay-provider\tunspecified\t*\n",
+      "expected": "rev-b5066c17d31b8ea45c1e98d7e91c0c2d"
+    },
+    {
+      "kind": "catalog_fingerprint",
+      "description": "empty catalog",
+      "records": [],
+      "preimage": "actions-json/catalog-fingerprint/v2\n",
+      "expected": "cat-a8fea6366258685e96ece002650b25c2"
+    },
+    {
+      "kind": "catalog_fingerprint",
+      "description": "mixed supported and unsupported",
+      "records": [
+        "browser.open_tab\tunsupported\tcapability_unavailable\tcompatibility_override\t",
+        "overlay.open\tsupported\t\tprovider_registration\t",
+        "pointer.click\tsupported\t\tprovider_registration\t"
+      ],
+      "preimage": "actions-json/catalog-fingerprint/v2\nbrowser.open_tab\tunsupported\tcapability_unavailable\tcompatibility_override\t\noverlay.open\tsupported\t\tprovider_registration\t\npointer.click\tsupported\t\tprovider_registration\t\n",
+      "expected": "cat-d84cdb829396087e795a4ee81c742983"
+    },
+    {
+      "kind": "catalog_fingerprint",
+      "description": "identical support, different decided_by -- must differ",
+      "records": [
+        "browser.open_tab\tunsupported\tcapability_unavailable\tcall_context\t",
+        "overlay.open\tsupported\t\tprovider_registration\t",
+        "pointer.click\tsupported\t\tprovider_registration\t"
+      ],
+      "preimage": "actions-json/catalog-fingerprint/v2\nbrowser.open_tab\tunsupported\tcapability_unavailable\tcall_context\t\noverlay.open\tsupported\t\tprovider_registration\t\npointer.click\tsupported\t\tprovider_registration\t\n",
+      "expected": "cat-59b4ded5f8e4b2776f153e28a8178f25"
+    },
+    {
+      "kind": "domain_separation",
+      "description": "identical records under both domains produce different digests",
+      "records": [
+        "x\ty\tz\t*"
+      ],
+      "expected_installation": "rev-d4e5fde49232e54f8a45ab69829a5d24",
+      "expected_catalog": "cat-ce524b3ac1a5a88608c7249659351d2d"
+    }
+  ]
+}

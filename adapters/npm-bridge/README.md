@@ -44,7 +44,7 @@ build-from-source instructions (clone the repo and
 ## How it works
 
 The package ships no binary. On first invocation it downloads
-`actions-json-mcp-<version>-<platform>.tar.gz` from the matching
+`actions-json-<version>-<platform>.tar.gz` from the matching
 `extension-v<version>` GitHub release, extracts the binary into a local cache
 (`.bin/<version>-<slug>/`), and execs it. Subsequent runs reuse the cached
 binary.

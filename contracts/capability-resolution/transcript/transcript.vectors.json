@@ -1,0 +1,17 @@
+{
+  "kind": "actions.json/transcript-vectors/v1",
+  "vectors": [
+    {"name": "owned-read", "operation": "read", "expect": "visible"},
+    {"name": "cross-user-token", "operation": "read", "expect": "not_found"},
+    {"name": "same-key-same-redacted-content", "operation": "append", "expect": "already_persisted"},
+    {"name": "same-key-different-content", "operation": "append", "expect": "idempotency_conflict"},
+    {"name": "memory-boundary", "operation": "memory", "expect": "post_boundary_only"},
+    {"name": "developer-read", "operation": "developer_read", "expect": "audit_before_disclosure"},
+    {"name": "developer-membership-unavailable", "operation": "developer_read", "expect": "not_found"},
+    {"name": "storage-outage", "operation": "append", "expect": "history_not_persisted"},
+    {"name": "soft-delete", "operation": "read", "expect": "not_found"},
+    {"name": "uninstall-wins", "operation": "reconcile", "expect": "not_found"},
+    {"name": "nested-secret", "operation": "append", "expect": "redacted_before_digest"},
+    {"name": "page-limit", "operation": "read", "expect": "bounded"}
+  ]
+}
