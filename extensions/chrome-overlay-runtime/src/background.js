@@ -99,6 +99,7 @@ import {
   readDeclaredProjectionCache,
 } from "./agent/projection-cache-store.mjs";
 import { applyProjectionCacheInvalidations } from "./agent/projection-cache-policy.mjs";
+import { createExtensionOperationReceiptStore } from "./agent/extension-operation-receipts.mjs";
 
 const SESSION_STATE_KEY = "actionsJsonOrdinarySessions.v2";
 const LEGACY_SESSION_STATE_KEY = "ACTIONS_JSON_OVERLAY_SESSION_STATE";
@@ -906,7 +907,49 @@ const sendBridgeItem = (item) => {
   return false;
 };
 
-const sendBridgeOutputItem = (item) => bridgeOutputDeliveryQueue.deliver(item, sendBridgeItem);
+const extensionOperationReceipts = createExtensionOperationReceiptStore({ storageArea: chrome.storage.local });
+const durableOperationIdsByCallId = new Map();
+
+const sendBridgeOutputItem = async (item) => {
+  const operationId = item?.operation_id || durableOperationIdsByCallId.get(item?.call_id) || null;
+  const decorated = operationId ? { ...item, operation_id: operationId } : item;
+  if (operationId && (item?.type === "action_call_output" || item?.type === "action_error")) {
+    try {
+      await extensionOperationReceipts.markTerminal(operationId, decorated);
+    } catch (error) {
+      await appendBackgroundDiagnosticEvent({
+        type: "transport", name: "background.bridge.operation_receipt", ok: false,
+        summary: "Extension could not persist a terminal durable-operation receipt.",
+        input: { operation_id: operationId, call_id: item?.call_id || null },
+        output: { error_message: error?.message || String(error) },
+      });
+      return false;
+    } finally {
+      const callId = typeof item?.call_id === "string" && item.call_id ? item.call_id : null;
+      if (callId && durableOperationIdsByCallId.get(callId) === operationId) {
+        durableOperationIdsByCallId.delete(callId);
+      }
+    }
+  }
+  return bridgeOutputDeliveryQueue.deliver(decorated, sendBridgeItem);
+};
+
+const prepareDurableBridgeOperation = async (item) => {
+  const operationId = typeof item?.operation_id === "string" ? item.operation_id : null;
+  if (!operationId) return true;
+  const received = await extensionOperationReceipts.receive(operationId, {
+    call_id: item?.call_id || null, runtime_id: runtimeIdFromBridgeItem(item),
+  });
+  if (received.duplicate) {
+    sendBridgeItem({ type: "operation_receipt", operation_id: operationId, receipt: received.receipt });
+    return false;
+  }
+  const callId = typeof item?.call_id === "string" && item.call_id ? item.call_id : null;
+  if (callId) durableOperationIdsByCallId.set(callId, operationId);
+  const started = await extensionOperationReceipts.markStarted(operationId);
+  sendBridgeItem({ type: "operation_receipt", operation_id: operationId, receipt: started });
+  return true;
+};
 
 const newBridgeSessionId = () => `bridge-session-${Date.now().toString(36)}-${Math.random()
   .toString(36)
@@ -1078,6 +1121,7 @@ const sendRuntimeStatusForRegisteredRuntimes = () => {
 };
 
 const routeBridgeItemToTab = async (item) => {
+  if (item?.type === "action_call" && !(await prepareDurableBridgeOperation(item))) return;
   const runtimeId = runtimeIdFromBridgeItem(item);
   const runtimeKey = runtimeKeyFromBridgeItem(item);
   const tabId = resolveBridgeItemTabId(item);
@@ -1097,6 +1141,18 @@ const routeBridgeItemToTab = async (item) => {
         connected_runtime_count: bridgeState?.activeRuntimeTabIds?.size || 0,
       },
     });
+    if (item?.type === "action_call") {
+      await sendBridgeOutputItem({
+        type: "action_error",
+        call_id: item?.call_id || null,
+        runtime_id: runtimeId,
+        error: {
+          code: "bridge_tab_unavailable",
+          message: "The bridge could not route this action to a claimed tab.",
+          recoverable: true,
+        },
+      });
+    }
     return;
   }
   // browser.screenshot does not need the content script — capture it directly in
@@ -1116,7 +1172,7 @@ const routeBridgeItemToTab = async (item) => {
       call_id: item.call_id,
       arguments: item.arguments,
     });
-    sendBridgeOutputItem(
+    await sendBridgeOutputItem(
       result.ok
         ? {
             type: "action_call_output",
@@ -1167,7 +1223,7 @@ const routeBridgeItemToTab = async (item) => {
         },
       };
     }
-    sendBridgeOutputItem(
+    await sendBridgeOutputItem(
       result && result.ok !== false && !result.error
         ? {
             type: "action_call_output",
@@ -1576,6 +1632,15 @@ const connectBackgroundBridge = async (state, options = {}) => {
         sendRuntimeStatusForRegisteredRuntimes();
         return;
       }
+      if (item?.type === "operation_receipt_query") {
+        extensionOperationReceipts.query(item?.operation_id).then((receipt) => {
+          sendBridgeItem({ type: "operation_receipt", operation_id: item?.operation_id || null, receipt });
+        }).catch((error) => {
+          sendBridgeItem({ type: "operation_receipt", operation_id: item?.operation_id || null, receipt: null,
+            error: { code: "receipt_query_failed", message: error?.message || String(error) } });
+        });
+        return;
+      }
       if (item?.type === "credential_hydration") {
         handleCredentialHydrationItem(item)
           .catch((error) => rejectCredentialHydrationItem(item, error))
@@ -1583,8 +1648,8 @@ const connectBackgroundBridge = async (state, options = {}) => {
         return;
       }
       if (item?.type === "state_projection_call") {
-        handleBridgeStateProjectionCall(item).catch((error) => {
-          appendBackgroundDiagnosticEvent({
+        handleBridgeStateProjectionCall(item).catch(async (error) => {
+          await appendBackgroundDiagnosticEvent({
             type: "transport",
             name: "background.bridge.state_projection",
             ok: false,
@@ -1596,7 +1661,7 @@ const connectBackgroundBridge = async (state, options = {}) => {
             },
             output: { error_message: error.message || String(error) },
           });
-          sendBridgeOutputItem({
+          await sendBridgeOutputItem({
             type: "action_error",
             call_id: item?.call_id || null,
             runtime_id: runtimeIdFromBridgeItem(item),
@@ -1610,8 +1675,8 @@ const connectBackgroundBridge = async (state, options = {}) => {
         return;
       }
       if (item?.type === "site_action_call") {
-        handleBridgeSiteActionCall(item).catch((error) => {
-          appendBackgroundDiagnosticEvent({
+        handleBridgeSiteActionCall(item).catch(async (error) => {
+          await appendBackgroundDiagnosticEvent({
             type: "transport",
             name: "background.bridge.site_action",
             ok: false,
@@ -1623,7 +1688,7 @@ const connectBackgroundBridge = async (state, options = {}) => {
             },
             output: { error_message: error.message || String(error) },
           });
-          sendBridgeOutputItem({
+          await sendBridgeOutputItem({
             type: "action_error",
             call_id: item?.call_id || null,
             runtime_id: runtimeIdFromBridgeItem(item),
@@ -4602,8 +4667,8 @@ const executeBridgeStateProjectionItem = async (item, tab) => {
 const handleBridgeStateProjectionCall = async (item) => {
   const callId = item?.call_id || null;
   const runtimeId = runtimeIdFromBridgeItem(item);
-  const fail = (code, message, extra = {}) => {
-    sendBridgeOutputItem({
+  const fail = async (code, message, extra = {}) => {
+    await sendBridgeOutputItem({
       type: "action_error",
       call_id: callId,
       runtime_id: runtimeId,
@@ -4612,7 +4677,7 @@ const handleBridgeStateProjectionCall = async (item) => {
   };
   const tabId = resolveBridgeItemTabId(item);
   if (!Number.isInteger(tabId)) {
-    fail("claim_missing", "Bridge state projection call could not be routed to a claimed tab.", {
+    await fail("claim_missing", "Bridge state projection call could not be routed to a claimed tab.", {
       next_step: ROUTE_ERROR_NEXT_STEP.claim_missing,
     });
     return;
@@ -4621,7 +4686,7 @@ const handleBridgeStateProjectionCall = async (item) => {
   try {
     tab = await chrome.tabs.get(tabId);
   } catch (_error) {
-    fail("tab_closed", "Bridge state projection call routed to a tab that no longer exists.", {
+    await fail("tab_closed", "Bridge state projection call routed to a tab that no longer exists.", {
       tab_id: tabId,
       next_step: ROUTE_ERROR_NEXT_STEP.tab_closed,
     });
@@ -4629,7 +4694,7 @@ const handleBridgeStateProjectionCall = async (item) => {
   }
   const result = await executeBridgeStateProjectionItem(item, tab);
   if (result.ok === false || result.output?.ok === false) {
-    sendBridgeItem({
+    await sendBridgeOutputItem({
       type: "action_error",
       call_id: callId,
       runtime_id: runtimeId,
@@ -4640,7 +4705,7 @@ const handleBridgeStateProjectionCall = async (item) => {
     });
     return;
   }
-  sendBridgeItem({
+  await sendBridgeOutputItem({
     type: "action_call_output",
     call_id: callId,
     runtime_id: runtimeId,
@@ -4691,10 +4756,11 @@ const executeBridgeSiteActionItem = async (item, tab) => {
 };
 
 const handleBridgeSiteActionCall = async (item) => {
+  if (!(await prepareDurableBridgeOperation(item))) return;
   const callId = item?.call_id || null;
   const runtimeId = runtimeIdFromBridgeItem(item);
-  const fail = (code, message, extra = {}) => {
-    sendBridgeItem({
+  const fail = async (code, message, extra = {}) => {
+    await sendBridgeOutputItem({
       type: "action_error",
       call_id: callId,
       runtime_id: runtimeId,
@@ -4703,7 +4769,7 @@ const handleBridgeSiteActionCall = async (item) => {
   };
   const tabId = resolveBridgeItemTabId(item);
   if (!Number.isInteger(tabId)) {
-    fail("claim_missing", "Bridge site action call could not be routed to a claimed tab.", {
+    await fail("claim_missing", "Bridge site action call could not be routed to a claimed tab.", {
       next_step: ROUTE_ERROR_NEXT_STEP.claim_missing,
     });
     return;
@@ -4712,7 +4778,7 @@ const handleBridgeSiteActionCall = async (item) => {
   try {
     tab = await chrome.tabs.get(tabId);
   } catch (_error) {
-    fail("tab_closed", "Bridge site action call routed to a tab that no longer exists.", {
+    await fail("tab_closed", "Bridge site action call routed to a tab that no longer exists.", {
       tab_id: tabId,
       next_step: ROUTE_ERROR_NEXT_STEP.tab_closed,
     });
@@ -4748,7 +4814,7 @@ const handleBridgeSiteActionCall = async (item) => {
         message: "Site action execution failed in the extension runtime.",
       },
     };
-    const sent = sendBridgeOutputItem(outputItem);
+    const sent = await sendBridgeOutputItem(outputItem);
     await appendBackgroundDiagnosticEvent({
       type: "transport",
       name: "background.bridge.site_action_output",
@@ -4776,7 +4842,7 @@ const handleBridgeSiteActionCall = async (item) => {
     runtime_id: runtimeId,
     output: result.output,
   };
-  const sent = sendBridgeOutputItem(outputItem);
+  const sent = await sendBridgeOutputItem(outputItem);
   await appendBackgroundDiagnosticEvent({
     type: "transport",
     name: "background.bridge.site_action_output",
@@ -7288,9 +7354,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "actions-json:bridge-protocol") {
-    const sent = sendBridgeOutputItem(message.item);
-    if (!sent) {
-      appendBackgroundDiagnosticEvent({
+    sendBridgeOutputItem(message.item).then(async (sent) => {
+      if (!sent) {
+        await appendBackgroundDiagnosticEvent({
         type: "transport",
         name: "background.bridge.websocket",
         ok: false,
@@ -7303,9 +7369,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         output: {
           connected: false,
         },
-      });
-    }
-    sendResponse({ ok: sent, connected: sent });
+        });
+      }
+      sendResponse({ ok: sent, connected: sent });
+    });
     return true;
   }
 

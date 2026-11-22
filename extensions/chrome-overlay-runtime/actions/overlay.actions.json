@@ -298,7 +298,42 @@
       },
       "locator": {
        "type": "object",
-       "description": "Locator resolved inside pointer.click immediately before pointer-event dispatch. Use this instead of cached coordinates when pacing or re-rendering can move the target. Optional match_index selects one zero-based match after identity filtering and retargeting."
+       "description": "Locator resolved inside pointer.click immediately before pointer-event dispatch. Use this instead of cached coordinates when pacing or re-rendering can move the target. Optional match_index selects one zero-based match after identity filtering and retargeting. Supported keys only: selector, text, text_contains, text_equals, frame, retarget, match_index. There is no role/name/css key: use a11y.query for role+name, `selector` for CSS. Unknown keys fail with invalid_locator.",
+       "properties": {
+        "selector": {
+         "type": "string",
+         "description": "CSS selector for candidate elements. Omit to consider all interactive elements."
+        },
+        "text": {
+         "type": "string",
+         "description": "Alias of text_contains."
+        },
+        "text_contains": {
+         "type": "string",
+         "description": "Keep candidates whose text, aria-label, title, or value contains this."
+        },
+        "text_equals": {
+         "type": "string",
+         "description": "Keep candidates whose text, aria-label, title, or value equals this."
+        },
+        "frame": {
+         "type": [
+          "string",
+          "array"
+         ],
+         "description": "Optional same-origin iframe selector(s), outer->inner."
+        },
+        "retarget": {
+         "type": "object",
+         "description": "{selector, closest?, text_*?}: move from each identity match to a related element."
+        },
+        "match_index": {
+         "type": "integer",
+         "minimum": 0,
+         "description": "Zero-based pick after identity filtering and retargeting."
+        }
+       },
+       "additionalProperties": false
       },
       "button": {
        "type": "string",
@@ -3790,15 +3825,42 @@
     "properties": {
      "locator": {
       "type": "object",
+      "description": "Locator. Supported keys only: selector, text, text_contains, text_equals, frame, retarget, match_index. There is no role/name/css key: use a11y.query for role+name, `selector` for CSS. Unknown keys fail with invalid_locator.",
       "properties": {
+       "selector": {
+        "type": "string",
+        "description": "CSS selector for candidate elements. Omit to consider all interactive elements."
+       },
+       "text": {
+        "type": "string",
+        "description": "Alias of text_contains."
+       },
+       "text_contains": {
+        "type": "string",
+        "description": "Keep candidates whose text, aria-label, title, or value contains this."
+       },
+       "text_equals": {
+        "type": "string",
+        "description": "Keep candidates whose text, aria-label, title, or value equals this."
+       },
        "frame": {
         "type": [
          "string",
          "array"
         ],
-        "description": "Optional CSS selector (or array of selectors, outer->inner) for iframe(s) to target inside. Same-origin only; a cross-origin frame errors frame_cross_origin."
+        "description": "Optional same-origin iframe selector(s), outer->inner."
+       },
+       "retarget": {
+        "type": "object",
+        "description": "{selector, closest?, text_*?}: move from each identity match to a related element."
+       },
+       "match_index": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Zero-based pick after identity filtering and retargeting."
        }
-      }
+      },
+      "additionalProperties": false
      }
     },
     "required": [
@@ -3922,7 +3984,42 @@
      },
      "locator": {
       "type": "object",
-      "description": "Locator resolved inside pointer.click immediately before pointer-event dispatch. Use this instead of cached coordinates when pacing or re-rendering can move the target. Optional match_index selects one zero-based match after identity filtering and retargeting."
+      "description": "Locator resolved inside pointer.click immediately before pointer-event dispatch. Use this instead of cached coordinates when pacing or re-rendering can move the target. Optional match_index selects one zero-based match after identity filtering and retargeting. Supported keys only: selector, text, text_contains, text_equals, frame, retarget, match_index. There is no role/name/css key: use a11y.query for role+name, `selector` for CSS. Unknown keys fail with invalid_locator.",
+      "properties": {
+       "selector": {
+        "type": "string",
+        "description": "CSS selector for candidate elements. Omit to consider all interactive elements."
+       },
+       "text": {
+        "type": "string",
+        "description": "Alias of text_contains."
+       },
+       "text_contains": {
+        "type": "string",
+        "description": "Keep candidates whose text, aria-label, title, or value contains this."
+       },
+       "text_equals": {
+        "type": "string",
+        "description": "Keep candidates whose text, aria-label, title, or value equals this."
+       },
+       "frame": {
+        "type": [
+         "string",
+         "array"
+        ],
+        "description": "Optional same-origin iframe selector(s), outer->inner."
+       },
+       "retarget": {
+        "type": "object",
+        "description": "{selector, closest?, text_*?}: move from each identity match to a related element."
+       },
+       "match_index": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Zero-based pick after identity filtering and retargeting."
+       }
+      },
+      "additionalProperties": false
      },
      "button": {
       "type": "string",

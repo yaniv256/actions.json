@@ -1,4 +1,17 @@
 {
+  "name": "@actions-json/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "files": [
+    "contracts/capability-resolution/reference-adapter.mjs",
+    "runtime/actions-json-runtime/src"
+  ],
+  "exports": {
+    "./embed": {
+      "types": "./runtime/actions-json-runtime/src/embed/index.d.ts",
+      "import": "./runtime/actions-json-runtime/src/embed/index.mjs"
+    }
+  },
   "scripts": {
     "audit:public-boundary": "node scripts/audit-public-boundary.mjs",
     "test:bridge-pairing-options-live": "xvfb-run -a node extensions/chrome-overlay-runtime/tests/live/bridge-pairing-options-smoke.mjs",
@@ -7,6 +20,7 @@
     "test:release-scripts": "node --test scripts/tests/*.test.mjs",
     "test:getting-started-docs": "node --test scripts/tests/getting-started-docs.test.mjs",
     "test:runtime": "node --test runtime/actions-json-runtime/tests/*.test.mjs && npx playwright test runtime/actions-json-runtime/tests/*.spec.mjs",
+    "test:embed-package": "node --test runtime/actions-json-runtime/tests/embed-package.test.mjs",
     "test:overlay-runtime": "playwright test extensions/chrome-overlay-runtime/tests/overlay-runtime-characterization.spec.js",
     "test:agent-surface": "playwright test extensions/chrome-overlay-runtime/tests/agent-surface.spec.js",
     "test:agent-popup": "playwright test extensions/chrome-overlay-runtime/tests/agent-popup.spec.js",
@@ -39,10 +53,12 @@
   "devDependencies": {
     "@messageformat/core": "^3.4.0",
     "@playwright/test": "1.60.0",
+    "ajv": "^8.20.0",
     "esbuild": "^0.24.0",
     "terser": "^5.48.0"
   },
   "dependencies": {
+    "@noble/hashes": "^2.4.0",
     "jose": "^6.2.3",
     "jsonata": "^2.2.1",
     "protoface-client": "0.1.0",

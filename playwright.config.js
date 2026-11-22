@@ -11,15 +11,24 @@
 //
 // Scoping testDir to the extension's own tests is the fix. `testIgnore` is belt
 // and braces for anyone who points Playwright somewhere else.
+//
+// `testDir` was scoped to the extension alone, and `testMatch` to `*.spec.js`.
+// The runtime's browser specs are `.spec.mjs` and live elsewhere, so they
+// matched neither: `npm run test:runtime` ends in a Playwright invocation that
+// exits 1 with "No tests found", and its browser gate has never run a test.
+// Both directories are listed, and both extensions are matched.
 module.exports = {
-  testDir: "extensions/chrome-overlay-runtime/tests",
+  testDir: ".",
   // Playwright's default testMatch also picks up `*.test.*`, which in this repo
   // means the ~90 node:test suites that live alongside the browser specs. Those
   // are run by `node --test` and import CommonJS in ways Playwright's ESM loader
   // rejects, so scanning them turns a green browser run into a wall of loader
   // errors that have nothing to do with the specs. Only `*.spec.js` is a
   // Playwright target here.
-  testMatch: "**/*.spec.js",
+  testMatch: [
+    "extensions/chrome-overlay-runtime/tests/**/*.spec.js",
+    "runtime/actions-json-runtime/tests/**/*.spec.mjs",
+  ],
   testIgnore: ["**/.worktrees/**", "**/node_modules/**"],
   // These specs stub the extension by routing https://actions-json.test/** to
   // files on disk; they do not launch a real browser profile or an unpacked

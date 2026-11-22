@@ -1,0 +1,102 @@
+{
+  "title": "Capability resolution vector corpus",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "path_base",
+    "documents",
+    "operations",
+    "vectors"
+  ],
+  "properties": {
+    "schema": {
+      "const": "actions-json/capability-resolution-vectors/v4"
+    },
+    "description": {
+      "type": "string"
+    },
+    "issue": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "schemas": {
+      "type": "object"
+    },
+    "path_base": {
+      "const": "repository_root"
+    },
+    "documents": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "path"
+        ],
+        "properties": {
+          "kind": {
+            "enum": [
+              "canonical",
+              "legacy_flat",
+              "resolved_snapshot"
+            ]
+          },
+          "declared_kind": {
+            "type": "string"
+          },
+          "compatibility_open_as": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "pointer": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "operations": {
+      "type": "object",
+      "required": [
+        "kinds"
+      ],
+      "properties": {
+        "note": {
+          "type": "string"
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "vectors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "https://actions.json/contracts/capability-resolution/vector-case.schema.json"
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://actions.json/contracts/capability-resolution/vector-corpus.schema.json"
+}

@@ -1,0 +1,292 @@
+{
+  "title": "Action request, receipt, and public error",
+  "description": "The transport envelopes. A rerun-based boundary redelivers requests, so identity and digest are part of the contract rather than an implementation detail.",
+  "$defs": {
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The receipt-store key: the full authority scope. installation_id is STABLE identity, deliberately not installation_revision -- keying on the revision would invalidate outstanding calls on any unrelated config change. authority_mode is part of the key because the same call under owner and caller rights executes with different privileges. session_id is an opaque continuation_id carried by the browser: an untrusted lookup token the trusted side binds to the authenticated principal, never a durable identity in itself.",
+      "required": [
+        "installation_id",
+        "tenant_id",
+        "principal_id",
+        "session_id",
+        "runtime_id",
+        "authority_mode"
+      ],
+      "properties": {
+        "installation_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tenant_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "principal_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The AUTHENTICATED viewer, from the trusted side. Never browser-supplied."
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Opaque continuation_id. Untrusted; losing it loses replay, never broadens authority."
+        },
+        "runtime_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "authority_mode": {
+          "enum": [
+            "owner_rights",
+            "caller_rights",
+            "unspecified"
+          ]
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "call_id",
+        "primitive",
+        "arguments",
+        "scope"
+      ],
+      "properties": {
+        "call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "primitive": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments": {
+          "type": "object"
+        },
+        "scope": {
+          "$ref": "#/$defs/scope"
+        },
+        "observed_installation_revision": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Diagnostic only. Never a lease and never a precondition."
+        }
+      }
+    },
+    "public_error": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Crosses into a browser. Every field is a CLOSED vocabulary or a bounded literal: an open string in this envelope is a value-leakage path even when no forbidden key names it, which is why testing key names alone is insufficient.",
+      "required": [
+        "code",
+        "message",
+        "correlation_id"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "capability_unavailable",
+            "handler_missing",
+            "handler_failed",
+            "call_id_conflict",
+            "missing_call_id",
+            "principal_mismatch",
+            "delivery_failed",
+            "invalid_arguments",
+            "unknown_disposition",
+            "reconcile_required"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 300,
+          "description": "A stable sanitized sentence, never raw exception text. A handler failure routinely carries SQL, account locators, connection identifiers or file paths, and this envelope reaches a browser."
+        },
+        "correlation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "Opaque. The join key to host-local diagnostics, carrying no content itself."
+        },
+        "reason": {
+          "oneOf": [
+            {
+              "enum": [
+                "namespace_unavailable",
+                "capability_unavailable",
+                "provider_unavailable",
+                "provider_conflict",
+                "primitive_not_found",
+                "host_unknown",
+                "host_mismatch",
+                "host_undeclared",
+                "principal_mismatch",
+                "unknown_disposition"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "decided_by": {
+          "oneOf": [
+            {
+              "enum": [
+                "dictionary",
+                "provider_registration",
+                "host_state",
+                "compatibility_override",
+                "call_context"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "current_installation_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "refresh_scheduled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "receipt": {
+      "description": "Discriminated by state. The previous single object accepted in-flight receipts with terminal payloads, settled receipts with neither result nor error, and settled receipts with both.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "call_id",
+            "state",
+            "request_digest",
+            "owner_token"
+          ],
+          "properties": {
+            "call_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "state": {
+              "const": "reserved"
+            },
+            "request_digest": {
+              "type": "string",
+              "pattern": "^req-[0-9a-f]{32}$",
+              "description": "Canonical per request-digest.spec.md. An arbitrary string here makes same-id-different-payload undetectable across languages."
+            },
+            "owner_token": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Issued by acquisition. A reservation without one cannot be settled by anybody, and permitting null let the schema allow exactly what the implementation forbids."
+            },
+            "reserved_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "call_id",
+            "state",
+            "request_digest",
+            "result"
+          ],
+          "properties": {
+            "call_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "state": {
+              "const": "settled_success"
+            },
+            "request_digest": {
+              "type": "string",
+              "pattern": "^req-[0-9a-f]{32}$",
+              "description": "Canonical per request-digest.spec.md. An arbitrary string here makes same-id-different-payload undetectable across languages."
+            },
+            "result": {
+              "type": "object"
+            },
+            "from_receipt": {
+              "type": "boolean"
+            },
+            "settled_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "call_id",
+            "state",
+            "request_digest",
+            "error"
+          ],
+          "properties": {
+            "call_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "state": {
+              "const": "settled_error"
+            },
+            "request_digest": {
+              "type": "string",
+              "pattern": "^req-[0-9a-f]{32}$",
+              "description": "Canonical per request-digest.spec.md. An arbitrary string here makes same-id-different-payload undetectable across languages."
+            },
+            "error": {
+              "$ref": "#/$defs/public_error"
+            },
+            "from_receipt": {
+              "type": "boolean"
+            },
+            "settled_at": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  "type": "object",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/receipt"
+    },
+    {
+      "$ref": "#/$defs/public_error"
+    }
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://actions.json/contracts/capability-resolution/request-receipt.schema.json"
+}

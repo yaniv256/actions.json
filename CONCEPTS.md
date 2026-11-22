@@ -2,6 +2,12 @@
 
 Shared domain vocabulary for this project — entities, named processes, and status concepts with project-specific meaning. Seeded with core domain vocabulary, then accretes as ce-compound and ce-compound-refresh process learnings; direct edits are fine. Glossary only, not a spec or catch-all.
 
+## Embedded agent transcripts
+
+**Transcript ownership scope** — the server-derived combination of tenant, installation, authenticated user, and server-issued session that authorizes an ordinary user's transcript operations. A browser token is only an untrusted lookup value; it never selects or enlarges this scope.
+
+**Designated developer access** — standing support authority granted by server-managed membership for one installation. It permits transcript reads, exports, and recovery only inside that installation, and every such operation produces an immutable access audit event.
+
 ## Hosted Realtime session
 
 **Single-flight** — the OpenAI Realtime protocol constraint that at most one model response may be generating at any moment; a request to start a second while one is active is rejected. The hosted session manager models this constraint locally so its sends can serialize against it instead of colliding with it.
@@ -30,7 +36,80 @@ Prepared and applied records retain rollback or cleanup intent across worker rep
 
 ## Bridge and runtimes
 
-**Bridge** — the process that exposes a stable tool-call surface to agents and routes each call to a connected browser. It owns its own registry of connected runtimes; that registry is independent of the browser extension's internal session state, so a call the bridge can answer from its own knowledge stays live even when an extension-side handler is stuck.
+**CLI-first interface** — the non-interactive `actions-json` command is the
+primary automation surface. It accepts versioned JSON envelopes or operation
+shorthand on stdin and emits one structured result on stdout; `stream` extends
+the same contract to ordered NDJSON. It is designed to compose in shell scripts
+without editing an agent's MCP configuration or restarting the agent. MCP is a
+compatibility adapter over the same resident, not a second behavioral contract.
+
+**Resident** — one per-OS-user process that owns browser runtime connections,
+catalogs, cooperative profiles, profile-scoped target selections, mutation
+serialization, short target leases, durable operation status, and bounded audit
+records. CLI invocations are short-lived clients: they start or reuse the
+resident and require an exact protocol/version handshake. The resident removes
+the need for a daemon-global active tab while avoiding one browser bridge per
+shell command.
+
+**Operation envelope** — the versioned request accepted by the CLI. Its stable
+core is `protocol_version`, `operation`, and object-valued `arguments`; optional
+fields bind request identity, cooperative profile, explicit target constraints,
+expected catalog revision, output policy, timeout, and lease token. Secrets and
+operation bodies travel over stdin, never argv. Every response carries stable
+status/outcome identity so a script can reason about success, refusal, failure,
+and uncertainty without parsing prose.
+
+**Cooperative profile** — a named CLI caller identity with its own token, target
+selection, mutation attribution, and interference history. Profiles help
+multiple agents share one OS-user resident without a global-active-tab race;
+they are not security principals. When agents require security isolation, they
+run under different OS user accounts.
+
+**Target-scoped mutation revision** — a monotonic account of accepted mutations
+on one browser target. Mutation results report the revision and relevant
+interference so a caller can learn that another profile changed the page. It is
+advisory rather than a mandatory read-before-write precondition: a hard
+precondition would wedge ordinary scripts and turn a missed read into permanent
+loss of operability.
+
+**Target lease** — a bounded, renewable exclusive mutation window, normally no
+longer than one minute, granted to one cooperative profile for one target. A
+competing mutation fails quickly and tells its caller to re-evaluate; it does
+not wait and later run against invalid assumptions. A lease coordinates a
+short multi-step sequence but never grants browser authority or replaces the
+extension's tab authorization.
+
+**Indeterminate operation recovery** — the rule that a mutation which may have
+committed is never blindly retried. The caller preserves its operation ID,
+queries durable status, and reads the website through an independent projection.
+Only evidence that the intended effect is absent makes a retry safe.
+
+**Output spill** — a CLI result mode in which a large payload is written to an
+explicit or managed file and stdout carries bounded metadata. It prevents large
+projections or binary artifacts from crossing an agent context as tokens. Spill
+paths are capabilities with reported retention; consumers read only the portion
+they need.
+
+**Project version pin** — a `.actions-json-version` file discovered from the
+working directory upward. Signed installers must respect it and must not
+silently stage a different resident generation for that project; `update check`
+reports it for diagnostics.
+
+**Fenced CLI update** — POSIX replacement of an installed executable and its
+resident state store as one recoverable transition. The signed installer stages
+the verified executable and version; `update apply` prepares a copy-on-write
+store, stops the old resident, proves the candidate's exact version inside a U3
+fence, starts the candidate resident, and commits only after readiness. A failed
+candidate rolls both executable and store back instead of leaving a mixed
+generation. `update check` is read-only; `update recover` is an explicit replay
+of the same fenced path for a verified staged candidate.
+
+**Bridge** — the local resident plus the browser transport that exposes stable
+operation-call surfaces and routes each call to a connected browser. The
+resident owns the registry shared by CLI and MCP adapters. That registry is
+independent of the browser extension's internal hosted-agent session state, so
+a call answered from resident knowledge stays live even when an extension-side
+handler is stuck.
 
 **Runtime** — a single connected browser context (one tab) that the bridge can drive. Runtimes connect and disconnect over the session's lifetime, and their identifiers rotate as tabs are re-claimed or the transport is rebuilt, so a runtime is addressed by identity at call time rather than by a remembered handle.
 

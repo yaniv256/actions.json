@@ -1,0 +1,122 @@
+{
+  "title": "Canonical primitive contract document",
+  "description": "Host-independent primitive definitions. Carries no effective flat support: that shape is what makes a canonical document indistinguishable from a packaged one.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "kind",
+    "version",
+    "stage",
+    "primitives"
+  ],
+  "properties": {
+    "kind": {
+      "const": "canonical"
+    },
+    "version": {
+      "type": "integer"
+    },
+    "stage": {
+      "type": "integer"
+    },
+    "primitives": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "capability_class",
+          "portable"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+          },
+          "namespace": {
+            "type": "string",
+            "minLength": 1
+          },
+          "version": {
+            "type": "integer"
+          },
+          "stage": {
+            "type": "integer"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "capability_class": {
+            "enum": [
+              "portable",
+              "privileged",
+              "debug",
+              "mixed",
+              "transport"
+            ]
+          },
+          "portable": {
+            "type": "boolean"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "input_schema": {
+            "type": "object"
+          },
+          "output_schema": {
+            "type": "object"
+          },
+          "errors": {
+            "type": [
+              "array",
+              "object"
+            ]
+          },
+          "conformance": {
+            "type": [
+              "array",
+              "object"
+            ]
+          },
+          "adapters": {
+            "type": "object",
+            "description": "Migration compatibility input only.",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "support": {
+                  "enum": [
+                    "supported",
+                    "unsupported"
+                  ]
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "support": false,
+          "effect": {
+            "enum": [
+              "read_only",
+              "mutation"
+            ],
+            "description": "Semantic effect, from the primitive CONTRACT. A name list cannot express this."
+          }
+        }
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://actions.json/contracts/capability-resolution/canonical-document.schema.json"
+}

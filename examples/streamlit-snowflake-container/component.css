@@ -1,0 +1,40 @@
+.probe {
+  box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, var(--st-text-color) 18%, transparent);
+  border-radius: 1rem;
+  padding: 1rem;
+  color: var(--st-text-color);
+  background: var(--st-secondary-background-color);
+  font-family: var(--st-font);
+}
+
+.eyebrow {
+  margin: 0 0 0.25rem;
+  color: var(--st-primary-color);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+h2, .summary { margin: 0 0 0.75rem; }
+
+button {
+  border: 0;
+  border-radius: 0.6rem;
+  padding: 0.65rem 0.9rem;
+  background: var(--st-primary-color);
+  color: white;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+}
+
+pre {
+  overflow: auto;
+  margin: 0.9rem 0 0;
+  padding: 0.75rem;
+  border-radius: 0.6rem;
+  background: var(--st-background-color);
+  white-space: pre-wrap;
+}

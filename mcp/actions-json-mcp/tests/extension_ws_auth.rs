@@ -183,7 +183,10 @@ async fn page_origin_is_rejected_before_any_credential_frame_is_sent() {
     // vacuously, and the test would stay green even with the guard deleted —
     // a null experiment. This makes the leak possible so the guard is what
     // prevents it.
-    std::env::set_var("ACTIONS_JSON_OPENAI_API_KEY", "sk-proj-testtesttesttest7890");
+    std::env::set_var(
+        "ACTIONS_JSON_OPENAI_API_KEY",
+        "sk-proj-testtesttesttest7890",
+    );
 
     let root = tempfile::tempdir().unwrap();
     write_local_config(root.path());
@@ -293,10 +296,7 @@ async fn auth_check_exposes_the_exact_safe_handshake_rejection() {
         .oneshot(
             Request::builder()
                 .uri("/extension/auth-check?secret=not-the-right-secret")
-                .header(
-                    header::ORIGIN,
-                    format!("chrome-extension://{EXTENSION_ID}"),
-                )
+                .header(header::ORIGIN, format!("chrome-extension://{EXTENSION_ID}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -325,14 +325,8 @@ async fn auth_check_accepts_the_current_secret_without_echoing_it() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(format!(
-                    "/extension/auth-check?secret={}",
-                    bridge.secret
-                ))
-                .header(
-                    header::ORIGIN,
-                    format!("chrome-extension://{EXTENSION_ID}"),
-                )
+                .uri(format!("/extension/auth-check?secret={}", bridge.secret))
+                .header(header::ORIGIN, format!("chrome-extension://{EXTENSION_ID}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -508,9 +502,8 @@ async fn cors_responses_no_longer_advertise_wildcard_or_private_network() {
             "{method} {uri} still advertises a wildcard origin"
         );
         assert_eq!(
-            allow_origin.as_deref(),
-            Some(format!("chrome-extension://{EXTENSION_ID}").as_str()),
-            "{method} {uri} must scope CORS to the extension origin"
+            allow_origin, None,
+            "{method} {uri} must not enable browser CORS"
         );
         assert!(
             headers

@@ -18,7 +18,7 @@ function assetSlug(platform, arch) {
 }
 
 // Base binary name; Windows builds carry a .exe suffix inside the tarball.
-const BINARY_BASE = 'actions-json-mcp';
+const BINARY_BASE = 'actions-json';
 
 function binaryName(slug) {
   return slug && slug.startsWith('win-') ? `${BINARY_BASE}.exe` : BINARY_BASE;
@@ -48,11 +48,21 @@ function checksumsUrl(version) {
   return releaseAssetUrl(version, CHECKSUMS_FILE);
 }
 
+function manifestUrl(version) {
+  return releaseAssetUrl(version, 'release-manifest.json');
+}
+
+function signatureUrl(version) {
+  return releaseAssetUrl(version, 'release-manifest.sig');
+}
+
 module.exports = {
   assetSlug,
   assetFileName,
   downloadUrl,
   checksumsUrl,
+  manifestUrl,
+  signatureUrl,
   binaryName,
   BINARY_BASE,
   CHECKSUMS_FILE,

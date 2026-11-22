@@ -32,7 +32,9 @@ async fn connect_extension_socket(
     .unwrap();
     request.headers_mut().insert(
         header::ORIGIN,
-        auth.primary_origin().parse().expect("a valid origin header"),
+        auth.primary_origin()
+            .parse()
+            .expect("a valid origin header"),
     );
     let (socket, _) = connect_async(request).await.unwrap();
     socket
@@ -173,7 +175,7 @@ async fn runtime_count(app: axum::Router) -> usize {
 }
 
 #[tokio::test]
-async fn bridge_http_routes_accept_browser_preflight_requests() {
+async fn bridge_http_routes_refuse_browser_preflight_requests() {
     let app = app_from_manifest_value(json!({
         "tools": [
             {
@@ -197,19 +199,13 @@ async fn bridge_http_routes_accept_browser_preflight_requests() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    // U12: this used to assert `*` and `access-control-allow-private-network:
-    // true` — the pair that invited any public page into this loopback bridge.
-    // Preflight still succeeds, but only for the extension's own origin.
-    let allow_origin = response
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    // Compatibility HTTP is local-process-only and must advertise no browser
+    // origin, even to the extension itself.
+    assert!(response
         .headers()
         .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
-        .unwrap();
-    assert_ne!(allow_origin, "*");
-    assert!(allow_origin
-        .to_str()
-        .unwrap()
-        .starts_with("chrome-extension://"));
+        .is_none());
     assert!(response
         .headers()
         .get("access-control-allow-private-network")

@@ -20,10 +20,11 @@ It's **OpenAPI for website actions**: OpenAPI describes what a server can do;
 `actions.json` describes what a website can do. The voice agent is the product;
 the map is what makes it reliable.
 
-Three ways in: a **voice agent** for anyone on the current site; a **coding-agent
-bridge** (Claude Code, Codex) that drives the browser through an MCP server; and
-a **first-party map** a site owner publishes so every agent understands their
-site.
+Three ways in: a **voice agent** for anyone on the current site; the
+**`actions-json` CLI** for coding agents and shell scripts; and a **first-party
+map** a site owner publishes so every agent understands their site. An MCP
+adapter remains available for agent hosts that require MCP, but the CLI is the
+primary automation interface.
 
 <p align="center">
   <img src="docs/assets/agent-kanban-trello-actions-json.jpg" alt="Coding agents operating a live Trello board through actions.json, organized as a kanban board with Backlog, Next, Blocked, and In Progress lists" width="960">
@@ -36,7 +37,67 @@ and legible to a human at a glance.</em></p>
 
 ## Quickstart
 
-Register the bridge with your coding agent.
+The primary interface is the non-interactive `actions-json` command. Install the
+release matching the extension version. On Linux or macOS, download and inspect
+the installer, then run it with the release version:
+
+```bash
+curl -fLO https://raw.githubusercontent.com/yaniv256/actions.json/main/install-actions-json.sh
+chmod +x install-actions-json.sh
+./install-actions-json.sh --version <release-version>
+```
+
+On Windows PowerShell:
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/yaniv256/actions.json/main/install-actions-json.ps1 -OutFile install-actions-json.ps1
+.\install-actions-json.ps1 -Version <release-version>
+```
+
+The installers verify signed release metadata, select the CLI archive for the
+current platform, verify its byte count and SHA-256 digest, refuse rollback by
+default, respect a project `.actions-json-version` pin, and install the
+`actions-json` executable. They create the shorter `aj` alias only when that
+name is free; an existing command is preserved. Re-running the POSIX installer
+stages the verified candidate and asks the installed CLI to apply a fenced
+executable-and-state-store update with rollback on failed readiness. Windows
+replaces the verified executable atomically when possible, or leaves a verified
+staged replacement for a short helper after the running process exits.
+
+Once the CLI and Chrome extension are installed, create the one-time secure pairing:
+
+```bash
+actions-json doctor
+actions-json pair create --reveal-secret
+```
+
+Paste the revealed secret into the extension's **Bridge pairing** field, claim
+an ordinary website tab, then verify the connection without trusting the UI:
+
+```bash
+actions-json status
+actions-json target list
+actions-json list --target-id <target-id>
+```
+
+Discover an operation and compose it with ordinary shell tools:
+
+```bash
+actions-json describe trello.board.visible_lists.read --target-id <target-id>
+printf '%s\n' '{}' |
+  actions-json trello.board.visible_lists.read --target-id <target-id>
+```
+
+The command reads JSON from stdin and writes one versioned JSON result to
+stdout. It is designed for scripts: no prompts, no configuration-file editing,
+and no coding-agent restart. See
+[skills/operate-actions-json/SKILL.md](skills/operate-actions-json/SKILL.md) for
+envelopes, NDJSON streams, profiles, target routing, leases, recovery, and exit
+codes.
+
+### MCP compatibility
+
+If an agent host specifically requires MCP, register the compatibility adapter:
 
 **[Claude Code](https://claude.ai/code):**
 
@@ -54,7 +115,8 @@ On first run, `npx` downloads the prebuilt bridge for your platform (linux-x64,
 macos-x64, macos-arm64, win-x64), bundles the browser-control tool catalog, and
 creates your storage at `~/.actions-json/storage` — nothing to configure.
 
-The bridge drives a browser through the Chrome extension, so install that next:
+Both the CLI and MCP adapter use the same per-user resident and drive a browser
+through the Chrome extension, so install that next:
 
 1. Download `actions-json-overlay-runtime-*.zip` from the
    [latest release](https://github.com/yaniv256/actions.json/releases) and unzip
@@ -62,7 +124,7 @@ The bridge drives a browser through the Chrome extension, so install that next:
 2. Open `chrome://extensions` and turn on **Developer mode** (top-right toggle).
 3. Click **Load unpacked** and select the unzipped folder.
 
-Connect it to the bridge and take control of a tab. Ask your agent to explore a
+Connect it to the resident and take control of a tab. Ask your agent to explore a
 site and write an `actions.json` for it — the agent loads the map and your
 OpenAI key into the browser for you.
 
@@ -162,8 +224,8 @@ agent-driveable and human-legible at the same time.
 - loading `actions.json.storage` for site-specific context and actions, with
   **private-over-public scope precedence** so a private map cleanly overrides a
   public one;
-- exposing actions to external coding agents through a Model Context Protocol
-  (MCP) bridge;
+- exposing actions to coding agents and scripts through the composable
+  `actions-json` CLI, with an MCP compatibility adapter for MCP-only hosts;
 - supervising the hosted agent event-driven, learning of each response, tool
   call, and stall the moment it happens (`runtime.agent.await_event`);
 - tracking the hosted agent's per-response cost live, with optional persistence
@@ -202,10 +264,13 @@ Read [Hosted Agent](https://yaniv256.github.io/actions.json/hosted-agent.html) a
 ### I Want My Coding Agent To Operate A Website
 
 This is the [Quickstart](#quickstart) path. Your coding agent explores a site,
-writes or improves `actions.json`, asks `actions.site` what actions are
-available, and calls stored actions instead of rediscovering the page.
+writes or improves `actions.json`, discovers the current target catalog with
+`actions-json list`/`describe`, and calls stored actions instead of
+rediscovering the page.
 
-Read [Bridge Architecture](https://yaniv256.github.io/actions.json/bridge-architecture.html)
+Read the operating skill at
+[skills/operate-actions-json/SKILL.md](skills/operate-actions-json/SKILL.md),
+[Bridge Architecture](https://yaniv256.github.io/actions.json/bridge-architecture.html),
 and the authoring skill at [skills/write-actions-json/SKILL.md](skills/write-actions-json/SKILL.md).
 
 ### I Want To Make My Website Agent-Ready
@@ -227,10 +292,13 @@ behind the extension and bridge runtimes. Use the Chrome extension for now.
 
 See the [Runtime README](runtime/actions-json-runtime/README.md).
 
-## Runtime And Bridge Model
+## Runtime, Resident, And Adapter Model
 
 `actions.json` is the map. A browser runtime interprets the map. An agent
-adapter translates model or MCP tool calls into runtime actions.
+adapter translates CLI, model, or MCP calls into runtime actions. A per-user
+resident owns runtime connections, profiles, target selections, mutation
+serialization, short leases, operation recovery, and audit records; adapters do
+not each create a competing browser registry.
 
 Current runtime hosts:
 
@@ -239,14 +307,17 @@ Current runtime hosts:
   fallback for authoring, and durable hosted voice sessions.
 - **Bookmarklet/runtime shell**: a lightweight page-JavaScript runtime for the
   future embed path — **not yet operational**.
-- **MCP bridge**: an MCP server (stdio: `initialize`, `tools/list`,
+- **CLI adapter**: the primary non-interactive JSON/NDJSON interface for shell
+  scripts and coding agents. It starts or reuses the resident on demand and
+  performs an exact protocol/version handshake.
+- **MCP compatibility adapter**: an MCP server (stdio: `initialize`, `tools/list`,
   `tools/call`, `resources/list`, `resources/read`) that a coding agent
-  registers and that routes calls to connected browser runtimes over a
-  WebSocket. Run it with `npx @actions-json/bridge mcp`.
+  may register when its host requires MCP. It reaches the same resident and
+  browser runtimes. Run it with `npx @actions-json/bridge mcp`.
 
 The hosted extension agent does not require the local bridge for its local tool
 catalog or uploaded storage-backed `actions.site` actions. External coding
-agents still use the bridge.
+agents may use either the CLI or MCP compatibility adapter.
 
 ## Building From Source
 
@@ -260,8 +331,13 @@ npm run test:overlay-runtime
 node scripts/validate-skills.mjs
 ```
 
-To run the bridge from a source checkout instead of `npx`, use the `mcp`
-subcommand (the MCP server a coding agent connects to):
+To build the CLI/resident from source:
+
+```bash
+cargo build --release --manifest-path mcp/actions-json-mcp/Cargo.toml
+```
+
+The same binary also retains the `mcp` compatibility subcommand:
 
 ```bash
 cargo run --manifest-path mcp/actions-json-mcp/Cargo.toml -- mcp \
@@ -286,7 +362,7 @@ skills/references/            Skill reference docs (the published docs/ mirror t
 runtime/actions-json-runtime/ Shared runtime and bookmarklet code
 extensions/chrome-overlay-runtime/
                               Chrome extension runtime and hosted-agent UI
-mcp/actions-json-mcp/         MCP bridge for external agents
+mcp/actions-json-mcp/         CLI, per-user resident, and MCP compatibility adapter
 examples/                     Public examples
 adapters/npm-bridge/          @actions-json/bridge — the npx wrapper for the MCP bridge
 scripts/                      Packaging and validation scripts

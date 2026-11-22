@@ -1,6 +1,6 @@
 [package]
 name = "actions-json-mcp"
-version = "0.1.0"
+version = "0.1.271"
 edition = "2021"
 
 [dependencies]
@@ -10,12 +10,17 @@ base64 = "0.22"
 chrome-launcher = { path = "../chrome-launcher" }
 clap = { version = "4.5", features = ["derive"] }
 futures-util = "0.3"
+libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["backup", "bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 tokio = { version = "1.40", features = ["full"] }
 uuid = { version = "1.10", features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]
 tempfile = "3.24"

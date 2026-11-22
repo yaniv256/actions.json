@@ -1,0 +1,210 @@
+{
+  "title": "Vector case",
+  "description": "Every vector declares an operation so a harness executes it rather than interpreting prose. The oneOf is discriminated by that operation.",
+  "$defs": {
+    "call": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "call_id",
+        "primitive"
+      ],
+      "properties": {
+        "call_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "primitive": {
+          "type": "string",
+          "minLength": 1
+        },
+        "arguments": {
+          "type": "object"
+        },
+        "scope": {
+          "type": "object"
+        }
+      }
+    },
+    "expected_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "action_call_output",
+            "action_error"
+          ]
+        },
+        "error_code": {
+          "type": "string"
+        },
+        "executed": {
+          "type": "boolean"
+        },
+        "from_receipt": {
+          "type": "boolean"
+        },
+        "support": {
+          "enum": [
+            "supported",
+            "unsupported"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "sequence_expect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "handler_invocations"
+      ],
+      "properties": {
+        "handler_invocations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "enum": [
+                  "action_call_output",
+                  "action_error"
+                ]
+              },
+              "error_code": {
+                "type": "string"
+              },
+              "executed": {
+                "type": "boolean"
+              },
+              "from_receipt": {
+                "type": "boolean"
+              },
+              "support": {
+                "enum": [
+                  "supported",
+                  "unsupported"
+                ]
+              },
+              "reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "note": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "both_results_equal": {
+          "type": "boolean"
+        },
+        "must_not": {
+          "type": "string",
+          "description": "Narrative only. A harness must not treat this as an assertion; the machine-evaluable fields above carry the contract."
+        }
+      }
+    }
+  },
+  "type": "object",
+  "required": [
+    "id",
+    "description",
+    "expectation",
+    "operation"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string"
+    },
+    "expectation": {
+      "enum": [
+        "target",
+        "current-defect"
+      ]
+    },
+    "operation": {
+      "type": "string"
+    },
+    "document_kind": {
+      "enum": [
+        "canonical",
+        "resolved_snapshot",
+        "legacy_flat"
+      ]
+    },
+    "ruling": {
+      "type": "string"
+    },
+    "open_question": {
+      "type": "string"
+    },
+    "observed_today": {
+      "type": "object"
+    },
+    "expect_after_fix": {
+      "type": "object"
+    },
+    "input": {},
+    "sequence": {
+      "type": "array"
+    },
+    "expect": {}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "operation": {
+            "enum": [
+              "call_sequence",
+              "concurrent_calls"
+            ]
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "then": {
+        "required": [
+          "input",
+          "expect"
+        ],
+        "properties": {
+          "input": {
+            "type": [
+              "object",
+              "array"
+            ]
+          },
+          "expect": {
+            "$ref": "#/$defs/sequence_expect"
+          }
+        }
+      }
+    }
+  ],
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://actions.json/contracts/capability-resolution/vector-case.schema.json"
+}

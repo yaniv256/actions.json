@@ -1,0 +1,335 @@
+{
+  "title": "Host state and provider registration",
+  "description": "Which registered providers are active for this installation and principal. Absence is unsupported; nothing here grants by omission.",
+  "$defs": {
+    "registration": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "An implementation's claim over a subset of dictionary-defined primitives. Membership is explicit: either a list, or implements_namespace stated deliberately.",
+      "properties": {
+        "implements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "implements_namespace": {
+          "type": "boolean"
+        },
+        "policy": {
+          "type": "object"
+        },
+        "retry": {
+          "enum": [
+            "none",
+            "idempotency_key",
+            "reconcile"
+          ],
+          "description": "Recovery capability of THIS implementation. On the registration, not the dictionary: two providers for one primitive can truthfully differ, and later layers may only narrow it."
+        },
+        "descriptors": {
+          "type": "object",
+          "description": "Complete effective descriptors for primitives whose executable provider contract differs from canonical. Added input properties require explicit authority/effect declarations.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "summary": { "type": "string", "minLength": 1 },
+              "input_schema": { "type": "object" },
+              "output_schema": { "type": "object" },
+              "extensions": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "input": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["authority", "effect"],
+                      "properties": {
+                        "authority": { "enum": ["same_as_primitive", "additional_policy"] },
+                        "effect": { "enum": ["same_as_primitive", "read", "mutation"] }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "implements"
+          ],
+          "properties": {
+            "implements": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "required": [
+            "implements_namespace"
+          ],
+          "properties": {
+            "implements_namespace": {
+              "const": true
+            }
+          }
+        }
+      ]
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "host",
+    "revision",
+    "namespaces"
+  ],
+  "properties": {
+    "host": {
+      "type": "string",
+      "minLength": 1
+    },
+    "revision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "installation_id": {
+      "type": ["string", "null"],
+      "description": "Stable installation identity, distinct from the content-addressed revision."
+    },
+    "principal_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "authority_mode": {
+      "enum": [
+        "owner_rights",
+        "caller_rights",
+        "unspecified"
+      ]
+    },
+    "projection": {
+      "enum": [
+        "served-web",
+        "streamlit-container-v2",
+        "streamlit-warehouse-v1"
+      ],
+      "description": "Deployment projection. Never part of the authority scope."
+    },
+    "compatibility_profile": {
+      "enum": [
+        "dictionary_adapters"
+      ],
+      "description": "Explicit migration profile. When absent, live provider registration is not narrowed by legacy per-host dictionary adapters."
+    },
+    "namespaces": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "selected": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "health": {
+            "enum": [
+              "available",
+              "unavailable",
+              "initializing"
+            ]
+          },
+          "authority_mode": {
+            "enum": [
+              "owner_rights",
+              "caller_rights",
+              "unspecified"
+            ]
+          },
+          "registrations": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/$defs/registration"
+            }
+          }
+        }
+      }
+    },
+    "preflight": {
+      "enum": [
+        "durable_mutation_store_ready",
+        "setup_required",
+        "read_only_ready"
+      ],
+      "description": "Durable receipt-store readiness. Closed: absent or unrecognised is not a state, and a mutation resolves unsupported when this cannot be read."
+    },
+    "setup_packet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sql",
+        "required_privilege",
+        "target"
+      ],
+      "description": "Copyable bootstrap. Required by setup_required and prohibited otherwise: a setup-required state with no packet tells the reader to provision something without saying what, and a packet on a ready host is stale instruction.",
+      "properties": {
+        "sql": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000
+        },
+        "required_privilege": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      }
+    },
+    "transport_status": {
+      "enum": [
+        "proposed",
+        "supported"
+      ],
+      "description": "Rung 1 of the evidence ladder: has the component return channel been PROVEN on this platform? Controls whether any executable primitive is exposed at all. Never browser-supplied."
+    },
+    "mutation_store_status": {
+      "enum": [
+        "proposed",
+        "supported"
+      ],
+      "description": "Rung 2: narrows mutation primitives further, on top of preflight."
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://actions.json/contracts/capability-resolution/host-state.schema.json",
+  "allOf": [
+    {
+      "description": "setup_required requires a complete packet.",
+      "if": {
+        "properties": {
+          "preflight": {
+            "const": "setup_required"
+          }
+        },
+        "required": [
+          "preflight"
+        ]
+      },
+      "then": {
+        "required": [
+          "setup_packet"
+        ],
+        "properties": {
+          "setup_packet": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "description": "A ready host must not carry setup instructions.",
+      "if": {
+        "properties": {
+          "preflight": {
+            "const": "durable_mutation_store_ready"
+          }
+        },
+        "required": [
+          "preflight"
+        ]
+      },
+      "then": {
+        "not": {
+          "required": [
+            "setup_packet"
+          ]
+        },
+        "properties": {
+          "setup_packet": true
+        }
+      }
+    },
+    {
+      "description": "Nor may a read-only one.",
+      "if": {
+        "properties": {
+          "preflight": {
+            "const": "read_only_ready"
+          }
+        },
+        "required": [
+          "preflight"
+        ]
+      },
+      "then": {
+        "not": {
+          "required": [
+            "setup_packet"
+          ]
+        },
+        "properties": {
+          "setup_packet": true
+        }
+      }
+    },
+    {
+      "description": "A named projection must carry its transport evidence. Optional evidence makes the safety property depend on every producer remembering a new field.",
+      "if": {
+        "required": [
+          "projection"
+        ],
+        "properties": {
+          "projection": {
+            "type": "string"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "transport_status"
+        ],
+        "properties": {
+          "transport_status": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

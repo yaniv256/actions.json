@@ -108,17 +108,19 @@ after user authorization and stable tab identity.
 
 ## `mcp/`
 
-Agent-side bridge code.
+Agent-side native CLI, protected per-user resident, and compatibility adapters.
 
 ```text
 mcp/
   actions-json-mcp/
 ```
 
-The current bridge is MCP-shaped: it exposes stable tool-list/tool-call style
-endpoints and routes calls to connected browser runtimes. It should not be the
-interpreter of site-specific `actions.json` maps; the browser runtime
-interprets those maps.
+The primary interface is the noninteractive `actions-json` / `aj` CLI. It
+submits typed JSON envelopes to a protected per-user resident that owns browser
+connections, durable receipts, profile-scoped routing, mutation serialization,
+and short leases. The MCP and legacy HTTP surfaces are compatibility adapters
+over that same authority. The bridge does not interpret site-specific
+`actions.json` maps; the browser runtime interprets those maps.
 
 ## `adapters/`
 
@@ -126,7 +128,7 @@ Packaging and integration adapters for agent ecosystems.
 
 ```text
 adapters/
-  npm-bridge/   @actions-json/bridge — the npx wrapper for the MCP bridge
+  npm-bridge/   @actions-json/bridge — the npx packaging adapter
 ```
 
 Adapters should point to or package the canonical skill and runtime artifacts.
@@ -187,7 +189,8 @@ The source tree exposes real artifacts directly:
 - canonical skill;
 - browser runtime;
 - browser extension;
-- MCP-shaped bridge;
+- composable `actions-json` / `aj` CLI and resident bridge;
+- MCP and HTTP compatibility adapters;
 - examples.
 
 Platform packages are adapters over those artifacts.

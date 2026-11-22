@@ -1,0 +1,516 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://actions.json/contracts/capability-resolution/resolution.schema.json",
+  "title": "Capability resolution result",
+  "description": "The output of resolving one primitive for one host. Every implementation produces this shape; unknown fields are rejected so a resolver cannot smuggle host-specific meaning through an undeclared key.",
+  "$defs": {
+    "layer": {
+      "description": "The normative five layers. provider_health is NOT a layer -- it is a source within host_state, so the layer vocabulary stays closed at five.",
+      "enum": [
+        "dictionary",
+        "provider_registration",
+        "host_state",
+        "compatibility_override",
+        "call_context"
+      ]
+    },
+    "source": {
+      "description": "Which fact inside a layer spoke. Closed so a trace cannot become free text.",
+      "enum": [
+        "canonical",
+        "default_profile",
+        "provider_registration",
+        "provider_health",
+        "provider_selection",
+        "provider_conflict",
+        "adapters",
+        "site_policy",
+        "session_policy",
+        "principal_scope"
+      ]
+    },
+    "reason": {
+      "description": "Stable, externally visible reason codes. Closed: an agent must not have to parse prose to decide what to do next.",
+      "enum": [
+        "namespace_unavailable",
+        "capability_unavailable",
+        "provider_unavailable",
+        "provider_conflict",
+        "primitive_not_found",
+        "host_unknown",
+        "host_mismatch",
+        "host_undeclared",
+        "principal_mismatch",
+        "durable_store_unavailable"
+      ]
+    },
+    "remediation": {
+      "description": "Machine-readable next action. Present so an agent need not infer install/activate/retry/stop from a prose table.",
+      "enum": [
+        "activate_provider",
+        "retry_later",
+        "none",
+        "fix_request",
+        "provision_receipt_store"
+      ]
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "layer",
+        "decision"
+      ],
+      "properties": {
+        "layer": {
+          "$ref": "#/$defs/layer"
+        },
+        "decision": {
+          "enum": [
+            "defined",
+            "supported",
+            "unsupported",
+            "active"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/source"
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        }
+      }
+    },
+    "authority_scope": {
+      "description": "Authority is bound to installation AND authenticated principal. A provider or catalog selected for one principal must never authorize another; identifiers are opaque in diagnostics.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "installation_revision",
+        "principal_id"
+      ],
+      "properties": {
+        "installation_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "principal_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Opaque authenticated principal or tenant identifier. Never a credential, account locator, or config reference."
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "authority_mode": {
+          "description": "Whose privileges execute. Distinguishable and never silently substituted.",
+          "enum": [
+            "owner_rights",
+            "caller_rights",
+            "unspecified"
+          ]
+        },
+        "installation_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Stable installation identity -- the key field, deliberately distinct from installation_revision, which moves on any config change and must not invalidate outstanding calls."
+        }
+      }
+    },
+    "contract_error": {
+      "description": "Errors raised while validating a document or request, BEFORE resolution produces a result. Separate from `reason`: a resolution reason answers 'why is this capability unavailable', a contract error answers 'why could this not be resolved at all'.",
+      "enum": [
+        "canonical_document_carries_flat_support",
+        "invalid_support_value",
+        "invalid_document",
+        "host_undeclared",
+        "host_mismatch",
+        "unverifiable_agreement",
+        "authority_mode_unavailable_for_projection",
+        "invalid_provider_descriptor",
+        "incompatible_provider_descriptor",
+        "undeclared_provider_extension",
+        "invalid_provider_extension"
+      ]
+    }
+  },
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "primitive",
+    "host",
+    "support",
+    "reason",
+    "remediation",
+    "decisions",
+    "decided_by",
+    "namespace",
+    "authority"
+  ],
+  "properties": {
+    "primitive": {
+      "type": "string",
+      "minLength": 1
+    },
+    "host": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "support": {
+      "enum": [
+        "supported",
+        "unsupported"
+      ]
+    },
+    "reason": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/reason"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "remediation": {
+      "$ref": "#/$defs/remediation"
+    },
+    "decisions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/decision"
+      }
+    },
+    "decided_by": {
+      "description": "The layer that produced the effective answer. For a supported resolution where nothing narrowed, this is provider_registration -- the layer where support originated -- never null.",
+      "$ref": "#/$defs/layer"
+    },
+    "capability_class": {
+      "enum": [
+        "portable",
+        "privileged",
+        "debug",
+        "mixed",
+        "transport",
+        null
+      ]
+    },
+    "portable": {
+      "type": "boolean"
+    },
+    "effect": {
+      "enum": ["read_only", "mutation", null],
+      "description": "Effective call effect after applying any provider-extension parameter used by this call."
+    },
+    "namespace": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "authority": {
+      "$ref": "#/$defs/authority_scope"
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Non-secret provider detail only: bounds, allowed object names, scope. Never credentials or a config reference."
+    },
+    "descriptor": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["summary", "input_schema", "source", "provider_extensions"],
+          "properties": {
+            "summary": { "type": "string" },
+            "input_schema": { "type": "object" },
+            "output_schema": { "type": "object" },
+            "source": { "enum": ["dictionary", "provider_registration"] },
+            "provider_extensions": { "type": "object" }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "description": "A supported resolution carries no reason, needs no remediation, and must be fully identity-bound: non-empty installation and principal, an explicit authority mode, and a concrete provider. Allowing null identities here recreates the fail-open state found in #338.",
+      "if": {
+        "properties": {
+          "support": {
+            "const": "supported"
+          }
+        },
+        "required": [
+          "support"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "type": "null"
+          },
+          "remediation": {
+            "const": "none"
+          },
+          "provider": {
+            "type": "string",
+            "minLength": 1
+          },
+          "authority": {
+            "type": "object",
+            "required": [
+              "installation_revision",
+              "principal_id",
+              "authority_mode"
+            ],
+            "properties": {
+              "installation_revision": {
+                "type": "string",
+                "minLength": 1
+              },
+              "principal_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "authority_mode": {
+                "enum": [
+                  "owner_rights",
+                  "caller_rights",
+                  "unspecified"
+                ]
+              }
+            }
+          },
+          "decisions": {
+            "type": "array",
+            "minItems": 2,
+            "contains": {
+              "type": "object",
+              "properties": {
+                "layer": {
+                  "const": "provider_registration"
+                },
+                "decision": {
+                  "const": "supported"
+                }
+              },
+              "required": [
+                "layer",
+                "decision"
+              ]
+            }
+          }
+        },
+        "required": [
+          "provider",
+          "authority",
+          "decisions"
+        ]
+      }
+    },
+    {
+      "description": "An unsupported resolution must state why.",
+      "if": {
+        "properties": {
+          "support": {
+            "const": "unsupported"
+          }
+        },
+        "required": [
+          "support"
+        ]
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "$ref": "#/$defs/reason"
+          }
+        },
+        "required": [
+          "reason"
+        ]
+      }
+    },
+    {
+      "description": "Reason and remediation are a DISCRIMINATED PAIR. Closing each enum independently still permitted false combinations such as durable_store_unavailable / activate_provider -- telling a reader to activate a provider that is already active when the missing thing is a table.",
+      "if": {
+        "properties": {
+          "support": {
+            "const": "unsupported"
+          }
+        },
+        "required": [
+          "support"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "reason": {
+                "const": "namespace_unavailable"
+              },
+              "remediation": {
+                "const": "activate_provider"
+              }
+            },
+            "required": [
+              "reason",
+              "remediation"
+            ]
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "durable_store_unavailable"
+              },
+              "remediation": {
+                "const": "provision_receipt_store"
+              }
+            },
+            "required": [
+              "reason",
+              "remediation"
+            ]
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "capability_unavailable"
+              },
+              "remediation": {
+                "const": "none"
+              }
+            },
+            "required": [
+              "reason",
+              "remediation"
+            ]
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "provider_unavailable"
+              },
+              "remediation": {
+                "const": "retry_later"
+              }
+            },
+            "required": [
+              "reason",
+              "remediation"
+            ]
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "provider_conflict"
+              },
+              "remediation": {
+                "const": "fix_request"
+              }
+            },
+            "required": [
+              "reason",
+              "remediation"
+            ]
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "primitive_not_found"
+              },
+              "remediation": {
+                "const": "fix_request"
+              }
+            },
+            "required": [
+              "reason",
+              "remediation"
+            ]
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "host_unknown"
+              },
+              "remediation": {
+                "const": "fix_request"
+              }
+            },
+            "required": [
+              "reason",
+              "remediation"
+            ]
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "host_mismatch"
+              },
+              "remediation": {
+                "const": "fix_request"
+              }
+            },
+            "required": [
+              "reason",
+              "remediation"
+            ]
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "host_undeclared"
+              },
+              "remediation": {
+                "const": "fix_request"
+              }
+            },
+            "required": [
+              "reason",
+              "remediation"
+            ]
+          },
+          {
+            "properties": {
+              "reason": {
+                "const": "principal_mismatch"
+              },
+              "remediation": {
+                "const": "fix_request"
+              }
+            },
+            "required": [
+              "reason",
+              "remediation"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

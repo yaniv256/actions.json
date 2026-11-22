@@ -54,6 +54,7 @@ test("package-extension creates a Chrome-loadable zip and checksum", () => {
       "src/agent/credential-store.mjs",
       "src/agent/debug-log-presentation.mjs",
       "src/agent/debugger-session-manager.mjs",
+      "src/agent/extension-operation-receipts.mjs",
       "src/agent/fake-realtime-transport.mjs",
       "src/agent/file-transfer.mjs",
       "src/agent/hosted-tool-executor.mjs",

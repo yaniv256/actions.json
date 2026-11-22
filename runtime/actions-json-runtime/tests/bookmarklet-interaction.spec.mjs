@@ -1599,3 +1599,86 @@ async function readActionOutput(page, callId) {
     )?.output || null,
   callId);
 }
+
+test("bookmarklet rejects unsupported locator keys instead of matching every interactive element", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await installFakeBookmarkletSocket(page);
+  await page.route("https://example.test/locator-shape", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><html><body>
+        <a href="#logo" id="decoy" onclick="document.body.dataset.decoy='clicked'" style="position:absolute;left:10px;top:10px;width:80px;height:30px">Logo</a>
+        <button data-testid="go" onclick="document.body.dataset.go='clicked'" style="position:absolute;left:200px;top:200px;width:120px;height:40px">Go</button>
+      </body></html>`,
+    });
+  });
+  await page.goto("https://example.test/locator-shape");
+  await page.addScriptTag({ content: bookmarkletSource });
+  await page.evaluate(() => window.__actionsJsonFakeSockets[0].emit("open"));
+  const call = (call_id, name, args) => page.evaluate(([id, n, a]) => {
+    window.__actionsJsonFakeSockets[0].emit("message", {
+      data: JSON.stringify({ type: "action_call", call_id: id, name: n, arguments: a }),
+    });
+  }, [call_id, name, args]);
+
+  await call("shape-click", "pointer.click", { locator: { role: "button", name: "Go" } });
+  const click = await readActionOutput(page, "shape-click");
+  expect(click).toMatchObject({ ok: false, primitive: "pointer.click", error: { code: "invalid_locator" } });
+  expect(click.error.evidence.unknown_keys).toEqual(["role", "name"]);
+  expect(await page.evaluate(() => document.body.dataset.decoy || null)).toBe(null);
+
+  await call("shape-info", "locator.element_info", { locator: { css: "button" } });
+  expect(await readActionOutput(page, "shape-info")).toMatchObject({ ok: false, error: { code: "invalid_locator" } });
+
+  await call("shape-text", "locator.text_content", { locator: { role: "button" } });
+  expect(await readActionOutput(page, "shape-text")).toMatchObject({ ok: false, error: { code: "invalid_locator" } });
+
+  await call("shape-wait", "locator.wait_for", { locator: { selector: "button", timeout_ms: 400 }, timeout_ms: 100 });
+  expect(await readActionOutput(page, "shape-wait")).toMatchObject({ ok: false, error: { code: "invalid_locator" } });
+
+  // The bookmarklet has no frame resolution: a frame-scoped locator must not silently search the top document.
+  await call("shape-frame", "locator.element_info", { locator: { frame: { selector: "iframe" }, selector: "button" } });
+  expect(await readActionOutput(page, "shape-frame")).toMatchObject({ ok: false, error: { code: "invalid_locator" } });
+
+  // Legacy top-level form: locator keys share the args object with pointer options and still work.
+  await call("legacy-click", "pointer.click", { selector: "[data-testid='go']", button: "left", modifiers: [] });
+  expect(await readActionOutput(page, "legacy-click")).toMatchObject({ ok: true, primitive: "pointer.click" });
+  expect(await page.evaluate(() => document.body.dataset.go || null)).toBe("clicked");
+  expect(await page.evaluate(() => document.body.dataset.decoy || null)).toBe(null);
+});
+
+test("bookmarklet locator clicks match exact text despite a duplicate aria-label and scroll offscreen targets into view", async ({ page }) => {
+  await page.setViewportSize({ width: 800, height: 600 });
+  await installFakeBookmarkletSocket(page);
+  await page.route("https://example.test/locator-reach", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><html><body style="height:3000px">
+        <button aria-label="Create Token" onclick="document.body.dataset.aria='clicked'" style="position:absolute;left:20px;top:20px">Create Token</button>
+        <button onclick="document.body.dataset.below='clicked'" style="position:absolute;left:20px;top:2000px">Add new policy</button>
+      </body></html>`,
+    });
+  });
+  await page.goto("https://example.test/locator-reach");
+  await page.addScriptTag({ content: bookmarkletSource });
+  await page.evaluate(() => window.__actionsJsonFakeSockets[0].emit("open"));
+  const call = (call_id, name, args) => page.evaluate(([id, n, a]) => {
+    window.__actionsJsonFakeSockets[0].emit("message", {
+      data: JSON.stringify({ type: "action_call", call_id: id, name: n, arguments: a }),
+    });
+  }, [call_id, name, args]);
+
+  await call("reach-aria", "pointer.click", { locator: { selector: "button", text_equals: "Create Token" } });
+  expect(await readActionOutput(page, "reach-aria")).toMatchObject({ ok: true, primitive: "pointer.click" });
+  expect(await page.evaluate(() => document.body.dataset.aria || null)).toBe("clicked");
+
+  // A partial text must still not satisfy text_equals.
+  await call("reach-partial", "locator.element_info", { locator: { selector: "button", text_equals: "Create" } });
+  expect(await readActionOutput(page, "reach-partial")).toMatchObject({ ok: false, error: { code: "target_not_found" } });
+
+  await call("reach-below", "pointer.click", { locator: { selector: "button", text_contains: "Add new policy" } });
+  const below = await readActionOutput(page, "reach-below");
+  expect(below).toMatchObject({ ok: true, primitive: "pointer.click" });
+  expect(await page.evaluate(() => document.body.dataset.below || null)).toBe("clicked");
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+});

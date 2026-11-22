@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "keys": [
+    {
+      "key_id": "actions-json-stable-2026-01",
+      "channel": "stable",
+      "minimum_counter": 1,
+      "maximum_counter": 999999,
+      "revoked": false,
+      "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA4pZ6jhJbKu6zLvm8d3h4\nl5OBeA49kfKflq51A53Fp6S2W1ikJCHQyePTD5gO1F+IIe9Qdc7Xq3tFZqrrhfGx\nt2H8YaVXUO/nvUZKSoneUTZ6T1bBdBG88kXHbC0GjvBE7q98NHn+CjrtiWcKpVmB\ni6YMIUuoot/oh3dMTgZFY6nwWHo57OYoYWQgs+QQEAjxNl2GePTFy02b3mioaBQm\nAES6wiip8pZwxDUQtMf6kfm7yTivgrjkswt2dunSITCHcmXo/uWiGai+K8d+dVzR\nLezpKw2S7G/1IbHie+lt9gvBkZkCgVlHqNCnL3KtCau0mBYgOkfzIk+p6YzB4HG/\n/2MCvj4MHYmbTQrsk6BdRXjAc3sDUM0uV+pbm2aRC9P/TRvujZk9X7mR+f8Ws6Od\no6jzZhxuj6zaeuCky6aGtCnPxWe7EgOTk8Sgg2W5Ib9XU7y2n4upm2mpV2W9WSHF\nsyMjfvks+HhI5G65SqliY3vMx5kP87kGop2HTFtzkY/vAgMBAAE=\n-----END PUBLIC KEY-----\n"
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://actions.json/contracts/transcript/v1",
+  "title": "Trusted embedded-host transcript documents",
+  "$defs": {
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tenant_id", "installation_id", "principal_id"],
+      "properties": {
+        "tenant_id": {"type": "string", "minLength": 1},
+        "installation_id": {"type": "string", "minLength": 1},
+        "principal_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "payload", "idempotency_key"],
+      "properties": {
+        "kind": {"enum": ["user", "assistant", "tool_call", "tool_result", "action_refusal", "memory_cleared", "correction"]},
+        "payload": {},
+        "idempotency_key": {"type": "string", "minLength": 1, "maxLength": 512}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "correction"}}, "required": ["kind"]},
+          "then": {
+            "properties": {
+              "payload": {
+                "type": "object",
+                "required": ["corrects_sequence"],
+                "properties": {"corrects_sequence": {"type": "integer", "minimum": 1}}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "persistence_result": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "recoverable"],
+          "properties": {
+            "status": {"enum": ["persisted", "already_persisted"]},
+            "recoverable": {"const": false}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "recoverable", "reconciliation_token"],
+          "properties": {
+            "status": {"const": "history_not_persisted"},
+            "recoverable": {"const": true},
+            "reconciliation_token": {"type": "string", "minLength": 32}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "recoverable"],
+          "properties": {
+            "status": {"const": "history_not_persisted"},
+            "recoverable": {"const": false}
+          }
+        }
+      ]
+    }
+  },
+  "oneOf": [
+    {"$ref": "#/$defs/authority"},
+    {"$ref": "#/$defs/event"},
+    {"$ref": "#/$defs/persistence_result"}
+  ]
+}

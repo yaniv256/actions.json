@@ -29,7 +29,7 @@ test("Getting Started addresses the ten onboarding contracts", async () => {
     "Node.js 18",
     "OpenAI API",
     "ACTIONS_JSON_OPENAI_API_KEY",
-    ".actions-json.local.json",
+    ".actions-json/config.json",
     "SHA256SUMS.txt",
     "sha256sum",
     "extension version",
@@ -58,7 +58,7 @@ test("Getting Started puts successful activation before optional verification", 
   assert.ok(success > install, "activation path must define success");
   assert.ok(optionalVerification > success, "optional checksum verification must follow the success path");
   assert.match(text, /Download `actions-json-overlay-runtime-<version>\.zip`/);
-  assert.match(text, /Do not download an `actions-json-mcp-\*\.tar\.gz` file/);
+  assert.match(text, /Native CLI archives begin with `actions-json-`/);
 });
 
 test("every relative Markdown link in Getting Started resolves inside docs", async () => {

@@ -1,0 +1,156 @@
+{
+  "schema": "actions-json/capability-resolution/golden-request-digests/v1",
+  "spec": "./request-digest.spec.md",
+  "domain": "actions-json/request-digest/v1",
+  "note": "Computed with an independent Python implementation. CALLER-STABLE identity only -- primitive, version, arguments. Provider is deliberately absent: binding it made replay depend on live resolution, so a settled receipt became unreachable once its provider was withdrawn.",
+  "cases": [
+    {
+      "description": "empty arguments",
+      "primitive": "app.thing",
+      "arguments": {},
+      "preimage": "actions-json/request-digest/v1\napp.thing\n-\n{}\n",
+      "expected": "req-c8bb88e9a71149abd8453628ae420a85"
+    },
+    {
+      "description": "key order must not matter (a)",
+      "primitive": "app.thing",
+      "arguments": {
+        "a": 1,
+        "b": 2
+      },
+      "preimage": "actions-json/request-digest/v1\napp.thing\n-\n{\"a\":1,\"b\":2}\n",
+      "expected": "req-4c23366dea4ec588339a1a8091e66702"
+    },
+    {
+      "description": "key order must not matter (b)",
+      "primitive": "app.thing",
+      "arguments": {
+        "b": 2,
+        "a": 1
+      },
+      "preimage": "actions-json/request-digest/v1\napp.thing\n-\n{\"a\":1,\"b\":2}\n",
+      "expected": "req-4c23366dea4ec588339a1a8091e66702"
+    },
+    {
+      "description": "nested object and array",
+      "primitive": "data.query",
+      "arguments": {
+        "filter": {
+          "z": [
+            1,
+            2,
+            {
+              "k": "v"
+            }
+          ],
+          "a": null
+        },
+        "limit": 10
+      },
+      "preimage": "actions-json/request-digest/v1\ndata.query\n-\n{\"filter\":{\"a\":null,\"z\":[1,2,{\"k\":\"v\"}]},\"limit\":10}\n",
+      "expected": "req-dbe56ed61e99b3857c520cc63e6ef300"
+    },
+    {
+      "description": "unicode string",
+      "primitive": "app.search",
+      "arguments": {
+        "q": "caf\u00e9 \u2014 na\u00efve \u65e5\u672c\u8a9e"
+      },
+      "preimage": "actions-json/request-digest/v1\napp.search\n-\n{\"q\":\"caf\u00e9 \u2014 na\u00efve \u65e5\u672c\u8a9e\"}\n",
+      "expected": "req-d86e9b3f4d5d7cb789fec435c244bc5d"
+    },
+    {
+      "description": "numeric boundaries",
+      "primitive": "app.n",
+      "arguments": {
+        "zero": 0,
+        "neg": -1,
+        "big": 9007199254740991,
+        "float": 1.5
+      },
+      "preimage": "actions-json/request-digest/v1\napp.n\n-\n{\"big\":9007199254740991,\"float\":1.5,\"neg\":-1,\"zero\":0}\n",
+      "expected": "req-b6ef42a77983775b7e8f7a0c896f9417"
+    },
+    {
+      "description": "booleans and null",
+      "primitive": "app.flags",
+      "arguments": {
+        "t": true,
+        "f": false,
+        "n": null
+      },
+      "preimage": "actions-json/request-digest/v1\napp.flags\n-\n{\"f\":false,\"n\":null,\"t\":true}\n",
+      "expected": "req-b09f1a183b10321100188a38792ba9e8"
+    },
+    {
+      "description": "empty string and empty containers",
+      "primitive": "app.edge",
+      "arguments": {
+        "s": "",
+        "a": [],
+        "o": {}
+      },
+      "preimage": "actions-json/request-digest/v1\napp.edge\n-\n{\"a\":[],\"o\":{},\"s\":\"\"}\n",
+      "expected": "req-bf4b2cdcf7c9c78fad1a1d43627de871"
+    },
+    {
+      "description": "primitive version is bound",
+      "primitive": "data.write",
+      "arguments": {
+        "x": 1
+      },
+      "preimage": "actions-json/request-digest/v1\ndata.write\n1\n{\"x\":1}\n",
+      "expected": "req-3fc07d904b6cd312e78d812e2cbf7e74",
+      "primitive_version": 1
+    },
+    {
+      "description": "a different version diverges",
+      "primitive": "data.write",
+      "arguments": {
+        "x": 1
+      },
+      "preimage": "actions-json/request-digest/v1\ndata.write\n2\n{\"x\":1}\n",
+      "expected": "req-953432148da04f1beb9e592c9cc392b1",
+      "primitive_version": 2
+    },
+    {
+      "description": "embedded newline in a string",
+      "primitive": "app.edge",
+      "arguments": {
+        "s": "line1\nline2"
+      },
+      "preimage": "actions-json/request-digest/v1\napp.edge\n-\n{\"s\":\"line1\\nline2\"}\n",
+      "expected": "req-70a7f209a10b293a7b704ade76645d31"
+    },
+    {
+      "description": "literal sentinel as a value",
+      "primitive": "app.edge",
+      "arguments": {
+        "v": "-"
+      },
+      "preimage": "actions-json/request-digest/v1\napp.edge\n-\n{\"v\":\"-\"}\n",
+      "expected": "req-f9e5d14646b21cbb3e0404e4d771e076"
+    },
+    {
+      "description": "null vs missing key are different",
+      "primitive": "app.edge",
+      "arguments": {
+        "a": null
+      },
+      "preimage": "actions-json/request-digest/v1\napp.edge\n-\n{\"a\":null}\n",
+      "expected": "req-b9a32907a245dc8760faa1a668fe15fb"
+    },
+    {
+      "description": "a key ordering that collides naively",
+      "primitive": "app.edge",
+      "arguments": {
+        "ab": 1,
+        "a": {
+          "b": 1
+        }
+      },
+      "preimage": "actions-json/request-digest/v1\napp.edge\n-\n{\"a\":{\"b\":1},\"ab\":1}\n",
+      "expected": "req-89133f0e4fe87eb6f9768e7ea11dfdd3"
+    }
+  ]
+}

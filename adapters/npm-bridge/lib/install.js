@@ -2,17 +2,19 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const os = require('node:os');
 const https = require('node:https');
 const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const {
   assetSlug,
   downloadUrl,
-  checksumsUrl,
+  manifestUrl,
+  signatureUrl,
   assetFileName,
   binaryName,
 } = require('./platform');
+const trust = require('./release-trust.json');
+const { validateManifest, selectAsset } = require('./release-trust.cjs');
 
 // The bridge binary version to download. This is pinned separately from the
 // package version so the wrapper can ship changes (e.g. the bundled dictionary)
@@ -122,62 +124,60 @@ function fetchToFileHashing(fetcher, url, destPath) {
   });
 }
 
-// Fetch SHA256SUMS.txt from the release and return the expected digest for
-// `asset`. Every failure mode below is distinct and named: a user who hits one
-// needs to know whether the release is missing its checksums, the manifest is
-// malformed, or this specific archive simply is not listed.
-async function expectedDigestFor(fetcher, version, asset) {
-  const url = checksumsUrl(version);
-  let body;
+// Authenticate the exact release manifest against the installer-pinned channel
+// key, then select one platform asset from that signed statement. The sibling
+// SHA256SUMS file is compatibility metadata and is deliberately not consulted.
+async function verifiedReleaseAsset(fetcher, version, slug) {
+  const manifestLocation = manifestUrl(version);
+  const signatureLocation = signatureUrl(version);
+  let manifestBytes;
+  let signatureBytes;
   try {
-    body = await fetchBuffer(fetcher, url);
+    [manifestBytes, signatureBytes] = await Promise.all([
+      fetchBuffer(fetcher, manifestLocation),
+      fetchBuffer(fetcher, signatureLocation),
+    ]);
   } catch (e) {
     throw verificationError(
-      `Cannot verify the download: SHA256SUMS.txt could not be fetched from ${url} (${e.message}). ` +
-        'Refusing to install an unverified binary.',
-      'CHECKSUMS_UNAVAILABLE'
+      `Cannot verify the download: signed release metadata could not be fetched (${e.message}). Refusing to install an unverified binary.`,
+      'SIGNED_MANIFEST_UNAVAILABLE'
     );
   }
-
-  const sums = parseChecksums(body.toString('utf8'));
-  if (sums.size === 0) {
-    throw verificationError(
-      `Cannot verify the download: SHA256SUMS.txt at ${url} contains no readable ` +
-        '"<sha256>  <filename>" lines. Refusing to install an unverified binary.',
-      'CHECKSUMS_UNPARSEABLE'
-    );
-  }
-
-  const expected = sums.get(asset);
-  if (!expected) {
-    throw verificationError(
-      `Cannot verify the download: SHA256SUMS.txt at ${url} has no checksum entry for ${asset}. ` +
-        `It lists: ${[...sums.keys()].join(', ')}. Refusing to install an unverified binary.`,
-      'CHECKSUM_ENTRY_MISSING'
-    );
-  }
-  return expected;
+  const manifest = validateManifest(manifestBytes, signatureBytes, trust, { channel: 'stable', version });
+  return selectAsset(manifest, {
+    platform: slug.startsWith('win-') ? 'windows' : slug.split('-')[0],
+    arch: slug.split('-')[1],
+    kind: 'cli',
+  });
 }
 
-// Download the tarball to a temp file, VERIFY its SHA-256 against the release's
-// published SHA256SUMS.txt, then extract the binary into binaryDir, chmod it
-// executable, and return its path.
+// Download the tarball into an owner-private, same-filesystem staging directory,
+// authenticate its signed-manifest entry, then atomically publish the extracted
+// binary into binaryDir. Concurrent installers may race through verification,
+// but only a complete staged directory can become the cache winner.
 //
 // Verification sits strictly between download and extraction: nothing is
 // extracted, chmodded or executed until the digest matches. Every failure path
-// removes the temp tarball, so a rejected archive is not left on disk.
+// removes its private staging directory, so a rejected archive is not left on
+// disk and another process can never observe a partial cache entry.
 //
 // `fetcher` is a seam for tests (same shape as follow()); production uses follow().
 async function download(version, slug, { fetcher = follow } = {}) {
   const url = downloadUrl(version, slug);
   const asset = assetFileName(version, slug);
   const dir = binaryDir(version, slug);
-  fs.mkdirSync(dir, { recursive: true });
-  const tmpTar = path.join(os.tmpdir(), `actions-json-mcp-${version}-${slug}.tar.gz`);
+  const parent = path.dirname(dir);
+  fs.mkdirSync(parent, { recursive: true });
+  const stage = fs.mkdtempSync(path.join(parent, `.${version}-${slug}-`));
+  const tmpTar = path.join(stage, asset);
 
   try {
+    const releaseAsset = await verifiedReleaseAsset(fetcher, version, slug);
+    if (releaseAsset.filename !== asset) {
+      throw verificationError(`Signed manifest selected ${releaseAsset.filename}, expected ${asset}.`, 'ASSET_NAME_MISMATCH');
+    }
     const actual = await fetchToFileHashing(fetcher, url, tmpTar);
-    const expected = await expectedDigestFor(fetcher, version, asset);
+    const expected = releaseAsset.sha256;
 
     if (actual !== expected) {
       throw verificationError(
@@ -189,16 +189,24 @@ async function download(version, slug, { fetcher = follow } = {}) {
     }
 
     // Verified. Only now may we extract and mark anything executable.
-    execFileSync('tar', ['-xzf', tmpTar, '-C', dir, binaryName(slug)], {
+    execFileSync('tar', ['-xzf', tmpTar, '-C', stage, binaryName(slug)], {
       stdio: 'inherit',
     });
-    const bin = binaryPath(version, slug);
+    const stagedBin = path.join(stage, binaryName(slug));
     if (process.platform !== 'win32') {
-      fs.chmodSync(bin, 0o755);
+      fs.chmodSync(stagedBin, 0o755);
     }
-    return bin;
-  } finally {
     fs.rmSync(tmpTar, { force: true });
+    try {
+      fs.renameSync(stage, dir);
+    } catch (error) {
+      if (!['EEXIST', 'ENOTEMPTY'].includes(error.code) || !fs.statSync(binaryPath(version, slug), { throwIfNoEntry: false })?.isFile()) {
+        throw error;
+      }
+    }
+    return binaryPath(version, slug);
+  } finally {
+    fs.rmSync(stage, { recursive: true, force: true });
   }
 }
 
@@ -223,7 +231,7 @@ async function ensureBinary() {
     return bin;
   }
   process.stderr.write(
-    `Downloading actions-json-mcp ${version} (${slug}) and verifying its published SHA-256...\n`
+    `Downloading actions-json-mcp ${version} (${slug}) and verifying its signed release manifest...\n`
   );
   return download(version, slug);
 }
@@ -234,4 +242,5 @@ module.exports = {
   packageVersion,
   download,
   parseChecksums,
+  verifiedReleaseAsset,
 };

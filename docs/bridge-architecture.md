@@ -14,8 +14,10 @@ The important split is:
 - `actions.json` is the readable action map for a website.
 - The browser runtime is the interpreter that can load that map and operate the
   page.
-- The bridge is the optional adapter that lets an external coding agent discover
-  connected runtimes and call their tools.
+- The per-user resident is the shared local authority for discovery, routing,
+  durable operations, profiles, leases, and receipts.
+- The `actions-json`/`aj` CLI is the primary composable interface. MCP and
+  authenticated HTTP are compatibility adapters over the same resident.
 
 The extension-hosted Realtime agent does not need the local bridge for normal
 use. It runs inside the Chrome extension and talks to the same runtime/storage
@@ -25,9 +27,15 @@ interfaces directly.
 
 ```text
 External coding agent
-  -> MCP-shaped bridge
+  -> actions-json / aj CLI
+  -> per-user resident
   -> browser runtime
   -> authorized page and uploaded storage
+
+MCP-compatible coding agent
+  -> MCP compatibility adapter
+  -> the same per-user resident
+  -> browser runtime
 
 Extension-hosted Realtime agent
   -> Chrome extension background/offscreen session
@@ -55,10 +63,21 @@ A browser runtime is the thing that can operate the page. Current runtimes are:
 Future runtimes should keep the same action/result semantics and advertise
 clear capability errors when a host cannot support a primitive.
 
-### MCP-Shaped Bridge
+### CLI And Per-User Resident
 
-The bridge exposes HTTP endpoints shaped like MCP tool listing and tool calling.
-Use it when an external coding agent needs to operate a browser runtime.
+The noninteractive `actions-json` command is the primary external interface.
+It accepts one JSON operation as an argument or on stdin, emits bounded JSON on
+stdout, and supports profiles, stable targets, durable operation status,
+short-lived leases, audit correlation, and updates. Multiple local callers
+share one protected per-user resident, while explicit targets and profile-local
+routing avoid a process-global active-tab race.
+
+### MCP And HTTP Compatibility Adapters
+
+The resident also exposes MCP-shaped tool listing/calling and authenticated
+loopback HTTP for existing integrations. These adapters translate their legacy
+request/response shapes into the canonical operation core; they do not own a
+second routing or mutation implementation.
 
 The bridge can:
 

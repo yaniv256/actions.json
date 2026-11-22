@@ -211,12 +211,19 @@ async function main() {
     }
   }
   if (await exists(expectedCommand, constants.X_OK)) {
-    const probe = spawnSync(expectedCommand, ['--help'], { encoding: 'utf8', timeout: 5000 });
+    const probe = spawnSync(expectedCommand, ['version'], { encoding: 'utf8', timeout: 5000 });
     if (probe.error || probe.status !== 0) {
       const reason = probe.error?.message ?? `exit ${probe.status}`;
-      errors.push(`staged bridge --help probe failed (${reason}): ${expectedCommand}`);
-    } else if (!`${probe.stdout}\n${probe.stderr}`.includes('actions.json MCP bridge')) {
-      errors.push(`staged bridge --help did not identify itself as actions.json MCP bridge: ${expectedCommand}`);
+      errors.push(`staged bridge version probe failed (${reason}): ${expectedCommand}`);
+    } else {
+      try {
+        const version = JSON.parse(probe.stdout)?.result?.version;
+        if (typeof version !== 'string' || version.length === 0) {
+          errors.push(`staged bridge version probe returned no version: ${expectedCommand}`);
+        }
+      } catch {
+        errors.push(`staged bridge version probe returned invalid JSON: ${expectedCommand}`);
+      }
     }
   }
 

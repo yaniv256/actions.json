@@ -28,8 +28,7 @@ voice agent working on the same browser tab.
 
 1. Download `actions-json-overlay-runtime-<version>.zip` from the
    [latest release](https://github.com/yaniv256/actions.json/releases/latest).
-   Do not download an `actions-json-mcp-*.tar.gz` file; those archives contain
-   bridge binaries, not the Chrome extension.
+   Native CLI archives begin with `actions-json-`; they are not Chrome extensions.
 2. Unzip it, open `chrome://extensions`, enable **Developer mode**, choose
    **Load unpacked**, and select the unzipped extension directory.
 3. Register the bridge, then restart or reconnect your coding agent:
@@ -73,8 +72,7 @@ described below.
 
 1. Open the [latest release](https://github.com/yaniv256/actions.json/releases/latest).
 2. Download `actions-json-overlay-runtime-<version>.zip`.
-   Do not download an `actions-json-mcp-*.tar.gz` file; those archives contain
-   bridge binaries, not the Chrome extension.
+   Native CLI archives begin with `actions-json-`; they are not Chrome extensions.
 3. Unzip the archive.
 4. Open `chrome://extensions`.
 5. Enable **Developer mode**.
@@ -222,8 +220,8 @@ It hydrates the extension only from one of these explicit local sources:
 export ACTIONS_JSON_OPENAI_API_KEY="sk-..."
 ```
 
-or an ignored `.actions-json.local.json` in the directory from which the bridge
-starts:
+or the per-user `~/.actions-json/config.json` file used by the installer and
+CLI:
 
 ```json
 {
@@ -231,9 +229,10 @@ starts:
 }
 ```
 
-Add `.actions-json.local.json` to `.gitignore` before creating it. The
-environment variable takes precedence. You can instead enter the key manually
-in the extension popup.
+The file is stored outside project repositories with user-only permissions, so
+credentials do not need to pass through an agent session. The environment
+variable takes precedence. You can instead enter the key manually in the
+extension popup.
 
 ### 4. Connect Chrome to the bridge
 
@@ -248,7 +247,11 @@ in the extension popup.
 Open **Settings → Bridge** only when you need a non-default address or the
 connection fails.
 
-Use `127.0.0.1` only when Chrome and the bridge run on the same computer.
+On WSL, the installer listens on `0.0.0.0:17345` so Windows localhost
+forwarding can reach it, while the extension continues to use
+`ws://127.0.0.1:17345/extension`. Privileged WebSocket and HTTP operations still
+require the installation secret; the WebSocket also requires an allow-listed
+extension origin.
 
 For cross-machine operation, the bridge can bind to `0.0.0.0:17345` and Chrome
 can connect to the bridge host's reachable VPN address. **This exposes the

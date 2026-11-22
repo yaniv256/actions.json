@@ -287,12 +287,10 @@ async fn every_legacy_http_tool_route_is_gated_not_only_tools_call() {
     }
 }
 
-/// The CORS preflight must stay open. A browser sends `OPTIONS` WITHOUT the
-/// Authorization header by design — gating it would make every credentialed
-/// cross-origin call fail at the preflight, i.e. the guard would break the very
-/// caller it is meant to admit.
+/// Compatibility HTTP is deliberately local-process-only. Browser preflights
+/// must fail even before bridge authentication is considered.
 #[tokio::test]
-async fn cors_preflight_is_not_gated() {
+async fn browser_preflight_is_refused() {
     let root = tempfile::tempdir().unwrap();
     write_local_config(root.path());
     let bridge = bridge(root.path());
@@ -303,11 +301,32 @@ async fn cors_preflight_is_not_gated() {
             request(&Method::OPTIONS, uri).body(Body::empty()).unwrap(),
         )
         .await;
-        assert_ne!(
-            status,
-            StatusCode::UNAUTHORIZED,
-            "OPTIONS {uri} must not be gated or every preflight fails; body was {body}"
-        );
+        assert_eq!(status, StatusCode::FORBIDDEN, "OPTIONS {uri}: {body}");
+        assert!(names_reason(&body, "browser_http_ingress_refused"));
+    }
+}
+
+#[tokio::test]
+async fn browser_origin_and_private_network_requests_are_refused_even_with_the_secret() {
+    let root = tempfile::tempdir().unwrap();
+    write_local_config(root.path());
+    let bridge = bridge(root.path());
+
+    for header_pair in [
+        (header::ORIGIN.as_str(), "https://attacker.example"),
+        ("access-control-request-private-network", "true"),
+    ] {
+        let (status, body) = send(
+            &bridge.app,
+            request(&Method::POST, "/mcp/tools/call")
+                .header(header::AUTHORIZATION, format!("Bearer {}", bridge.secret))
+                .header(header_pair.0, header_pair.1)
+                .body(tool_call_body())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{}: {body}", header_pair.0);
+        assert!(names_reason(&body, "browser_http_ingress_refused"));
     }
 }
 
@@ -361,11 +380,7 @@ async fn the_mcp_command_path_is_unaffected() {
     );
 
     for (method, uri) in GATED_ROUTES {
-        let (status, body) = send(
-            &app,
-            request(method, uri).body(tool_call_body()).unwrap(),
-        )
-        .await;
+        let (status, body) = send(&app, request(method, uri).body(tool_call_body()).unwrap()).await;
         assert_eq!(
             status,
             StatusCode::NOT_FOUND,
@@ -379,6 +394,10 @@ async fn the_mcp_command_path_is_unaffected() {
             Request::builder().uri(uri).body(Body::empty()).unwrap(),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{uri} must still answer in mcp mode");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{uri} must still answer in mcp mode"
+        );
     }
 }

@@ -14,7 +14,9 @@ test("release builds and packages from explicit workspace target directories", (
     script.includes("--target-dir '$WIN_REPO_WIN\\\\mcp\\\\target'"),
     "Windows Cargo builds must share the explicit workspace target directory",
   );
-  assert.match(script, /remote="\$MAC_REPO\/mcp\/target\/\$target\/release\/actions-json-mcp"/);
+  assert.match(script, /build_macos_on_github/);
+  assert.match(script, /gh run download/);
+  assert.doesNotMatch(script, /MAC_HOST|MAC_REPO|mac_ssh|scp -/);
 
   assert.doesNotMatch(
     script,
@@ -31,10 +33,7 @@ test("release verification cannot inherit same-version artifacts from a prior ru
     script,
     /rm -f "\$dist\/actions-json-overlay-runtime-\$\{version\}\.zip"/,
   );
-  assert.match(
-    script,
-    /"\$dist"\/actions-json-mcp-"\$version"-\*\.tar\.gz/,
-  );
+  assert.doesNotMatch(script, /actions-json-mcp-"\$version"-\*\.tar\.gz/);
   assert.match(
     script,
     /"\$dist"\/chrome-launcher-helper-"\$version"-\*\.tar\.gz/,
@@ -42,9 +41,11 @@ test("release verification cannot inherit same-version artifacts from a prior ru
 });
 
 test("quiet successful Windows commands are not converted into failures by log filtering", () => {
-  assert.match(script, /local output status/);
+  assert.match(script, /local output_file status/);
+  assert.match(script, />"\$output_file" 2>&1/);
   assert.match(script, /status=\$\?/);
-  assert.match(script, /grep -ivE [^\n]+ \|\| true/);
+  assert.match(script, /grep -ivE [^\n]+ "\$output_file" \|\| true/);
+  assert.match(script, /rm -f -- "\$output_file"/);
   assert.match(script, /return "\$status"/);
   assert.match(script, /exit \\\$LASTEXITCODE/);
 });
